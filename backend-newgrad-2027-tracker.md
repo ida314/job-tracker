@@ -218,16 +218,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_posting_seen:
 
 ### Mercury
-- ats: ashby
+- ats: greenhouse
 - slug: mercury
-- board_url: https://api.ashbyhq.com/posting-api/job-board/mercury
+- board_url: https://boards-api.greenhouse.io/v1/boards/mercury/jobs?content=true
 - careers_page: https://mercury.com/jobs
 - category: fintech-scaleup
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Confirm ATS on first run (Ashby likely).
+- notes: 2026-07-09 — migrated Ashby → Greenhouse. The old Ashby board still resolves but returns zero jobs, so it read as "no openings" rather than an error. Greenhouse board returns 57 roles.
 
 ### Modern Treasury
 - ats: ashby
@@ -289,15 +289,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - notes: Confirm slug.
 
 ### Vercel
-- ats: ashby
+- ats: greenhouse
 - slug: vercel
-- board_url: https://api.ashbyhq.com/posting-api/job-board/vercel
+- board_url: https://boards-api.greenhouse.io/v1/boards/vercel/jobs?content=true
 - careers_page: https://vercel.com/careers
 - category: devtools-infra
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
+- notes: 2026-07-09 — migrated Ashby → Greenhouse. Old Ashby board still resolves with zero jobs. Greenhouse board returns 67 roles.
 
 ### Linear
 - ats: ashby
