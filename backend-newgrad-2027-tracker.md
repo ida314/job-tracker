@@ -195,16 +195,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_posting_seen:
 
 ### Plaid
-- ats: greenhouse
+- ats: ashby
 - slug: plaid
-- board_url: https://boards-api.greenhouse.io/v1/boards/plaid/jobs?content=true
+- board_url: https://api.ashbyhq.com/posting-api/job-board/plaid
 - careers_page: https://plaid.com/careers
 - category: fintech-infra
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Confirm slug — may be "plaidinc" or similar on first run.
+- notes: 2026-07-09 — migrated Greenhouse → Ashby. Slug `plaid` on Ashby returns 106 roles. A stale empty Lever board (lever/plaid) also exists; ignore it.
 
 ### Rippling
 - ats: greenhouse
@@ -385,15 +385,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - notes: Confirm slug on first run.
 
 ### Sentry
-- ats: greenhouse
+- ats: ashby
 - slug: sentry
-- board_url: https://boards-api.greenhouse.io/v1/boards/sentry/jobs?content=true
+- board_url: https://api.ashbyhq.com/posting-api/job-board/sentry
 - careers_page: https://sentry.io/careers
 - category: observability-infra
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
+- notes: 2026-07-09 — migrated Greenhouse → Ashby (slug unchanged).
 
 ### Grafana Labs
 - ats: greenhouse
@@ -430,15 +431,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_posting_seen:
 
 ### Airbyte
-- ats: greenhouse
+- ats: ashby
 - slug: airbyte
-- board_url: https://boards-api.greenhouse.io/v1/boards/airbyte/jobs?content=true
-- careers_page: https://airbyte.com/careers
+- board_url: https://api.ashbyhq.com/posting-api/job-board/airbyte
+- careers_page: https://airbyte.com/company/careers
 - category: data-infra
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
+- notes: 2026-07-09 — migrated Greenhouse → Ashby (slug unchanged). Small board (~13 roles).
 
 ### Okta / Auth0
 - ats: greenhouse
