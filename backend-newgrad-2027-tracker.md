@@ -278,15 +278,15 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 
 ### dbt Labs
 - ats: greenhouse
-- slug: dbtlabs
-- board_url: https://boards-api.greenhouse.io/v1/boards/dbtlabs/jobs?content=true
-- careers_page: https://www.getdbt.com/careers
+- slug: dbtlabsinc
+- board_url: https://boards-api.greenhouse.io/v1/boards/dbtlabsinc/jobs?content=true
+- careers_page: https://www.getdbt.com/about-us/careers
 - category: data-infra
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Confirm slug.
+- notes: 2026-07-09 — slug was wrong (`dbtlabs` 404s). Correct slug is `dbtlabsinc`, board name "dbt Labs". Board is valid but currently returns 0 open reqs — that's a real empty board, not a broken slug.
 
 ### Vercel
 - ats: greenhouse
@@ -606,15 +606,15 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 
 ### Cedar
 - ats: greenhouse
-- slug: cedar
-- board_url: https://boards-api.greenhouse.io/v1/boards/cedar/jobs?content=true
-- careers_page: https://www.cedar.com/careers
+- slug: careportalinc
+- board_url: https://boards-api.greenhouse.io/v1/boards/careportalinc/jobs?content=true
+- careers_page: https://www.cedar.com/careers/open-roles
 - category: healthtech-backend
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: NYC healthtech. Confirm slug.
+- notes: NYC healthtech. 2026-07-09 — real slug is the legal entity `careportalinc` (board name "Cedar", 15 roles), read from the Greenhouse embed on their open-roles page. WARNING — do NOT use `cedar`: `ashby/cedar` is a live board belonging to an unrelated mortgage/real-estate Cedar and would silently feed wrong roles into this tracker.
 
 ### SoFi
 - ats: greenhouse
@@ -663,15 +663,15 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 
 ### Root Insurance
 - ats: greenhouse
-- slug: rootinsurance
-- board_url: https://boards-api.greenhouse.io/v1/boards/rootinsurance/jobs?content=true
-- careers_page: https://www.joinroot.com/careers
+- slug: root
+- board_url: https://boards-api.greenhouse.io/v1/boards/root/jobs?content=true
+- careers_page: https://inc.joinroot.com/careers/
 - category: insurtech-backend
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Confirm slug.
+- notes: 2026-07-09 — slug was wrong (`rootinsurance` 404s). Correct slug is `root`, board name "Root". Board is valid but currently returns 0 open reqs — a real empty board, not a broken slug.
 
 ---
 
@@ -805,15 +805,15 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 
 ### HubSpot
 - ats: greenhouse
-- slug: hubspot
-- board_url: https://boards-api.greenhouse.io/v1/boards/hubspot/jobs?content=true
+- slug: hubspotjobs
+- board_url: https://boards-api.greenhouse.io/v1/boards/hubspotjobs/jobs?content=true
 - careers_page: https://www.hubspot.com/careers
 - category: saas-backend
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Confirm slug. Strong eng culture, backend in Java/Kotlin.
+- notes: Strong eng culture, backend in Java/Kotlin. 2026-07-09 — `hubspot` is a decoy: it's a real board named "HubSpot Product" that returns 0 jobs, so it never 404s. The live board is `hubspotjobs` (175 roles).
 
 ### Asana
 - ats: greenhouse
