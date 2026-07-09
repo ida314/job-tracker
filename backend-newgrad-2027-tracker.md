@@ -466,28 +466,28 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_posting_seen:
 
 ### Redis
-- ats: greenhouse
-- slug: redislabs
-- board_url: https://boards-api.greenhouse.io/v1/boards/redislabs/jobs?content=true
-- careers_page: https://redis.io/careers
+- ats: ashby
+- slug: redis
+- board_url: https://api.ashbyhq.com/posting-api/job-board/redis
+- careers_page: https://redis.io/company/careers/
 - category: database-infra
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Confirm slug (may be "redis" or "redislabs").
+- notes: 2026-07-09 — resolved: migrated Greenhouse → Ashby, and the slug is `redis`, not `redislabs`. Returns 58 roles.
 
 ### Kong
-- ats: greenhouse
-- slug: konginc
-- board_url: https://boards-api.greenhouse.io/v1/boards/konginc/jobs?content=true
-- careers_page: https://konghq.com/careers
+- ats: ashby
+- slug: kong
+- board_url: https://api.ashbyhq.com/posting-api/job-board/kong
+- careers_page: https://konghq.com/company/careers
 - category: infra-apigateway
 - check_method: api
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: API gateway. Confirm slug.
+- notes: API gateway. 2026-07-09 — resolved: migrated Greenhouse → Ashby, slug is `kong`, not `konginc`.
 
 ---
 
