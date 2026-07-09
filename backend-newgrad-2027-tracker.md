@@ -172,16 +172,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_posting_seen:
 
 ### Retool
-- ats: greenhouse
+- ats: gem
 - slug: retool
-- board_url: https://boards-api.greenhouse.io/v1/boards/retool/jobs?content=true
+- board_url: https://jobs.gem.com/retool
 - careers_page: https://retool.com/careers
 - category: devtools
-- check_method: api
+- check_method: manual
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Confirm slug on first run.
+- notes: 2026-07-09 — not on Greenhouse (404). Real board is Gem (jobs.gem.com/retool). Gem exposes no keyless public JSON API — every path returns the SPA shell — so this is manual until a feed is found.
 
 ### Brex
 - ats: greenhouse
@@ -207,15 +207,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - notes: 2026-07-09 — migrated Greenhouse → Ashby. Slug `plaid` on Ashby returns 106 roles. A stale empty Lever board (lever/plaid) also exists; ignore it.
 
 ### Rippling
-- ats: greenhouse
-- slug: rippling
-- board_url: https://boards-api.greenhouse.io/v1/boards/rippling/jobs?content=true
-- careers_page: https://www.rippling.com/careers
+- ats: bespoke
+- slug:
+- board_url:
+- careers_page: https://www.rippling.com/careers/open-roles
 - category: saas-backend
-- check_method: api
+- check_method: manual
 - status: not-open
 - last_checked:
 - last_posting_seen:
+- notes: 2026-07-09 — not on Greenhouse/Lever/Ashby (all 404). Rippling runs its own ATS product; ats.rippling.com/rippling/jobs 307-redirects to their site. No public JSON endpoint found.
 
 ### Mercury
 - ats: greenhouse
@@ -325,16 +326,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - notes: Likely Workday/bespoke — verify. Strong data-platform learning if reachable.
 
 ### HashiCorp
-- ats: greenhouse
-- slug: hashicorp
-- board_url: https://boards-api.greenhouse.io/v1/boards/hashicorp/jobs?content=true
-- careers_page: https://www.hashicorp.com/careers
+- ats: bespoke
+- slug:
+- board_url:
+- careers_page: https://www.hashicorp.com/en/careers/open-positions
 - category: infra-devtools
-- check_method: api
+- check_method: manual
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Now part of IBM — ATS may migrate. Confirm on first run.
+- notes: 2026-07-09 — the predicted IBM migration happened. Gone from Greenhouse, Lever and Ashby (all 404). Careers page is now powered by IBM Careers. Manual until/unless an IBM feed is wired up.
 
 ### Samsara
 - ats: greenhouse
@@ -546,16 +547,16 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - notes: Engineering new-analyst program. NYC. Very early deadlines.
 
 ### Two Sigma
-- ats: greenhouse
-- slug: twosigma
-- board_url: https://boards-api.greenhouse.io/v1/boards/twosigma/jobs?content=true
+- ats: bespoke
+- slug:
+- board_url:
 - careers_page: https://careers.twosigma.com
 - category: quant-eng
-- check_method: api
+- check_method: manual
 - status: not-open
 - last_checked:
 - last_posting_seen:
-- notes: Confirm slug. NYC. Strong systems work.
+- notes: NYC. Strong systems work. 2026-07-09 — not on Greenhouse/Lever/Ashby (all 404); own portal at careers.twosigma.com.
 
 ### Jane Street
 - ats: bespoke
