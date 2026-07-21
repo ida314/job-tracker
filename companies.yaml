@@ -1,0 +1,753 @@
+# Curated target list. Human-authored, git-tracked, NEVER machine-written.
+# Generated once from backend-newgrad-2027-tracker.md by `jobtracker migrate`.
+# No status / last_checked here — run state lives in state.db (DESIGN.md §5).
+# expected_board_name is bootstrapped by `jobtracker verify-slugs --write`.
+
+- name: Stripe
+  ats: greenhouse
+  slug: stripe
+  tier: 1
+  category: backend-scaleup
+  check_method: api
+  careers_page: https://stripe.com/jobs/search
+  notes: New-grad roles typically open late summer/fall. High bar; apply early.
+  expected_board_name: Stripe
+- name: Databricks
+  ats: greenhouse
+  slug: databricks
+  tier: 1
+  category: data-infra
+  check_method: api
+  careers_page: https://www.databricks.com/company/careers
+  notes: Confirmed ~755 open reqs mid-2026. Strong data/backend learning.
+  expected_board_name: Databricks
+- name: Ramp
+  ats: ashby
+  slug: ramp
+  tier: 1
+  category: fintech-scaleup
+  check_method: api
+  careers_page: https://ramp.com/careers
+  notes: Ashby AI-scores resumes — keep resume clean/scannable, skills listed explicitly.
+  expected_board_name: ramp
+- name: Datadog
+  ats: greenhouse
+  slug: datadog
+  tier: 1
+  category: observability-infra
+  check_method: api
+  careers_page: https://careers.datadoghq.com
+  notes: Heavy backend/data-pipeline work. Known for structured eng.
+  expected_board_name: Datadog
+- name: Confluent
+  ats: ashby
+  slug: confluent
+  tier: 1
+  category: infra-devtools
+  check_method: api
+  careers_page: https://www.confluent.io/careers
+  notes: Kafka company — excellent distributed-systems learning.
+  expected_board_name: confluent
+- name: MongoDB
+  ats: greenhouse
+  slug: mongodb
+  tier: 1
+  category: database-infra
+  check_method: api
+  careers_page: https://www.mongodb.com/careers
+  notes: Database internals exposure. NYC HQ — good for NYC preference.
+  expected_board_name: MongoDB
+- name: Cloudflare
+  ats: greenhouse
+  slug: cloudflare
+  tier: 1
+  category: infra-networking
+  check_method: api
+  careers_page: https://www.cloudflare.com/careers
+  notes: Systems/networking depth. Runs a defined new-grad program most years.
+  expected_board_name: Cloudflare
+- name: Airtable
+  ats: greenhouse
+  slug: airtable
+  tier: 1
+  category: saas-backend
+  check_method: api
+  careers_page: https://airtable.com/careers
+  expected_board_name: Airtable
+- name: Notion
+  ats: ashby
+  slug: notion
+  tier: 1
+  category: saas-backend
+  check_method: api
+  careers_page: https://www.notion.so/careers
+  expected_board_name: notion
+- name: Figma
+  ats: greenhouse
+  slug: figma
+  tier: 1
+  category: saas-backend
+  check_method: api
+  careers_page: https://www.figma.com/careers
+  expected_board_name: Figma
+- name: Retool
+  ats: gem
+  slug: retool
+  tier: 1
+  category: devtools
+  check_method: manual
+  careers_page: https://retool.com/careers
+  notes: 2026-07-09 — not on Greenhouse (404). Real board is Gem (jobs.gem.com/retool). Gem exposes no
+    keyless public JSON API — every path returns the SPA shell — so this is manual until a feed is found.
+  expected_board_name: null
+- name: Brex
+  ats: greenhouse
+  slug: brex
+  tier: 1
+  category: fintech-scaleup
+  check_method: api
+  careers_page: https://www.brex.com/careers
+  expected_board_name: Brex
+- name: Plaid
+  ats: ashby
+  slug: plaid
+  tier: 1
+  category: fintech-infra
+  check_method: api
+  careers_page: https://plaid.com/careers
+  notes: 2026-07-09 — migrated Greenhouse → Ashby. Slug `plaid` on Ashby returns 106 roles. A stale empty
+    Lever board (lever/plaid) also exists; ignore it.
+  expected_board_name: plaid
+- name: Rippling
+  ats: bespoke
+  tier: 1
+  category: saas-backend
+  check_method: manual
+  careers_page: https://www.rippling.com/careers/open-roles
+  notes: 2026-07-09 — not on Greenhouse/Lever/Ashby (all 404). Rippling runs its own ATS product; ats.rippling.com/rippling/jobs
+    307-redirects to their site. No public JSON endpoint found.
+  expected_board_name: null
+- name: Mercury
+  ats: greenhouse
+  slug: mercury
+  tier: 1
+  category: fintech-scaleup
+  check_method: api
+  careers_page: https://mercury.com/jobs
+  notes: 2026-07-09 — migrated Ashby → Greenhouse. The old Ashby board still resolves but returns zero
+    jobs, so it read as "no openings" rather than an error. Greenhouse board returns 57 roles.
+  expected_board_name: Mercury
+- name: Modern Treasury
+  ats: ashby
+  slug: moderntreasury
+  tier: 1
+  category: fintech-infra
+  check_method: api
+  careers_page: https://www.moderntreasury.com/careers
+  notes: Payments-rails backend. Confirm slug.
+  expected_board_name: moderntreasury
+- name: Temporal
+  ats: ashby
+  slug: temporal
+  tier: 1
+  category: infra-devtools
+  check_method: api
+  careers_page: https://temporal.io/careers
+  notes: Durable-execution/distributed-systems. Confirm ATS+slug.
+  expected_board_name: temporal
+- name: Cockroach Labs
+  ats: greenhouse
+  slug: cockroachlabs
+  tier: 1
+  category: database-infra
+  check_method: api
+  careers_page: https://www.cockroachlabs.com/careers
+  notes: Distributed SQL database internals. NYC HQ. Confirm slug on first run.
+  expected_board_name: Cockroach Labs
+- name: Fivetran
+  ats: greenhouse
+  slug: fivetran
+  tier: 1
+  category: data-infra
+  check_method: api
+  careers_page: https://www.fivetran.com/careers
+  expected_board_name: 'Fivetran '
+- name: dbt Labs
+  ats: greenhouse
+  slug: dbtlabsinc
+  tier: 1
+  category: data-infra
+  check_method: api
+  careers_page: https://www.getdbt.com/about-us/careers
+  notes: 2026-07-09 — slug was wrong (`dbtlabs` 404s). Correct slug is `dbtlabsinc`, board name "dbt Labs".
+    Board is valid but currently returns 0 open reqs — that's a real empty board, not a broken slug.
+  expected_board_name: dbt Labs
+- name: Vercel
+  ats: greenhouse
+  slug: vercel
+  tier: 1
+  category: devtools-infra
+  check_method: api
+  careers_page: https://vercel.com/careers
+  notes: 2026-07-09 — migrated Ashby → Greenhouse. Old Ashby board still resolves with zero jobs. Greenhouse
+    board returns 67 roles.
+  expected_board_name: Vercel
+- name: Linear
+  ats: ashby
+  slug: linear
+  tier: 1
+  category: devtools
+  check_method: api
+  careers_page: https://linear.app/careers
+  notes: Small team, high bar. Backend roles rare but high-quality.
+  expected_board_name: linear
+- name: Snowflake
+  ats: unknown
+  tier: 1
+  category: data-infra
+  check_method: manual
+  careers_page: https://careers.snowflake.com
+  notes: Likely Workday/bespoke — verify. Strong data-platform learning if reachable.
+  expected_board_name: null
+- name: HashiCorp
+  ats: bespoke
+  tier: 1
+  category: infra-devtools
+  check_method: manual
+  careers_page: https://www.hashicorp.com/en/careers/open-positions
+  notes: 2026-07-09 — the predicted IBM migration happened. Gone from Greenhouse, Lever and Ashby (all
+    404). Careers page is now powered by IBM Careers. Manual until/unless an IBM feed is wired up.
+  expected_board_name: null
+- name: Samsara
+  ats: greenhouse
+  slug: samsara
+  tier: 1
+  category: iot-backend
+  check_method: api
+  careers_page: https://www.samsara.com/company/careers
+  expected_board_name: Samsara
+- name: Flexport
+  ats: greenhouse
+  slug: flexport
+  tier: 1
+  category: logistics-backend
+  check_method: api
+  careers_page: https://www.flexport.com/careers
+  expected_board_name: Flexport
+- name: Elastic
+  ats: greenhouse
+  slug: elastic
+  tier: 2
+  category: infra-search
+  check_method: api
+  careers_page: https://www.elastic.co/careers
+  expected_board_name: Elastic
+- name: Twilio
+  ats: greenhouse
+  slug: twilio
+  tier: 2
+  category: infra-comms
+  check_method: api
+  careers_page: https://www.twilio.com/en-us/company/jobs
+  notes: Confirm slug on first run.
+  expected_board_name: Twilio
+- name: Sentry
+  ats: ashby
+  slug: sentry
+  tier: 2
+  category: observability-infra
+  check_method: api
+  careers_page: https://sentry.io/careers
+  notes: 2026-07-09 — migrated Greenhouse → Ashby (slug unchanged).
+  expected_board_name: sentry
+- name: Grafana Labs
+  ats: greenhouse
+  slug: grafanalabs
+  tier: 2
+  category: observability-infra
+  check_method: api
+  careers_page: https://grafana.com/about/careers
+  notes: Confirm slug. Remote-heavy.
+  expected_board_name: Grafana Labs
+- name: LaunchDarkly
+  ats: greenhouse
+  slug: launchdarkly
+  tier: 2
+  category: devtools-infra
+  check_method: api
+  careers_page: https://launchdarkly.com/careers
+  expected_board_name: LaunchDarkly
+- name: Postman
+  ats: greenhouse
+  slug: postman
+  tier: 2
+  category: devtools
+  check_method: api
+  careers_page: https://www.postman.com/company/careers
+  expected_board_name: Postman
+- name: Airbyte
+  ats: ashby
+  slug: airbyte
+  tier: 2
+  category: data-infra
+  check_method: api
+  careers_page: https://airbyte.com/company/careers
+  notes: 2026-07-09 — migrated Greenhouse → Ashby (slug unchanged). Small board (~13 roles).
+  expected_board_name: airbyte
+- name: Okta / Auth0
+  ats: greenhouse
+  slug: okta
+  tier: 2
+  category: infra-identity
+  check_method: api
+  careers_page: https://www.okta.com/company/careers
+  notes: Identity/auth backend. Confirm slug.
+  expected_board_name: Okta
+- name: Vanta
+  ats: ashby
+  slug: vanta
+  tier: 2
+  category: security-saas
+  check_method: api
+  careers_page: https://www.vanta.com/careers
+  expected_board_name: vanta
+- name: Redis
+  ats: ashby
+  slug: redis
+  tier: 2
+  category: database-infra
+  check_method: api
+  careers_page: https://redis.io/company/careers/
+  notes: '2026-07-09 — resolved: migrated Greenhouse → Ashby, and the slug is `redis`, not `redislabs`.
+    Returns 58 roles.'
+  expected_board_name: redis
+- name: Kong
+  ats: ashby
+  slug: kong
+  tier: 2
+  category: infra-apigateway
+  check_method: api
+  careers_page: https://konghq.com/company/careers
+  notes: 'API gateway. 2026-07-09 — resolved: migrated Greenhouse → Ashby, slug is `kong`, not `konginc`.'
+  expected_board_name: kong
+- name: Bloomberg
+  ats: bespoke
+  tier: 3
+  category: fintech-eng
+  check_method: manual
+  careers_page: https://careers.bloomberg.com
+  notes: Excellent eng culture, strong new-grad program, NYC. Check the campus/new-grad section directly.
+  expected_board_name: null
+- name: Capital One
+  ats: workday
+  tier: 3
+  category: fintech-eng
+  check_method: manual
+  careers_page: https://www.capitalonecareers.com
+  notes: Large structured new-grad TDP (Technology Development Program). Real backend/AWS learning.
+  expected_board_name: null
+- name: JPMorgan Chase
+  ats: workday
+  tier: 3
+  category: fintech-eng
+  check_method: manual
+  careers_page: https://careers.jpmorgan.com
+  notes: Software Engineer Program (SEP) — big new-grad cohort. Apply early, fills fast.
+  expected_board_name: null
+- name: Goldman Sachs
+  ats: bespoke
+  tier: 3
+  category: fintech-eng
+  check_method: manual
+  careers_page: https://www.goldmansachs.com/careers
+  notes: Engineering new-analyst program. NYC. Very early deadlines.
+  expected_board_name: null
+- name: Two Sigma
+  ats: bespoke
+  tier: 3
+  category: quant-eng
+  check_method: manual
+  careers_page: https://careers.twosigma.com
+  notes: NYC. Strong systems work. 2026-07-09 — not on Greenhouse/Lever/Ashby (all 404); own portal at
+    careers.twosigma.com.
+  expected_board_name: null
+- name: Jane Street
+  ats: bespoke
+  tier: 3
+  category: quant-eng
+  check_method: manual
+  careers_page: https://www.janestreet.com/join-jane-street
+  notes: OCaml, but elite training. NYC. Own application portal.
+  expected_board_name: null
+- name: Fidelity
+  ats: workday
+  tier: 3
+  category: fintech-eng
+  check_method: manual
+  careers_page: https://jobs.fidelity.com
+  expected_board_name: null
+- name: Epic Systems
+  ats: bespoke
+  tier: 3
+  category: healthtech-eng
+  check_method: manual
+  careers_page: https://careers.epic.com
+  notes: Wisconsin (relocation). Large new-grad SWE hirer, strong training.
+  expected_board_name: null
+- name: Oscar Health
+  ats: greenhouse
+  slug: oscar
+  tier: 3
+  category: healthtech-backend
+  check_method: api
+  careers_page: https://www.hioscar.com/careers
+  notes: NYC. Confirm slug.
+  expected_board_name: Oscar Health
+- name: Cedar
+  ats: greenhouse
+  slug: careportalinc
+  tier: 3
+  category: healthtech-backend
+  check_method: api
+  careers_page: https://www.cedar.com/careers/open-roles
+  notes: 'NYC healthtech. 2026-07-09 — real slug is the legal entity `careportalinc` (board name "Cedar",
+    15 roles), read from the Greenhouse embed on their open-roles page. WARNING — do NOT use `cedar`:
+    `ashby/cedar` is a live board belonging to an unrelated mortgage/real-estate Cedar and would silently
+    feed wrong roles into this tracker.'
+  expected_board_name: Cedar
+- name: SoFi
+  ats: greenhouse
+  slug: sofi
+  tier: 3
+  category: fintech-backend
+  check_method: api
+  careers_page: https://www.sofi.com/careers
+  expected_board_name: SoFi
+- name: Affirm
+  ats: greenhouse
+  slug: affirm
+  tier: 3
+  category: fintech-backend
+  check_method: api
+  careers_page: https://www.affirm.com/careers
+  expected_board_name: Affirm
+- name: Chime
+  ats: greenhouse
+  slug: chime
+  tier: 3
+  category: fintech-backend
+  check_method: api
+  careers_page: https://careers.chime.com
+  expected_board_name: Chime Financial, Inc
+- name: Betterment
+  ats: greenhouse
+  slug: betterment
+  tier: 3
+  category: fintech-backend
+  check_method: api
+  careers_page: https://www.betterment.com/careers
+  notes: NYC.
+  expected_board_name: Betterment
+- name: Root Insurance
+  ats: greenhouse
+  slug: root
+  tier: 3
+  category: insurtech-backend
+  check_method: api
+  careers_page: https://inc.joinroot.com/careers/
+  notes: 2026-07-09 — slug was wrong (`rootinsurance` 404s). Correct slug is `root`, board name "Root".
+    Board is valid but currently returns 0 open reqs — a real empty board, not a broken slug.
+  expected_board_name: Root
+- name: Amazon
+  ats: bespoke
+  tier: 4
+  category: bigtech
+  check_method: manual
+  careers_page: https://www.amazon.jobs/en/teams/internships-for-students
+  notes: SDE I new-grad, huge cohort, structured onboarding. Applies year-round.
+  expected_board_name: null
+- name: Microsoft
+  ats: bespoke
+  tier: 4
+  category: bigtech
+  check_method: manual
+  careers_page: https://careers.microsoft.com/students
+  notes: New-grad SWE, strong backend/cloud (Azure) training.
+  expected_board_name: null
+- name: Google
+  ats: bespoke
+  tier: 4
+  category: bigtech
+  check_method: manual
+  careers_page: https://www.google.com/about/careers/applications/students
+  expected_board_name: null
+- name: Meta
+  ats: bespoke
+  tier: 4
+  category: bigtech
+  check_method: manual
+  careers_page: https://www.metacareers.com/students-and-grads
+  expected_board_name: null
+- name: Uber
+  ats: bespoke
+  tier: 4
+  category: bigtech-backend
+  check_method: manual
+  careers_page: https://www.uber.com/us/en/careers/teams/university
+  notes: Strong backend/distributed-systems. Verify portal type on first run.
+  expected_board_name: null
+- name: Airbnb
+  ats: greenhouse
+  slug: airbnb
+  tier: 4
+  category: bigtech-backend
+  check_method: api
+  careers_page: https://careers.airbnb.com
+  notes: Confirmed Greenhouse — auto-checkable despite being large.
+  expected_board_name: Airbnb
+- name: LinkedIn
+  ats: bespoke
+  tier: 4
+  category: bigtech-backend
+  check_method: manual
+  careers_page: https://careers.linkedin.com/students
+  expected_board_name: null
+- name: Palantir
+  ats: lever
+  slug: palantir
+  tier: 4
+  category: bigtech-backend
+  check_method: api
+  careers_page: https://www.palantir.com/careers
+  notes: Confirmed Lever (~220 reqs mid-2026). Auto-checkable.
+  expected_board_name: palantir
+- name: Coinbase
+  ats: greenhouse
+  slug: coinbase
+  tier: 4
+  category: crypto-backend
+  check_method: api
+  careers_page: https://www.coinbase.com/careers
+  notes: Confirm slug.
+  expected_board_name: Coinbase
+- name: Nvidia
+  ats: workday
+  slug: nvidia / wd5 / NVIDIAExternalCareerSite
+  tier: 4
+  category: bigtech
+  check_method: manual
+  careers_page: https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite
+  notes: Workday tenant known (nvidia/wd5). Auto-check only if agent supports Workday facet API; else
+    manual.
+  expected_board_name: null
+- name: Dropbox
+  ats: greenhouse
+  slug: dropbox
+  tier: 5
+  category: saas-backend
+  check_method: api
+  careers_page: https://jobs.dropbox.com
+  expected_board_name: Dropbox
+- name: HubSpot
+  ats: greenhouse
+  slug: hubspotjobs
+  tier: 5
+  category: saas-backend
+  check_method: api
+  careers_page: https://www.hubspot.com/careers
+  notes: 'Strong eng culture, backend in Java/Kotlin. 2026-07-09 — `hubspot` is a decoy: it''s a real
+    board named "HubSpot Product" that returns 0 jobs, so it never 404s. The live board is `hubspotjobs`
+    (175 roles).'
+  expected_board_name: HubSpot
+- name: Asana
+  ats: greenhouse
+  slug: asana
+  tier: 5
+  category: saas-backend
+  check_method: api
+  careers_page: https://asana.com/jobs
+  expected_board_name: Asana
+- name: Instacart
+  ats: greenhouse
+  slug: instacart
+  tier: 5
+  category: marketplace-backend
+  check_method: api
+  careers_page: https://instacart.careers
+  expected_board_name: Instacart
+- name: Reddit
+  ats: greenhouse
+  slug: reddit
+  tier: 5
+  category: consumer-backend
+  check_method: api
+  careers_page: https://www.redditinc.com/careers
+  expected_board_name: Reddit
+- name: Discord
+  ats: greenhouse
+  slug: discord
+  tier: 5
+  category: consumer-backend
+  check_method: api
+  careers_page: https://discord.com/careers
+  notes: Elixir/Rust/Python backend. Real-time systems.
+  expected_board_name: Discord
+- name: Lyft
+  ats: greenhouse
+  slug: lyft
+  tier: 5
+  category: marketplace-backend
+  check_method: api
+  careers_page: https://www.lyft.com/careers
+  expected_board_name: Lyft
+- name: Pinterest
+  ats: greenhouse
+  slug: pinterest
+  tier: 5
+  category: consumer-backend
+  check_method: api
+  careers_page: https://www.pinterestcareers.com
+  expected_board_name: Pinterest
+- name: Robinhood
+  ats: greenhouse
+  slug: robinhood
+  tier: 5
+  category: fintech-backend
+  check_method: api
+  careers_page: https://careers.robinhood.com
+  expected_board_name: Robinhood
+- name: GitLab
+  ats: greenhouse
+  slug: gitlab
+  tier: 5
+  category: devtools-backend
+  check_method: api
+  careers_page: https://about.gitlab.com/jobs
+  notes: Fully remote. Confirm slug.
+  expected_board_name: GitLab
+- name: Gusto
+  ats: greenhouse
+  slug: gusto
+  tier: 5
+  category: fintech-backend
+  check_method: api
+  careers_page: https://gusto.com/about/careers
+  expected_board_name: Gusto, Inc.
+- name: Amplitude
+  ats: greenhouse
+  slug: amplitude
+  tier: 5
+  category: data-saas
+  check_method: api
+  careers_page: https://amplitude.com/careers
+  expected_board_name: 'Amplitude '
+- name: Faire
+  ats: greenhouse
+  slug: faire
+  tier: 5
+  category: marketplace-backend
+  check_method: api
+  careers_page: https://www.faire.com/careers
+  expected_board_name: Faire
+- name: Workday
+  ats: workday
+  tier: 5
+  category: enterprise-saas
+  check_method: manual
+  careers_page: https://www.workday.com/en-us/company/careers.html
+  notes: Ironically Workday itself. Large new-grad program.
+  expected_board_name: null
+- name: Intuit
+  ats: workday
+  tier: 5
+  category: enterprise-saas
+  check_method: manual
+  careers_page: https://www.intuit.com/careers/students
+  notes: Structured new-grad program, backend in Java.
+  expected_board_name: null
+- name: Walmart Global Tech
+  ats: workday
+  tier: 5
+  category: enterprise-backend
+  check_method: manual
+  careers_page: https://careers.walmart.com/technology
+  notes: Large new-grad SWE, real scale. Often overlooked.
+  expected_board_name: null
+- name: Target Tech
+  ats: workday
+  tier: 5
+  category: enterprise-backend
+  check_method: manual
+  careers_page: https://tech.target.com/job-search
+  expected_board_name: null
+- name: ByteDance Seed
+  ats: bespoke
+  tier: 6
+  category: chinese-frontier-ai
+  check_method: manual
+  careers_page: https://seed.bytedance.com/en/career
+  notes: Best US bridge on this tier. Seed's own page is marketing only — every "Apply" links
+  expected_board_name: null
+- name: Alibaba (Qwen / Tongyi Lab)
+  ats: bespoke
+  tier: 6
+  category: chinese-frontier-ai
+  check_method: manual
+  careers_page: https://talent.alibaba.com/en/home
+  notes: careers.alibaba.com 302s here — this is the canonical portal. No separate Qwen
+  expected_board_name: null
+- name: DeepSeek
+  ats: bespoke
+  tier: 6
+  category: chinese-frontier-ai
+  check_method: manual
+  careers_page: https://talent.deepseek.com/
+  notes: Purest frontier-lab target on this tier. Self-hosted React SPA; JS bundle grepped,
+  expected_board_name: null
+- name: MiniMax
+  ats: bespoke
+  tier: 6
+  category: chinese-frontier-ai
+  check_method: manual
+  careers_page: https://www.minimax.io/careers
+  notes: Feishu board at vrfi1sk8a0.jobs.feishu.cn, entity confirmed as MiniMax; 405 on
+  expected_board_name: null
+- name: Zhipu AI / Z.ai
+  ats: bespoke
+  tier: 6
+  category: chinese-frontier-ai
+  check_method: manual
+  careers_page: https://zhipu-ai.jobs.feishu.cn/
+  notes: Feishu board, entity confirmed as 智谱华章科技股份有限公司; 405 on unauthenticated API.
+  expected_board_name: null
+- name: Moonshot AI (Kimi)
+  ats: bespoke
+  tier: 6
+  category: chinese-frontier-ai
+  check_method: manual
+  careers_page: https://careers.kimi.com/
+  notes: Also hosts a Feishu board at moonshot.jobs.feishu.cn, entity confirmed as
+  expected_board_name: null
+- name: Shanghai AI Laboratory
+  ats: bespoke
+  tier: 6
+  category: chinese-frontier-ai
+  check_method: manual
+  careers_page: https://www.shlab.org.cn/joinus
+  notes: Application flow splits into /joinus/social and /joinus/campus with an email fallback
+  expected_board_name: null
+- name: Simplify New-Grad-Positions
+  ats: aggregator
+  check_method: aggregator
+  notes: README table of 2026/2027 new-grad roles; updates via commits. Diff the raw README.
+  expected_board_name: null
+- name: Ouckah / CVrve New-Grad list
+  ats: aggregator
+  check_method: aggregator
+  notes: Verify current repo name/URL on first run — these repos rename by cycle year.
+  expected_board_name: null
+- name: YC Work at a Startup
+  ats: aggregator
+  check_method: manual
+  notes: Filter backend + entry-level. Requires login; agent flags for manual check.
+  expected_board_name: null
