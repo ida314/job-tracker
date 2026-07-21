@@ -1,0 +1,18 @@
+[project]
+name = "jobtracker"
+version = "0.1.0"
+description = "Deterministic backend new-grad job-discovery pipeline (Design A)."
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.32",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+jobtracker = "jobtracker.cli:main"
+
+[tool.setuptools]
+packages = ["jobtracker", "jobtracker.sources"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,3 @@
+# Runtime dependencies (pinned for reproducible container builds).
+requests==2.34.2
+PyYAML==6.0.3
