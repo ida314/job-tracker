@@ -1,0 +1,175 @@
+# Match criteria — the corrected, parser-validated successor to the fenced YAML
+# block in backend-newgrad-2027-tracker.md.
+#
+# That block was never valid YAML (`"SDE I` was an unterminated quote) and nothing
+# ever parsed it, because its only consumer was an LLM reading it as prose. This file
+# is loaded and validated by jobtracker/criteria.py on every run — it is the component
+# that can now be *detectably* wrong (DESIGN.md §2.1).
+#
+# Matching is deterministic and gated primarily on LEVEL (is this a new-grad / entry
+# role?), because 2027 new-grad is the whole target. See jobtracker/match.py for how
+# these lists combine into a MATCH / REJECT / UNCERTAIN verdict.
+
+# Explicit entry-level / new-grad signals in a title. Presence of one (with no exclude
+# hit) yields MATCH. Absence yields UNCERTAIN — the level lives in the JD body, which
+# only the deferred LLM pass reads.
+level_include:
+  - new grad
+  - new graduate
+  - entry level
+  - entry-level
+  - associate
+  - university grad
+  - university graduate
+  - early career
+  - early-career
+  - "2027"
+  - "L3"
+  - "E3"
+  - "SDE I"
+  - "SWE I"
+  - "Software Engineer I"
+  - junior
+  - grad
+
+# Hard disqualifiers in a title -> REJECT. Order-independent; first hit wins the reason.
+# Short tokens (ii, iii, vp) are matched on alphanumeric boundaries so "ii" does not
+# fire inside "iii" and "iii" does not fire inside a word.
+exclude_titles:
+  - senior
+  - "sr."
+  - staff
+  - principal
+  - lead
+  - manager
+  - director
+  - head of
+  - vp
+  - intern
+  - internship
+  - ii
+  - iii
+  - "2026 grad"
+  - "2025 grad"
+  - contractor
+  - "5+ years"
+  - "3+ years"
+  - clearance          # citizenship_note: exclude roles needing active clearance
+
+# Engineering signal. A MATCH requires a level token AND an engineering signal — either
+# a backend-specific term below (role_type_include) or a generic engineering term here.
+# This is what stops "Finance Associate" / "Operations Associate" (level word, no eng)
+# from matching a backend tracker. A level word on a non-engineering title -> REJECT.
+engineering_terms:
+  - engineer
+  - engineering
+  - developer
+  - software
+  - programmer
+  - swe
+  - sde
+  - sre
+  - devops
+
+# Backend-relevance signal. A hit here both satisfies the engineering gate and is noted
+# in the verdict reason as backend-relevant (vs a generic engineering match).
+role_type_include:
+  - backend
+  - back-end
+  - full-stack
+  - fullstack
+  - full stack
+  - platform
+  - infrastructure
+  - distributed systems
+  - systems
+  - API
+  - server
+  - data engineering
+  - site reliability
+  - SRE
+
+# Off-target role families -> REJECT even when a level token is present. Encodes the
+# CLAUDE.md goal "Not frontend, not ML-first" as an enforced rule.
+role_type_exclude:
+  - frontend
+  - front-end
+  - front end
+  - mobile
+  - ios
+  - android
+  - machine learning
+  - "ml engineer"
+  - deep learning
+  - data scientist
+  - product manager
+  - product designer
+  - designer
+  - sales
+  - marketing
+  - recruiter
+  # Business/pre-sales titles that DO contain "engineer" and would otherwise slip the
+  # engineering gate below. Listed explicitly so they REJECT with a clear reason.
+  - solutions engineer
+  - sales engineer
+  - support engineer
+  - solutions consultant
+  - solutions architect
+  - customer success
+  - customer experience
+  - account executive
+  - account manager
+
+# Location handling. A posting whose location clearly matches an exclude token is
+# REJECTed; preferred/acceptable are recorded for ranking. Remote-US and unknown
+# locations are never rejected on geography alone.
+locations_preferred:
+  - New York
+  - NYC
+  - Remote US
+  - Remote
+  - Hybrid NYC
+locations_acceptable:
+  - Boston
+  - Austin
+  - Seattle
+  - San Francisco
+  - Bay Area
+  - Chicago
+  - Atlanta
+  - Washington DC
+# Clearly out-of-scope geographies. Kept conservative to avoid false rejects.
+locations_exclude:
+  - London
+  - Dublin
+  - Bengaluru
+  - Bangalore
+  - Hyderabad
+  - Gurgaon
+  - India
+  - Singapore
+  - Tokyo
+  - Sydney
+  - Toronto
+  - Vancouver
+  - Berlin
+  - Paris
+  - Amsterdam
+  - Tel Aviv
+  - "São Paulo"
+  - Sao Paulo
+
+# Non-gating: recorded for later ranking of the MATCH bucket.
+keywords_bonus:
+  - Go
+  - Golang
+  - Rust
+  - Java
+  - Kotlin
+  - distributed systems
+  - Kafka
+  - gRPC
+  - microservices
+  - PostgreSQL
+  - databases
+  - Kubernetes
