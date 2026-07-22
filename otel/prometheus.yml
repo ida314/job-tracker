@@ -1,0 +1,17 @@
+# Prometheus is a *receiver* here, not a scraper.
+#
+# It scrapes nothing belonging to jobtracker — the job is a 30-second batch process and
+# would be gone before any scrape interval elapsed. Instead the collector pushes via
+# remote write, which requires --web.enable-remote-write-receiver (set in compose.yaml).
+#
+# The only scrape job below is Prometheus watching itself, kept because "is Prometheus
+# alive" is a question you eventually want answered.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

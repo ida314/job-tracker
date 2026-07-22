@@ -1,0 +1,77 @@
+# Tier 3 observability stack. Not needed to run jobtracker — `--telemetry off` (the
+# default) and `--telemetry console` work with none of this up.
+#
+#   podman compose up -d
+#   podman run --rm --network job-tracker_otel \
+#     -e JOBTRACKER_TELEMETRY=otlp \
+#     -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+#     -v "$PWD/data:/data:Z" jobtracker:latest check
+#
+#   Jaeger  http://localhost:16686   traces — one run is one trace
+#   Grafana http://localhost:3000    metrics over time (anonymous admin, no login)
+#   Prom    http://localhost:9090    raw PromQL
+#
+# The job is deliberately NOT a service here. It is a batch process you invoke, not a
+# daemon compose should keep alive.
+
+name: job-tracker
+
+services:
+  otel-collector:
+    image: docker.io/otel/opentelemetry-collector-contrib:0.116.1
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./otel/collector.yaml:/etc/otel/collector.yaml:z,ro
+    ports:
+      - "4318:4318"   # OTLP/HTTP — what the job posts to
+      - "4317:4317"   # OTLP/gRPC
+    depends_on:
+      - jaeger
+      - prometheus
+    networks: [otel]
+
+  jaeger:
+    image: docker.io/jaegertracing/all-in-one:1.65.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI
+    networks: [otel]
+
+  prometheus:
+    image: docker.io/prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # Required for the collector's remote write to be accepted. Off by default.
+      # (Not --web.enable-otlp-receiver: that is for OTLP sent *directly* to Prometheus,
+      # bypassing the collector. We deliberately route through the collector instead.)
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./otel/prometheus.yml:/etc/prometheus/prometheus.yml:z,ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [otel]
+
+  grafana:
+    image: docker.io/grafana/grafana:11.4.0
+    environment:
+      # Local-only stack; skipping auth keeps the getting-started path short.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./otel/grafana-datasources.yml:/etc/grafana/provisioning/datasources/ds.yml:z,ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks: [otel]
+
+networks:
+  otel:
+
+volumes:
+  prometheus-data:
+  grafana-data:

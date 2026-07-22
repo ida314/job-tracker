@@ -1,0 +1,67 @@
+# OpenTelemetry Collector — the one endpoint jobtracker talks to.
+#
+# The job never knows Jaeger or Prometheus exist. It speaks OTLP to this process, and
+# routing is a config change here rather than a code change there. That indirection is
+# the entire reason to run a collector for a single-service setup.
+#
+# Shape: receivers -> processors -> exporters, wired together by `pipelines`.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318   # what OTEL_EXPORTER_OTLP_ENDPOINT points at
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  # Bounds collector memory. Without it, a backend outage turns into an OOM kill.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 75
+    spike_limit_percentage: 15
+
+  batch:
+    timeout: 5s
+
+  # Rebuilds cumulative counters from the per-run deltas the job sends. See the long
+  # comment in jobtracker/telemetry.py: the job is short-lived, so it reports deltas;
+  # Prometheus wants monotonic cumulative series. This processor bridges the two, and
+  # is what makes increase() over a week actually mean "retries this week".
+  deltatocumulative:
+    max_streams: 1000
+
+exporters:
+  # Traces -> Jaeger, which speaks OTLP natively.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics -> Prometheus by remote write (push), NOT by Prometheus scraping us.
+  # A 30-second daily job is essentially never up when a scraper comes calling; pull-based
+  # collection would miss almost every run. Push is the only correct model for batch work.
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+    tls:
+      insecure: true
+    # Promotes service.name / service.instance.id onto every series as job/instance.
+    target_info:
+      enabled: true
+
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, deltatocumulative, batch]
+      exporters: [prometheusremotewrite, debug]
+  telemetry:
+    logs:
+      level: info
