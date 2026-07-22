@@ -145,6 +145,67 @@ these; they are not broken:
 - Drop `?content=true` when you only need job counts. Full-content payloads are large
   enough to blow a 20s timeout on big boards (Databricks carries ~787 reqs).
 
+### Observability
+
+Progress goes to **stderr** via `logging`; the report goes to **stdout**. `check > out.md`
+stays clean, and a run is watchable live rather than silent until it finishes.
+
+- Default level is INFO: one line per board as it lands (`[12/56] Stripe  518 jobs (1.1s)`),
+  plus a phase line for health/match and for report rendering.
+- `-v` → DEBUG, one line per HTTP attempt. `-q` → warnings and errors only.
+- `fetch_all` uses `as_completed` so lines appear as boards finish, but reassembles results
+  into **input order** before returning. Downstream stays reproducible — don't "simplify"
+  this back to `pool.map`.
+- Retries are logged, including ones that *succeed* (`recovered on attempt 2/3`). A board
+  that quietly needs two tries every day is degrading; silence used to hide that.
+- The end-of-fetch summary reports failures, retry count, and **cumulative time asleep in
+  the per-host limiter**. This is the fast way to tell pacing from breakage: a healthy
+  56-board run is ~29s wall with ~106s of pacing summed across 4 workers, i.e. essentially
+  all of it is deliberate spacing on `boards-api.greenhouse.io`. Near-zero pacing plus a
+  fast run means something returned early, not that things got faster.
+
+### OpenTelemetry
+
+Off by default. `--telemetry console` prints spans to **stderr**; `--telemetry otlp` ships
+them to `$OTEL_EXPORTER_OTLP_ENDPOINT`. Env equivalent: `$JOBTRACKER_TELEMETRY`.
+
+- `jobtracker/telemetry.py` is the **only** file allowed to import `opentelemetry.sdk`.
+  Instrumented modules import `opentelemetry.api` and nothing else — with no provider
+  configured the API is a no-op, which is why `fetch.py` has no enablement checks.
+- `fetch.py` is instrumented today: `fetch.all` → `fetch.company` → `http.request` →
+  (auto-instrumented) `GET`. Retries are span events, not extra spans.
+- Worker threads do **not** inherit OTel context. `fetch_all` captures it and
+  `_fetch_timed` attaches/detaches it. Remove that and you get 56 orphan traces.
+- Span names stay low-cardinality (`fetch.company`, never the company name). Identifiers
+  belong in attributes. Never attach posting IDs or URLs — 8k postings per run.
+
+### Metrics and the tier-3 stack
+
+`compose.yaml` + `otel/` run collector → Jaeger (traces) + Prometheus (metrics) + Grafana.
+`otel/stack.sh {up|down|run}` does the same with plain podman, since this machine has no
+compose provider installed.
+
+Two decisions here exist *because this is a batch job*, and both break silently if undone:
+
+- **Metrics are pushed, never scraped.** A 30-second daily process is essentially never
+  running when a scrape interval elapses. The collector remote-writes into Prometheus
+  (`--web.enable-remote-write-receiver`); nothing scrapes jobtracker.
+- **Counters are exported as DELTA, not cumulative** (`_delta_temporality()` in
+  telemetry.py) and reassembled by the collector's `deltatocumulative` processor.
+  Cumulative means "total since process start", which resets to zero every run and makes
+  a backend read restarts as decreases. Verified: two consecutive runs of 60 new postings
+  each report 60 then 120, not 60 then 60.
+- **`service.instance.id` is pinned to the hostname.** The SDK defaults it to a random
+  UUID per process, which would mint a fresh Prometheus series every night.
+
+Metric names arrive in Prometheus with dots → underscores, unit suffixes appended, and
+`_total` on counters: `jobtracker.fetch.duration` becomes
+`jobtracker_fetch_duration_seconds_bucket`, attribute `health.status` becomes label
+`health_status`.
+
+Keep metric attributes bounded — `ats` (4 values) and `outcome` (2) are fine; `company`
+(56) belongs in traces, not metrics.
+
 ## Repo conventions
 
 - Each change to the tracker is its own commit, grouped by *failure class* (not by tier),

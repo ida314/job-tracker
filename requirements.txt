@@ -1,3 +1,11 @@
 # Runtime dependencies (pinned for reproducible container builds).
 requests==2.34.2
 PyYAML==6.0.3
+
+# OpenTelemetry. The api package is what jobtracker/fetch.py imports; without the sdk
+# installed and configured it is a no-op, so tracing costs nothing when --telemetry=off
+# (the default). The otlp exporter is only needed for --telemetry=otlp.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-instrumentation-requests==0.65b0
