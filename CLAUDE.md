@@ -99,13 +99,23 @@ pretending to have checked it is not. Never let a `manual` entry silently report
 ## Validation state
 
 **Audited 2026-07-09.** Every `check_method: api` entry was fetched and its board identity
-confirmed against the company name. Current composition of the 82 entries:
+confirmed against the company name. Current composition of the 89 entries:
 
 | | Count | Status |
 |---|---|---|
 | `api` | 56 | All return valid JSON. 43 Greenhouse, 12 Ashby, 1 Lever. |
-| `manual` | 24 | Never scraped, by rule. Flagged weekly. |
+| `manual` | 31 | Never scraped, by rule. Flagged weekly. |
 | `aggregator` | 2 | GitHub new-grad lists, diffed daily. |
+
+**Tier 6 added 2026-07-20** — seven Chinese frontier AI labs, all `manual`. None has a
+keyless JSON board; MiniMax, Zhipu, and Moonshot run Feishu/Lark boards that 405 on
+unauthenticated reads. These entries do **not** satisfy the Match Criteria (`locations_*`
+is US-only) and were added as research-interest targets at the user's request — only
+ByteDance Seed and Alibaba have confirmed US hiring. Do not silently drop them for failing
+the location filter, and do not "promote" any of them to `api`.
+
+**Known name collision:** `ashby/moonshot-ai` is an unrelated NYC startup, not 月之暗面.
+Live jobs, wrong company — the `ashby/cedar` failure mode again.
 
 **Validated:** all 56 api slugs resolve, return parseable JSON, and belong to the intended
 company. 15 entries were corrected in that audit — see the bucketed commits following the
@@ -120,7 +130,7 @@ these; they are not broken:
 **Not yet done:**
 
 - No Match Criteria filtering has ever been run. No role matching has happened.
-- `status`, `last_checked`, and `last_posting_seen` are untouched across all 82 entries.
+- `status`, `last_checked`, and `last_posting_seen` are untouched across all 89 entries.
   The first real daily run is still pending.
 - The two aggregator sources have never been fetched or diffed. The Ouckah/CVrve repo URL
   is unverified and these repos rename by cycle year.

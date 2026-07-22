@@ -980,6 +980,112 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 
 ---
 
+## Tier 6 — Chinese frontier AI labs  *(reach: frontier research + training infra; see caveats)*
+
+> **Read before checking.** Every entry here is `check_method: manual` — none of the seven
+> has a Greenhouse/Lever/Ashby-style keyless JSON board. Three (MiniMax, Zhipu, Moonshot)
+> run on Feishu/Lark boards that return HTTP 405 on unauthenticated API reads; the rest are
+> bespoke SPAs. Verified 2026-07-20.
+>
+> **These entries do not satisfy the Match Criteria as written.** `locations_preferred` is
+> NYC/Remote US; most roles here are Beijing/Hangzhou/Shanghai and would need relocation and
+> China work authorization. Only ByteDance Seed and Alibaba have confirmed US hiring. Treat
+> the mainland-only entries as research-interest targets, not as new-grad pipeline.
+>
+> **Known slug trap:** `ashby/moonshot-ai` returns live jobs belonging to an unrelated US
+> startup in NYC, not 月之暗面. Same failure mode as `ashby/cedar`. Do not add it.
+
+### ByteDance Seed
+- ats: bespoke
+- careers_page: https://seed.bytedance.com/en/career
+- category: chinese-frontier-ai
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: Best US bridge on this tier. Seed's own page is marketing only — every "Apply" links
+  to jobs.bytedance.com/experienced/position/{id}/detail. Confirmed roles in San Jose and
+  Seattle plus Singapore; distributed training, RL infra, inference, compilers, agent systems.
+  Has listed BS/MS LLM internships in Hong Kong. Main API returns 405 on POST.
+
+### Alibaba (Qwen / Tongyi Lab)
+- ats: bespoke
+- careers_page: https://talent.alibaba.com/en/home
+- category: chinese-frontier-ai
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: careers.alibaba.com 302s here — this is the canonical portal. No separate Qwen
+  careers site; Tongyi Lab hires through Alibaba Cloud and Group channels, so filter within
+  the central portal. Confirmed non-China roles in Singapore, Seattle, Frankfurt.
+
+### DeepSeek
+- ats: bespoke
+- careers_page: https://talent.deepseek.com/
+- category: chinese-frontier-ai
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: Purest frontier-lab target on this tier. Self-hosted React SPA; JS bundle grepped,
+  no API endpoint exposed. Beijing and Hangzhou only — no overseas roles found. Openings span
+  model research, pretraining data, AI search, backend systems, agents, distributed infra,
+  training frameworks.
+
+### MiniMax
+- ats: bespoke
+- careers_page: https://www.minimax.io/careers
+- category: chinese-frontier-ai
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: Feishu board at vrfi1sk8a0.jobs.feishu.cn, entity confirmed as MiniMax; 405 on
+  unauthenticated API. CN page is minimaxi.com/careers. Runs internships, graduate
+  recruitment, experienced hiring, and a "Top Talent" track that explicitly waives degree and
+  graduation-date restrictions — the one entry here where a 2027 date may not disqualify.
+  Overseas locations unverified (SPA, listings not readable without JS).
+
+### Zhipu AI / Z.ai
+- ats: bespoke
+- careers_page: https://zhipu-ai.jobs.feishu.cn/
+- category: chinese-frontier-ai
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: Feishu board, entity confirmed as 智谱华章科技股份有限公司; 405 on unauthenticated API.
+  Campus recruiting for algorithms, RL frameworks, and engineering. Locations advertised:
+  Beijing, Shanghai, Hangzhou, Shenzhen, Kuala Lumpur.
+
+### Moonshot AI (Kimi)
+- ats: bespoke
+- careers_page: https://careers.kimi.com/
+- category: chinese-frontier-ai
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: Also hosts a Feishu board at moonshot.jobs.feishu.cn, entity confirmed as
+  月之暗面科技有限公司; 405 on unauthenticated API. Emphasizes frontier AGI research and
+  open-source work. Overseas locations unverified. See the `ashby/moonshot-ai` trap above.
+
+### Shanghai AI Laboratory
+- ats: bespoke
+- careers_page: https://www.shlab.org.cn/joinus
+- category: chinese-frontier-ai
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: Application flow splits into /joinus/social and /joinus/campus with an email fallback
+  to hr@pjlab.org.cn. Shanghai and Beijing only. Strong on open-source models, multimodality,
+  evaluation, embodied AI, safety, AI for science, training systems. Advertises daily
+  internships and joint PhD programs with major Chinese universities.
+
+---
+
 ## Aggregator sources  *(check daily — highest yield for new-grad specifically)*
 
 > These are the single best signal for 2027 new-grad roles across ALL companies, including
