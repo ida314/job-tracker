@@ -1,14 +1,20 @@
 # Provisioned at startup so Grafana comes up already wired — no clicking through setup.
 apiVersion: 1
 
+# The explicit `uid`s are load-bearing. Without them Grafana generates a random uid per
+# install, and grafana-dashboard.json — which references the datasource by uid — would
+# bind to nothing and every panel would read "Datasource not found". Provisioned
+# dashboards and provisioned datasources have to agree on a name you choose yourself.
 datasources:
   - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090
     isDefault: true
 
   - name: Jaeger
+    uid: jaeger
     type: jaeger
     access: proxy
     url: http://jaeger:16686

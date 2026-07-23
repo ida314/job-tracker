@@ -1,8 +1,40 @@
 # Plan: provisioned Grafana dashboard
 
-**Status:** proposed, not started
+**Status: IMPLEMENTED 2026-07-22.** Shipped as `otel/grafana-dashboard.json` +
+`otel/grafana-dashboards.yml`, mounted from `compose.yaml` and `otel/stack.sh`.
 **Depends on:** tier-3 stack (`compose.yaml`, `otel/`), metrics in `fetch.py` / `cli.py`
 **Reference:** `docs/observability.md` for signal and metric definitions
+
+## What the plan got wrong
+
+Three of the queries below were verified against a live stack and did not survive. They
+are left in place as written so the corrections have something to point at; the shipped
+dashboard uses the fixed forms, and `docs/observability.md` documents them.
+
+1. **`last_over_time(...)` on a counter returns the all-time total, not last night.**
+   The plan's headline panel — `sum by (health_status) (last_over_time(...[24h]))` —
+   double-counts every run: two runs of 2 ok reported `ok=4`. The collector's
+   `deltatocumulative` makes these series cumulative, so the correct operator is
+   `increase(...[24h])`. This affects the boards, new-postings and matches panels.
+
+2. **The "time since last run" panel — the plan's own "most important panel" — was
+   broken.** `time() - timestamp(last_over_time(...))` always returns **0**, because
+   `last_over_time` re-stamps the sample at evaluation time. The panel meant to catch a
+   dead job would have read "just ran" forever. Correct form:
+   `time() - max_over_time(timestamp(jobtracker_run_duration_seconds_count)[24h:1m])` —
+   verified at 885s against a true 14m45s, well past the 5m lookback.
+
+3. **Run duration needed `sum/count`, not `sum`.** `..._seconds_sum` is also cumulative,
+   so the raw sum grows without bound across runs.
+
+Two things the plan did not anticipate:
+
+- **Datasources needed explicit `uid`s.** Grafana generates a random uid per install
+  otherwise, and a provisioned dashboard referencing `uid: prometheus` binds to nothing.
+- **`JOBTRACKER_INSTANCE_ID` had to be set for containerized runs.** `telemetry.py` falls
+  back to `os.uname().nodename`, which inside a container is the container ID — a fresh
+  value on every `--rm` run. That minted a new Prometheus series per run, defeating the
+  pinning the code was written to provide. Fixed in `otel/stack.sh`.
 
 ## Why
 
@@ -85,9 +117,30 @@ Not "the JSON parses". Panels must return values against real data:
 
 ## Open questions
 
+Both still open after implementation:
+
 - Alerting: worth adding Grafana alert rules (e.g. `suspect_empty > 3`, no run in 36h),
   or is a dashboard enough for a personal job tracker? Alerts need a notification channel,
-  which is real setup.
+  which is real setup. The "time since last run" panel already encodes the threshold
+  (amber 25h, red 36h) — an alert rule would reuse the same expression.
 - Should the dashboard include a Jaeger panel (Grafana has the datasource provisioned) to
   jump from a slow run straight into its trace? Nice, but couples the dashboard to Jaeger
   being up.
+
+## Verifying it yourself
+
+The plan's own verification steps, as actually run:
+
+```sh
+./otel/stack.sh up
+podman build -t jobtracker:latest .     # OTel packages are deps; a stale image has none
+./otel/stack.sh run                     # a real run through the collector
+
+# every panel expression, executed through Grafana's datasource proxy
+curl -sG http://localhost:3000/api/datasources/proxy/uid/prometheus/api/v1/query \
+  --data-urlencode 'query=sum by (health_status) (increase(jobtracker_boards_total[24h]))'
+```
+
+A forced failure is worth generating too — point one company at a bogus slug in a
+throwaway companies file and run against a scratch `JOBTRACKER_DB`, so the `fetch_failed`
+path and the error colors have data without polluting real state.

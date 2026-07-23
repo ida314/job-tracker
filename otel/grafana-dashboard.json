@@ -1,0 +1,449 @@
+{
+  "uid": "jobtracker-daily",
+  "title": "Job Tracker — daily run",
+  "description": "Vital signs for the nightly check. Row 1 answers 'did last night's run work'; row 2 answers 'is anything degrading'. Panel descriptions (hover the ⓘ) carry the reasoning — read them before 'fixing' anything.",
+  "tags": ["jobtracker"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-7d", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Did last night's run work?",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "panels": []
+    },
+
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Time since last run",
+      "description": "THE MOST IMPORTANT PANEL. Every other panel keeps showing last night's values forever, so a job that stopped running looks identical to a job that is fine. This is the only panel that notices.\n\nGreen under 25h, amber past 25h, red past 36h. 'never run' means Prometheus has no run in 24h at all.\n\nQuery note: the obvious `time() - timestamp(last_over_time(...))` does NOT work — last_over_time re-stamps the sample at evaluation time, so it always returns 0. The subquery form below evaluates timestamp() at 1m steps and takes the newest real sample time.",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "time() - max_over_time(timestamp(jobtracker_run_duration_seconds_count)[24h:1m])",
+          "instant": true,
+          "range": false,
+          "legendFormat": "since last run"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "noValue": "never run",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 90000 },
+              { "color": "red", "value": 129600 }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Boards by health (24h)",
+      "description": "Board outcomes from runs in the last 24h.\n\nsuspect_empty: 2 is the EXPECTED steady state — dbt Labs and Root Insurance have correct slugs and genuinely zero open reqs. Do not 'fix' them. Tier-7 boards (Dremio, LanceDB, Onehouse, lakeFS) are also expected to be near-empty. Escalation only happens after repeated empties on a board that was once populated.\n\nfetch_failed is always worth reading. identity_drift means a board's name no longer matches the company we think it belongs to — the ashby/cedar failure mode — and its contents were discarded.\n\nThis is increase() over a fixed 24h, NOT the dashboard time range: the question is about last night specifically.",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (health_status) (increase(jobtracker_boards_total[24h]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{health_status}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "ok" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "suspect_empty" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "fetch_failed" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "identity_drift" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-red" } }]
+          }
+        ]
+      }
+    },
+
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Run duration (24h)",
+      "description": "End-to-end wall time of the check run.\n\n~30s is normal for ~60 boards and is almost entirely deliberate pacing on boards-api.greenhouse.io, not work. 90s+ means retries — cross-check the 'Retries by host' panel. A run that gets dramatically FASTER is also suspicious: it usually means boards returned early rather than that anything improved.\n\nsum/count over the window, i.e. the mean run in the last 24h. For a once-daily job that is last night's run.",
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "increase(jobtracker_run_duration_seconds_sum[24h]) / increase(jobtracker_run_duration_seconds_count[24h])",
+          "instant": true,
+          "range": false,
+          "legendFormat": "run duration"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "noValue": "no run",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 90 },
+              { "color": "red", "value": 240 }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "New postings (24h)",
+      "description": "Postings seen for the first time across all boards.\n\nZero new postings across ~60 boards is suspicious, not calm — it usually means postings were re-ingested under changed IDs, or a store/diff problem. A few hundred is normal after a gap; low tens is normal day to day.\n\nNote the cold-start caveat: increase() cannot see a counter's rise if the series was born inside the window, so the very first day after a fresh Prometheus reads 0 here. It self-corrects on day two.",
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum(increase(jobtracker_postings_new_total[24h]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "new postings"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0",
+          "color": { "mode": "fixed", "fixedColor": "text" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "text", "value": null }] },
+          "mappings": []
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "New matches (24h)",
+      "description": "New postings that satisfied the criteria in criteria.yaml — the actual output of this pipeline.\n\nZero is the normal state most days; new-grad reqs open in bursts. This number being persistently zero while 'New postings' is healthy means the criteria are too tight, not that the pipeline is broken. The UNCERTAIN bucket is where that gets diagnosed — it is not on this dashboard because it is a curation question, not an operational one.",
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum(increase(jobtracker_matches_total[24h]))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "matches"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "text", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "type": "row",
+      "id": 101,
+      "title": "Is anything degrading?",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "panels": []
+    },
+
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "p95 fetch duration by ATS",
+      "description": "95th-percentile time to fetch one board, split by ATS vendor.\n\nThis is the panel that catches slow degradation — a board that drifted from 0.4s to 4s since March is invisible in any single run and obvious here. Greenhouse sits high by design: it is the host being paced at ~3 req/s, so its p95 includes deliberate sleep.\n\nThe histogram_quantile(0.95, sum by (le, ats) (rate(...))) shape is easy to get subtly wrong. `le` MUST be in the `by` clause — without it the buckets are collapsed and the result is silently meaningless rather than an error.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, ats) (rate(jobtracker_fetch_duration_seconds_bucket[24h])))",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{ats}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "spanNulls": true,
+            "gradientMode": "none",
+            "axisLabel": "p95 seconds",
+            "scaleDistribution": { "type": "linear" }
+          },
+          "mappings": []
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Retries by host (24h)",
+      "description": "HTTP attempts beyond the first, by host.\n\nA counter that never fires has NO SERIES AT ALL, so on a healthy run this metric is absent from Prometheus entirely. Absent is not the same as zero, and an empty panel looks identical to a broken one — which is why 'No data' is mapped to 0 here rather than left blank.\n\nThe signal to watch is not a spike but a floor: a board that quietly needs two attempts every single night is degrading, and that used to be invisible because retries succeeded silently.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (server_address) (increase(jobtracker_fetch_retries_total[24h]))",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{server_address}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "0",
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "spanNulls": true,
+            "gradientMode": "none",
+            "axisLabel": "retries",
+            "scaleDistribution": { "type": "linear" }
+          },
+          "mappings": []
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "Pacing vs. run duration",
+      "description": "Time deliberately slept in the per-host rate limiter, against the run's wall time. Both are seconds, so they share one axis honestly.\n\nThis makes the pacing-vs-breakage question permanently answerable. A healthy ~60-board run is ~30s wall with ~110s of pacing summed across 4 workers — i.e. essentially all the elapsed time is deliberate spacing on boards-api.greenhouse.io, and the run is limiter-bound rather than slow.\n\nThe alarming pattern is the inverse: pacing near zero AND a fast run. That means boards returned early — a failure that reads as an improvement everywhere else.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (server_address) (increase(jobtracker_fetch_rate_limited_time_seconds_total[24h]))",
+          "instant": false,
+          "range": true,
+          "legendFormat": "pacing — {{server_address}}"
+        },
+        {
+          "refId": "B",
+          "editorMode": "code",
+          "expr": "increase(jobtracker_run_duration_seconds_sum[24h]) / increase(jobtracker_run_duration_seconds_count[24h])",
+          "instant": false,
+          "range": true,
+          "legendFormat": "run wall time"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "noValue": "0",
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "spanNulls": true,
+            "gradientMode": "none",
+            "axisLabel": "seconds",
+            "scaleDistribution": { "type": "linear" }
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "run wall time" },
+            "properties": [
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "Median postings per board by ATS",
+      "description": "The median board's posting count, split by ATS.\n\nThis detects boards trending toward empty BEFORE they hit zero and trip suspect_empty. A slug that silently stops being the live board usually decays rather than vanishing — the HubSpot failure mode, where a real board named 'HubSpot Product' returns an empty array forever while the actual jobs live somewhere else.\n\nBucket boundaries are 0/1/10/50/100/250/500/1000, so the resolution here is coarse by design; read it as a trend, not a count.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.5, sum by (le, ats) (rate(jobtracker_fetch_postings_bucket[24h])))",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{ats}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 8,
+            "spanNulls": true,
+            "gradientMode": "none",
+            "axisLabel": "postings",
+            "scaleDistribution": { "type": "linear" }
+          },
+          "mappings": []
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

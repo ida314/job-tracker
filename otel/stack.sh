@@ -35,10 +35,16 @@ case "${1:-}" in
       --config.file=/etc/prometheus/prometheus.yml \
       --web.enable-remote-write-receiver >/dev/null
 
+    # Two provisioning mounts: datasources, and the dashboard provider plus the dashboard
+    # itself. The provider's `path` is a DIRECTORY, so grafana-dashboard.json is mounted
+    # into it by name rather than the directory being mounted wholesale — otherwise the
+    # provider YAML would have to live in the same directory as the dashboards.
     podman run -d --rm --name grafana --network "$NET" -p 3000:3000 \
       -e GF_AUTH_ANONYMOUS_ENABLED=true -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
       -e GF_AUTH_DISABLE_LOGIN_FORM=true \
       -v "$PWD/otel/grafana-datasources.yml:/etc/grafana/provisioning/datasources/ds.yml:z,ro" \
+      -v "$PWD/otel/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/provider.yml:z,ro" \
+      -v "$PWD/otel/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/jobtracker.json:z,ro" \
       "$GRAFANA" >/dev/null
 
     sleep 3
@@ -61,9 +67,16 @@ case "${1:-}" in
     shift
     # host.containers.internal reaches the host's published 4318 from inside the job
     # container; --network jt-otel would also work and skip the host hop.
+    #
+    # JOBTRACKER_INSTANCE_ID is not optional here. telemetry.py falls back to
+    # os.uname().nodename, which inside a container is the *container ID* — a fresh
+    # random value on every `--rm` run. That mints a new Prometheus series per run and
+    # defeats the whole point of pinning service.instance.id. Passing the host's name
+    # restores the intended behaviour: one stable series for this machine.
     podman run --rm -v "$PWD/data:/data:Z" \
       -e JOBTRACKER_TELEMETRY=otlp \
       -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+      -e JOBTRACKER_INSTANCE_ID="${JOBTRACKER_INSTANCE_ID:-$(hostname)}" \
       --network "$NET" jobtracker:latest check "$@"
     ;;
 

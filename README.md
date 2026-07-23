@@ -113,12 +113,18 @@ podman build -t jobtracker:latest .  # rebuild first: the OTel packages are new 
 Jaeger <http://localhost:16686> · Grafana <http://localhost:3000> · Prometheus
 <http://localhost:9090>
 
-Two things that surprise people, both because this is a 30-second batch job rather than a
-server — see `docs/observability.md` for why:
+Grafana comes up with the **Job Tracker — daily run** dashboard already provisioned: a
+"did last night's run work" row and an "is anything degrading" row. Every panel has a
+description explaining what it means and when *not* to act on it.
+
+Three things that surprise people, all because this is a 30-second batch job rather than
+a server — see `docs/observability.md` for why:
 
 - Metrics are **pushed**, never scraped. Nothing is running when a scrape lands.
 - Prometheus instant queries look back only 5 minutes, so a daily job's series read as
-  "No data" almost always. Wrap point-in-time queries in `last_over_time(...[24h])`.
+  "No data" almost always.
+- The counters are **cumulative** by the time Prometheus sees them, so `last_over_time`
+  gives the all-time total rather than last night's run. Use `increase(...[24h])`.
 
 ## Health states (why a board is flagged)
 

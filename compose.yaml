@@ -62,6 +62,11 @@ services:
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
     volumes:
       - ./otel/grafana-datasources.yml:/etc/grafana/provisioning/datasources/ds.yml:z,ro
+      # The dashboard is provisioned, not imported through the UI, so it stays a
+      # reviewable file in git. The provider's `path` is a directory; the dashboard JSON
+      # is mounted into it by name.
+      - ./otel/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/provider.yml:z,ro
+      - ./otel/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/jobtracker.json:z,ro
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"
