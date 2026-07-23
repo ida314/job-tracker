@@ -275,6 +275,32 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- dashboard ---------------------------------------------------------------------
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Render state.db as a self-contained HTML page. No network, no writes.
+
+    Defaults to a file rather than stdout: the output is ~1 MB of HTML that you open in
+    a browser, not something you pipe. `--output -` still writes to stdout if you want it.
+    """
+    from . import dashboard as dashboard_mod
+
+    companies = config.load_companies(args.companies)
+    criteria = load_criteria(args.criteria)
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    html_doc = dashboard_mod.build_dashboard(conn, companies, _today(), criteria)
+    conn.close()
+
+    if args.output == "-":
+        print(html_doc)
+        return 0
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html_doc, encoding="utf-8")
+    log.info("dashboard written to %s (%d bytes)", out, len(html_doc.encode()))
+    print(out)
+    return 0
+
+
 # -- add-company -------------------------------------------------------------------
 def cmd_add_company(args: argparse.Namespace) -> int:
     path = Path(args.companies or config.COMPANIES_YAML)
@@ -348,6 +374,16 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--db", default=None)
     r.add_argument("--since", default=None)
     r.set_defaults(func=cmd_report)
+
+    d = sub.add_parser("dashboard", help="render state.db as a self-contained HTML page")
+    d.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    d.add_argument("--db", default=None)
+    d.add_argument(
+        "--output",
+        default="data/dashboard.html",
+        help="output path, or '-' for stdout (default: data/dashboard.html)",
+    )
+    d.set_defaults(func=cmd_dashboard)
 
     a = sub.add_parser("add-company", help="append a curated entry")
     a.add_argument("--name", required=True)

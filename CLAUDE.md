@@ -250,6 +250,61 @@ Metric names arrive in Prometheus with dots → underscores, unit suffixes appen
 Keep metric attributes bounded — `ats` (4 values) and `outcome` (2) are fine; `company`
 (56) belongs in traces, not metrics.
 
+**Containerized runs MUST set `JOBTRACKER_INSTANCE_ID`.** `telemetry.py` pins
+`service.instance.id` to `os.uname().nodename` so a daily job keeps one continuous
+Prometheus series. Inside a container that nodename is the *container ID*, which is a new
+random value on every `--rm` run — so the pinning silently does the opposite of its
+intent and mints a series per run. `otel/stack.sh run` passes the host's name; any new
+invocation path (cron, compose, CI) has to do the same.
+
+### Querying: the counters are cumulative
+
+`deltatocumulative` means Prometheus sees monotonic counters, so **`last_over_time` on a
+counter is the all-time total, not last night's run.** Use `increase(...[24h])` for
+"what happened in the last day", and `increase(sum)/increase(count)` for a histogram
+average. `increase()` cannot see a rise preceding the series' first sample, so a freshly
+wiped Prometheus reads 0 on day one and self-corrects on day two.
+
+"How long since the last run" is the one query that catches a job that stopped, and the
+obvious idiom is silently broken — `time() - timestamp(last_over_time(...))` always
+returns 0, because `last_over_time` re-stamps at evaluation time. The working form is
+`time() - max_over_time(timestamp(jobtracker_run_duration_seconds_count)[24h:1m])`.
+
+### The Grafana dashboard
+
+`otel/grafana-dashboard.json`, provisioned by `otel/grafana-dashboards.yml`. The file is
+the source of truth; `allowUiUpdates: true` permits live experimentation but a restart
+discards anything not saved back. Datasource `uid`s in `otel/grafana-datasources.yml` are
+pinned (`prometheus`, `jaeger`) because the dashboard binds by uid — remove them and
+every panel reads "Datasource not found".
+
+**Panel descriptions carry the why.** That is where facts like "dbt Labs and Root
+Insurance are legitimately empty, do not fix them" live, so someone reading
+`suspect_empty: 2` at 2am doesn't go repair two healthy boards. Keep them current when
+the reasoning changes.
+
+## The HTML dashboard
+
+`jobtracker dashboard` renders `state.db` to a single self-contained HTML file
+(`data/dashboard.html`, gitignored). Separate concern from Grafana: Grafana watches the
+*pipeline*, this watches the *job search* — open matches, the uncertain backlog, flagged
+boards, and the manual companies that are never scraped.
+
+- **It is a pure read.** Unlike `report`, it never marks manual companies as surfaced.
+  Opening a view of your data must not mutate it; there is a test asserting this.
+- **No network at view time, ever.** No CDN, no chart library — the one chart is CSS.
+  That is what makes the file mailable and openable offline years from now.
+- **Rows render server-side; JS only hides them.** With JS off you still get every
+  posting. Don't "improve" this into client-side rendering from embedded JSON.
+- **Escape everything.** Titles and locations come from third-party ATS APIs. URLs get a
+  scheme check too — a `javascript:` href would execute on click.
+- Tier color is **three bands, not seven steps** (T1–T2 anchor, T3–T5 applied, T6–T7
+  research). Seven steps do not fit the blue ramp's usable range with visible gaps; the
+  tier number is always printed, so color is reinforcement, never the encoding.
+- **Location sorts, never filters.** Rows come out NYC-first (`match.location_rank()`),
+  NYC rows carry a pin, and there is a location dropdown that defaults to "Anywhere".
+  A location filter the user did not choose would silently hide roles they asked to see.
+
 ## Repo conventions
 
 - Each change to the tracker is its own commit, grouped by *failure class* (not by tier),

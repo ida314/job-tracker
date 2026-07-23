@@ -336,7 +336,9 @@ Planned expansion, in descending value-per-hour:
 | `criteria.yaml` + validating loader (the §2.1 fix) | **Complete** |
 | Markdown → `companies.yaml` migration | **Complete** — all 89 entries, 0 data loss |
 | Container packaging (Dockerfile, volume-mounted `state.db`) | **Complete** |
-| Test suite (`tests/`) | **Complete** — 48 passing |
+| Test suite (`tests/`) | **Complete** — 56 passing |
+| Grafana operational dashboard (`otel/grafana-dashboard.json`) | **Complete** — provisioned, 9 panels |
+| Job-search dashboard (`jobtracker dashboard` → HTML) | **Complete** — self-contained, no network |
 | First live run against the 56 API boards | **Complete** — see below |
 | Curated target data (89 companies, 56 slugs hand-verified) | **Complete** — carries over unchanged |
 

@@ -1,0 +1,610 @@
+"""Render state.db as a single self-contained HTML page.
+
+This is the counterpart to report.py. The report answers "what changed last night" and
+is meant to be read once, in a terminal or an email. The dashboard answers "what should
+I look at right now" and is meant to be kept open: the standing backlog of open matches,
+the uncertain queue that needs a human, and the coverage the pipeline does NOT have.
+
+Three constraints shape the implementation:
+
+* **One file, no server, no network.** The output is a plain .html you can open with
+  file://, mail to yourself, or keep in a tab. Nothing is fetched at view time, so it
+  works offline and cannot break because a CDN moved. That rules out chart libraries;
+  the one chart here is CSS.
+
+* **Rows are rendered server-side, JS only hides them.** Filtering and sorting are
+  progressive enhancement. With JavaScript off you still get every posting, as a table.
+  The alternative — ship JSON and build the DOM — makes the page useless without JS and
+  harder to diff.
+
+* **Everything is escaped.** Titles, locations and company names arrive from third-party
+  ATS APIs and are attacker-controllable in principle. They go through html.escape()
+  without exception; url fields additionally get a scheme check.
+
+The dashboard is a pure read. It never writes to the database — unlike `report`, which
+marks manual companies as surfaced. Opening a view of your data should not mutate it.
+"""
+
+from __future__ import annotations
+
+import html
+import sqlite3
+from collections import Counter
+from datetime import date
+from typing import Optional
+
+from . import store
+from .criteria import Criteria
+from .match import location_label, location_rank
+from .models import Company
+
+MANUAL_INTERVAL_DAYS = 7
+
+# Palette. Light and dark are separately chosen steps of the same hues, not a filter
+# flip. Tier chips use an ordinal blue ramp — tier 1 most prominent — and always carry
+# the tier number as text, so the color is reinforcement and never the only signal.
+#
+# Tiers are colored in THREE BANDS, not seven steps. Seven steps do not fit: the blue
+# ramp's usable range (no lighter than step 250 on light, no darker than 600 on dark)
+# holds ten steps, and seven of them leaves adjacent pairs closer than the ~0.06 OKLab
+# lightness gap the eye needs — verified with the palette validator, which fails that
+# ramp on three adjacent pairs. Three bands pass every check in both modes.
+#
+# The banding is not a cosmetic compromise; it is the grouping CLAUDE.md already uses:
+#   anchor   T1-T2  backend scale-ups and infra/devtools — where backend IS the product
+#   applied  T3-T5  applied to, not anchored on (Big Tech, enterprise/PE)
+#   research T6-T7  research interest, deliberately outside the new-grad pipeline
+# The exact tier number is always printed inside the chip, so the band is reinforcement
+# and the number carries the precision.
+#
+# Each band ships a paired ink because the ramp crosses the light/dark text flip at a
+# different band in each mode: light runs dark→light, dark runs light→dark.
+_CSS = """
+:root {
+  color-scheme: light;
+  --page:        #f9f9f7;
+  --surface:     #fcfcfb;
+  --ink:         #0b0b0b;
+  --ink-2:       #52514e;
+  --muted:       #898781;
+  --grid:        #e1e0d9;
+  --rule:        #c3c2b7;
+  --border:      rgba(11,11,11,0.10);
+  --good:        #0ca30c;
+  --warning:     #fab219;
+  --serious:     #ec835a;
+  --critical:    #d03b3b;
+  --accent:      #2a78d6;
+  /* light: dark -> light; ink flips to near-black at the research band */
+  --band-anchor:   #0d366b; --band-anchor-ink:   #fcfcfb;
+  --band-applied:  #2a78d6; --band-applied-ink:  #fcfcfb;
+  --band-research: #86b6ef; --band-research-ink: #0b0b0b;
+  --band-none:     #898781; --band-none-ink:     #fcfcfb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page:    #0d0d0d;
+    --surface: #1a1a19;
+    --ink:     #ffffff;
+    --ink-2:   #c3c2b7;
+    --muted:   #898781;
+    --grid:    #2c2c2a;
+    --rule:    #383835;
+    --border:  rgba(255,255,255,0.10);
+    --accent:  #3987e5;
+    /* dark: light -> dark; ink flips to near-white at the research band */
+    --band-anchor:   #cde2fb; --band-anchor-ink:   #0b0b0b;
+    --band-applied:  #5598e7; --band-applied-ink:  #0b0b0b;
+    --band-research: #184f95; --band-research-ink: #fcfcfb;
+    --band-none:     #898781; --band-none-ink:     #0b0b0b;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:    #0d0d0d;
+  --surface: #1a1a19;
+  --ink:     #ffffff;
+  --ink-2:   #c3c2b7;
+  --muted:   #898781;
+  --grid:    #2c2c2a;
+  --rule:    #383835;
+  --border:  rgba(255,255,255,0.10);
+  --accent:  #3987e5;
+  /* dark: light -> dark; ink flips to near-white at the research band */
+  --band-anchor:   #cde2fb; --band-anchor-ink:   #0b0b0b;
+  --band-applied:  #5598e7; --band-applied-ink:  #0b0b0b;
+  --band-research: #184f95; --band-research-ink: #fcfcfb;
+  --band-none:     #898781; --band-none-ink:     #0b0b0b;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 0 20px 64px;
+  background: var(--page); color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width: 1180px; margin: 0 auto; }
+h1 { font-size: 21px; font-weight: 650; margin: 28px 0 2px; letter-spacing: -0.01em; }
+h2 { font-size: 15px; font-weight: 650; margin: 34px 0 10px; letter-spacing: -0.005em; }
+.sub { color: var(--ink-2); font-size: 13px; margin: 0 0 4px; }
+.note { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* --- stat tiles ------------------------------------------------------------ */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+         gap: 10px; margin-top: 18px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+        padding: 13px 15px; }
+.tile .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em;
+           color: var(--muted); }
+.tile .v { font-size: 27px; font-weight: 600; margin-top: 3px; line-height: 1.1; }
+.tile .n { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+
+/* --- tier bar chart -------------------------------------------------------- */
+.chart { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+         padding: 15px 17px; margin-top: 12px; }
+.bar-row { display: grid; grid-template-columns: 74px 1fr 42px; align-items: center;
+           gap: 10px; margin: 7px 0; }
+.bar-row .lbl { font-size: 12.5px; color: var(--ink-2); }
+.bar-track { background: var(--grid); border-radius: 4px; height: 13px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 0 4px 4px 0; min-width: 2px; }
+.bar-row .num { font-size: 12.5px; color: var(--ink-2); text-align: right;
+                font-variant-numeric: tabular-nums; }
+
+/* --- filters --------------------------------------------------------------- */
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+           margin: 20px 0 6px; }
+.filters input[type=search], .filters select {
+  font: inherit; font-size: 13.5px; padding: 6px 10px; border-radius: 8px;
+  border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
+}
+.filters input[type=search] { min-width: 250px; }
+.chip { font-size: 12.5px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
+        border: 1px solid var(--rule); background: var(--surface); color: var(--ink-2);
+        user-select: none; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--page);
+                             border-color: var(--ink); }
+.count { font-size: 12.5px; color: var(--muted); margin-left: auto;
+         font-variant-numeric: tabular-nums; }
+
+/* --- tables ---------------------------------------------------------------- */
+table { width: 100%; border-collapse: collapse; background: var(--surface);
+        border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+th { text-align: left; font-size: 11.5px; text-transform: uppercase;
+     letter-spacing: 0.05em; color: var(--muted); font-weight: 600;
+     padding: 9px 12px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 9px 12px; border-bottom: 1px solid var(--grid); font-size: 13.5px;
+     vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+td.co { font-weight: 550; white-space: nowrap; }
+td.loc, td.why { color: var(--ink-2); font-size: 12.5px; }
+td.seen { color: var(--muted); font-size: 12.5px; white-space: nowrap;
+          font-variant-numeric: tabular-nums; }
+.empty { padding: 18px; color: var(--muted); font-size: 13.5px; text-align: center;
+         background: var(--surface); border: 1px solid var(--border);
+         border-radius: 10px; }
+
+/* --- chips / badges -------------------------------------------------------- */
+.tier { display: inline-block; min-width: 26px; text-align: center; padding: 2px 6px;
+        border-radius: 5px; font-size: 11.5px; font-weight: 600; }
+.pin { display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em;
+       padding: 1px 5px; border-radius: 4px; vertical-align: 1px; margin-right: 2px;
+       background: var(--band-anchor); color: var(--band-anchor-ink); }
+.badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
+         padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border);
+         white-space: nowrap; }
+.badge .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+details { margin-top: 8px; }
+summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); padding: 4px 0; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 8px 22px; margin-top: 8px; }
+.cols div { font-size: 13px; padding: 2px 0; }
+footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
+         color: var(--muted); font-size: 12px; }
+"""
+
+_JS = """
+(function () {
+  var q = document.getElementById('q');
+  var atsSel = document.getElementById('ats');
+  var locSel = document.getElementById('loc');   // absent when no criteria were passed
+  var chips = Array.prototype.slice.call(document.querySelectorAll('.chip[data-tier]'));
+  var tables = Array.prototype.slice.call(document.querySelectorAll('table[data-filterable]'));
+
+  function activeTiers() {
+    var on = chips.filter(function (c) { return c.getAttribute('aria-pressed') === 'true'; });
+    return on.length ? on.map(function (c) { return c.dataset.tier; }) : null;  // null = all
+  }
+
+  function apply() {
+    var text = (q.value || '').toLowerCase().trim();
+    var ats = atsSel.value;
+    var tiers = activeTiers();
+    // "" = anywhere; otherwise a '|'-separated set of rank names, so "US (incl. NYC)"
+    // is expressed as "nyc|us" rather than needing its own comparison.
+    var locs = locSel && locSel.value ? locSel.value.split('|') : null;
+    tables.forEach(function (t) {
+      var shown = 0;
+      Array.prototype.forEach.call(t.tBodies[0].rows, function (row) {
+        var ok = (!text || row.dataset.search.indexOf(text) !== -1)
+              && (!ats || row.dataset.ats === ats)
+              && (!locs || locs.indexOf(row.dataset.loc) !== -1)
+              && (!tiers || tiers.indexOf(row.dataset.tier) !== -1);
+        row.hidden = !ok;
+        if (ok) shown++;
+      });
+      var out = document.getElementById(t.dataset.countTarget);
+      if (out) out.textContent = shown + ' of ' + t.tBodies[0].rows.length + ' shown';
+      var none = document.getElementById(t.dataset.emptyTarget);
+      if (none) none.hidden = shown !== 0;
+    });
+  }
+
+  chips.forEach(function (c) {
+    c.addEventListener('click', function () {
+      c.setAttribute('aria-pressed', c.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+      apply();
+    });
+  });
+  q.addEventListener('input', apply);
+  atsSel.addEventListener('change', apply);
+  if (locSel) locSel.addEventListener('change', apply);
+  apply();
+})();
+"""
+
+
+def build_dashboard(
+    conn: sqlite3.Connection,
+    companies: list[Company],
+    today: str,
+    criteria: Criteria | None = None,
+) -> str:
+    """Return a complete HTML document. Pure read — never writes to `conn`.
+
+    With `criteria`, postings are ordered by location preference (NYC, then the rest of
+    the US, then unknown, then abroad) and the location filter appears. Location never
+    removes a row from the page — it only decides reading order.
+    """
+    by_name = {c.name: c for c in companies}
+    matches = _by_location(store.open_postings_by_verdict(conn, "match"), criteria)
+    uncertain = _by_location(store.open_postings_by_verdict(conn, "uncertain"), criteria)
+    counts = store.counts_by_verdict(conn)
+    run = store.last_run(conn)
+    unhealthy = store.unhealthy_boards(conn)
+
+    parts: list[str] = []
+    parts.append("<!doctype html>")
+    parts.append('<html lang="en"><head><meta charset="utf-8">')
+    parts.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    parts.append(f"<title>Job tracker — {html.escape(today)}</title>")
+    parts.append(f"<style>{_CSS}</style>")
+    parts.append('</head><body><div class="wrap">')
+
+    _header(parts, today, run, companies)
+    _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria)
+    _tier_chart(parts, matches, by_name)
+    _filters(parts, matches + uncertain, by_name, criteria)
+    _table(parts, "Open matches", matches, by_name, "matches", False, criteria)
+    _table(parts, "Uncertain — needs a human", uncertain, by_name, "uncertain", True, criteria)
+    _boards(parts, unhealthy, by_name)
+    _manual(parts, companies)
+
+    parts.append(
+        '<footer>Generated by <code>jobtracker dashboard</code> from state.db. '
+        "Static snapshot — re-run to refresh. This page never writes to the database."
+        "</footer>"
+    )
+    parts.append("</div>")
+    parts.append(f"<script>{_JS}</script>")
+    parts.append("</body></html>")
+    return "\n".join(parts) + "\n"
+
+
+# -- sections ----------------------------------------------------------------------
+def _header(parts, today, run, companies) -> None:
+    parts.append(f"<h1>Job tracker — {html.escape(today)}</h1>")
+    if run is None:
+        parts.append('<p class="sub">No run recorded yet. Run <code>jobtracker check</code>.</p>')
+        return
+    api = sum(1 for c in companies if c.check_method == "api")
+    manual = sum(1 for c in companies if c.check_method == "manual")
+    parts.append(
+        f'<p class="sub">Last run {html.escape(str(run["started_at"]))} — '
+        f'{run["ok"]} of {run["companies"]} boards healthy, '
+        f'{run["new_postings"]} new postings, {run["matches"]} new matches.</p>'
+    )
+    parts.append(
+        f'<p class="note">Coverage: {api} boards checked automatically, '
+        f"{manual} manual-only companies that are never scraped (see below).</p>"
+    )
+
+
+def _by_location(rows, criteria):
+    """Stable-sort rows by location preference. Never filters — only reorders.
+
+    The store already returns newest-first, and Python's sort is stable, so within a
+    location band the recency order is preserved.
+    """
+    if criteria is None:
+        return list(rows)
+    return sorted(rows, key=lambda r: location_rank(r["location"], criteria))
+
+
+def _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria=None) -> None:
+    stale = _days_since(run["started_at"][:10]) if run else None
+    # A run older than 2 days is the failure this whole tile exists to catch: every
+    # other number on the page keeps looking fine when the pipeline has simply stopped.
+    #
+    # Clamped at zero because the container stamps started_at in UTC while this renders
+    # in the host's local date. West of UTC that makes a run from twenty minutes ago
+    # read as -1 days, which displayed as "-1d / yesterday". Anything not in the past
+    # is "today".
+    if stale is None:
+        run_note, run_val = "never run", "—"
+    elif stale <= 0:
+        run_note, run_val = "today", "0d"
+    else:
+        run_note, run_val = ("stale" if stale > 1 else "yesterday"), f"{stale}d"
+
+    tiles = [
+        ("Open matches", str(len(matches)), "worth an application"),
+    ]
+    if criteria is not None:
+        nyc = sum(1 for r in matches if location_rank(r["location"], criteria) == 0)
+        us = sum(1 for r in matches if location_rank(r["location"], criteria) == 1)
+        tiles.append(("In NYC", str(nyc), f"+{us} elsewhere in the US"))
+    tiles += [
+        ("Uncertain", str(len(uncertain)), "needs a human read"),
+        ("Rejected", f"{counts.get('reject', 0):,}", "by the rules, auditable"),
+        ("Boards flagged", str(len(unhealthy)), "not all are problems"),
+        ("Last run", run_val, run_note),
+    ]
+    parts.append('<div class="tiles">')
+    for k, v, n in tiles:
+        parts.append(
+            f'<div class="tile"><div class="k">{html.escape(k)}</div>'
+            f'<div class="v">{html.escape(v)}</div>'
+            f'<div class="n">{html.escape(n)}</div></div>'
+        )
+    parts.append("</div>")
+
+
+def _tier_chart(parts, matches, by_name) -> None:
+    """Open matches by tier — magnitude across an ordered category, so: bars.
+
+    Tier order is meaningful (1 is the anchor, 7 is research-interest), so the bars stay
+    in tier order rather than sorting by count. Every bar carries its tier label and its
+    count directly, so the three-band color is reinforcement and never the encoding.
+    """
+    if not matches:
+        return
+    tally = Counter(_tier_of(r["company"], by_name) for r in matches)
+    if not tally:
+        return
+    top = max(tally.values())
+    parts.append("<h2>Open matches by tier</h2>")
+    parts.append('<div class="chart">')
+    for tier in sorted(tally, key=lambda t: (t == "—", t)):
+        n = tally[tier]
+        label = f"Tier {tier}" if tier != "—" else "Untiered"
+        var = _band_var(tier)
+        pct = 100.0 * n / top
+        parts.append(
+            f'<div class="bar-row"><div class="lbl">{html.escape(label)}</div>'
+            f'<div class="bar-track"><div class="bar-fill" '
+            f'style="width:{pct:.1f}%;background:var({var})"></div></div>'
+            f'<div class="num">{n}</div></div>'
+        )
+    parts.append("</div>")
+    parts.append(
+        '<p class="note">Shading groups tiers the way the strategy does: '
+        "<strong>T1–T2</strong> the anchor (backend scale-ups, infra/devtools), "
+        "<strong>T3–T5</strong> applied to but not anchored on, "
+        "<strong>T6–T7</strong> research interest outside the new-grad pipeline.</p>"
+    )
+
+
+def _filters(parts, rows, by_name, criteria=None) -> None:
+    tiers = sorted({_tier_of(r["company"], by_name) for r in rows}, key=lambda t: (t == "—", t))
+    ats = sorted({by_name[r["company"]].ats for r in rows if r["company"] in by_name})
+    parts.append('<div class="filters">')
+    parts.append(
+        '<input type="search" id="q" placeholder="Filter by title, company, location…" '
+        'aria-label="Filter postings">'
+    )
+    parts.append('<select id="ats" aria-label="Filter by ATS"><option value="">All ATS</option>')
+    for a in ats:
+        parts.append(f'<option value="{html.escape(a)}">{html.escape(a)}</option>')
+    parts.append("</select>")
+    # Location is a filter you opt into, not one applied for you — the default is "all",
+    # matching the rule that geography never removes anything on its own.
+    if criteria is not None:
+        parts.append('<select id="loc" aria-label="Filter by location">')
+        for value, label in (
+            ("", "Anywhere"),
+            ("nyc", "NYC only"),
+            ("nyc|us", "US (incl. NYC)"),
+            ("unknown", "Unspecified"),
+            ("non-us", "Outside the US"),
+        ):
+            parts.append(f'<option value="{value}">{html.escape(label)}</option>')
+        parts.append("</select>")
+    for t in tiers:
+        label = f"T{t}" if t != "—" else "untiered"
+        parts.append(
+            f'<button type="button" class="chip" data-tier="{html.escape(str(t))}" '
+            f'aria-pressed="false">{html.escape(label)}</button>'
+        )
+    parts.append("</div>")
+    note = (
+        "No tier selected means all tiers. Filters apply to both tables below; "
+        "with JavaScript disabled every row is shown unfiltered."
+    )
+    if criteria is not None:
+        note += (
+            " Rows are already ordered NYC first, then the rest of the US — location "
+            "changes the order, never the contents."
+        )
+    parts.append(f'<p class="note">{note}</p>')
+
+
+def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None) -> None:
+    parts.append(
+        f'<h2>{html.escape(heading)} '
+        f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
+    )
+    if not rows:
+        parts.append('<div class="empty">Nothing here.</div>')
+        return
+    parts.append(
+        f'<table data-filterable data-count-target="{ident}-count" '
+        f'data-empty-target="{ident}-empty">'
+    )
+    parts.append("<thead><tr><th>Tier</th><th>Company</th><th>Role</th>"
+                 "<th>Location</th>" + ("<th>Why uncertain</th>" if reason else "")
+                 + "<th>First seen</th></tr></thead><tbody>")
+    for r in rows:
+        company = by_name.get(r["company"])
+        tier = _tier_of(r["company"], by_name)
+        var = _band_var(tier)
+        ats = company.ats if company else ""
+        loc = r["location"] or ""
+        rank = location_rank(loc, criteria) if criteria is not None else None
+        loc_key = location_label(rank) if rank is not None else ""
+        search = " ".join(
+            x.lower() for x in (r["company"], r["title"], loc, str(tier), ats) if x
+        )
+        parts.append(
+            f'<tr data-tier="{html.escape(str(tier))}" data-ats="{html.escape(ats)}" '
+            f'data-loc="{html.escape(loc_key)}" '
+            f'data-search="{html.escape(search)}">'
+        )
+        parts.append(
+            f'<td><span class="tier" '
+            f'style="background:var({var});color:var({var}-ink)">'
+            f'{html.escape(str(tier))}</span></td>'
+        )
+        parts.append(f'<td class="co">{html.escape(r["company"])}</td>')
+        parts.append(f'<td><a href="{_safe_url(r["url"])}" target="_blank" '
+                     f'rel="noopener noreferrer">{html.escape(r["title"])}</a></td>')
+        # The NYC pin is a marker on the single most-preferred band, not a per-row
+        # colored scale — four location colors beside seven tier chips would be noise.
+        pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
+        parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
+        if reason:
+            parts.append(f'<td class="why">{html.escape(r["reason"] or "")}</td>')
+        parts.append(f'<td class="seen">{html.escape((r["first_seen"] or "")[:10])}</td>')
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    parts.append(f'<div class="empty" id="{ident}-empty" hidden>No rows match the filters.</div>')
+
+
+_STATUS_STYLE = {
+    "ok": ("good", "✓", "healthy"),
+    "suspect_empty": ("warning", "!", "reachable but empty"),
+    "fetch_failed": ("serious", "×", "could not fetch"),
+    "identity_drift": ("critical", "⚠", "wrong company's board"),
+}
+
+
+def _boards(parts, unhealthy, by_name) -> None:
+    parts.append(f"<h2>Flagged boards ({len(unhealthy)})</h2>")
+    if not unhealthy:
+        parts.append('<div class="empty">All boards healthy.</div>')
+        return
+    parts.append(
+        '<p class="note">A flag is not automatically a bug. <code>suspect_empty</code> '
+        "means the slug is right and the board genuinely has zero open reqs — dbt Labs and "
+        "Root Insurance sit here permanently, and the tier-7 lakehouse companies are "
+        "expected to. Escalation happens only after repeated empties on a board that was "
+        "once populated. <code>identity_drift</code> is always serious: the board no longer "
+        "belongs to the company we think it does, and its postings were discarded.</p>"
+    )
+    parts.append("<table><thead><tr><th>Company</th><th>Status</th><th>Board</th>"
+                 "<th>Detail</th></tr></thead><tbody>")
+    for r in unhealthy:
+        status = r["last_status"]
+        color, icon, word = _STATUS_STYLE.get(status, ("muted", "•", status))
+        company = by_name.get(r["company"])
+        slug = f"{company.ats}/{company.slug}" if company else "—"
+        alert = " · escalated" if r["alerting"] else ""
+        parts.append(
+            f'<tr><td class="co">{html.escape(r["company"])}</td>'
+            f'<td><span class="badge"><span class="dot" '
+            f'style="background:var(--{color})"></span>{icon} {html.escape(word)}'
+            f"{alert}</span></td>"
+            f'<td class="loc"><code>{html.escape(slug)}</code></td>'
+            f'<td class="why">{html.escape(r["detail"] or "—")}</td></tr>'
+        )
+    parts.append("</tbody></table>")
+
+
+def _manual(parts, companies) -> None:
+    manual = sorted(
+        (c for c in companies if c.check_method == "manual"),
+        key=lambda c: (c.tier if c.tier is not None else 99, c.name),
+    )
+    parts.append(f"<h2>Never scraped — check by hand ({len(manual)})</h2>")
+    parts.append(
+        '<p class="note">These run Workday, Gem, bespoke portals or token-gated boards '
+        "with no keyless JSON API. The pipeline deliberately does not touch them, because "
+        "surfacing a gap in coverage is honest and reporting zero for an unchecked company "
+        "is not.</p>"
+    )
+    parts.append("<details><summary>Show the list</summary><div class=\"cols\">")
+    for c in manual:
+        tier = f"T{c.tier}" if c.tier is not None else "—"
+        link = (
+            f'<a href="{_safe_url(c.careers_page)}" target="_blank" '
+            f'rel="noopener noreferrer">{html.escape(c.name)}</a>'
+            if c.careers_page
+            else html.escape(c.name)
+        )
+        parts.append(f"<div>{html.escape(tier)} · {link}</div>")
+    parts.append("</div></details>")
+
+
+# -- helpers -----------------------------------------------------------------------
+def _tier_of(company_name: str, by_name: dict[str, Company]):
+    company = by_name.get(company_name)
+    return company.tier if company and company.tier is not None else "—"
+
+
+def _band_var(tier) -> str:
+    """Map a tier to its CSS color band. See the palette comment for why three, not seven.
+
+    Returns the base variable name; the paired ink is always `<name>-ink`.
+    """
+    if not isinstance(tier, int):
+        return "--band-none"
+    if tier <= 2:
+        return "--band-anchor"
+    if tier <= 5:
+        return "--band-applied"
+    return "--band-research"
+
+
+def _safe_url(url: Optional[str]) -> str:
+    """Escape a URL, and refuse any scheme that is not http(s).
+
+    Posting URLs come from third-party APIs. A `javascript:` URL in an href would run
+    when clicked; dropping to '#' is the boring, correct handling.
+    """
+    if not url:
+        return "#"
+    lowered = url.strip().lower()
+    if not (lowered.startswith("http://") or lowered.startswith("https://")):
+        return "#"
+    return html.escape(url.strip(), quote=True)
+
+
+def _days_since(iso_day: str) -> Optional[int]:
+    try:
+        return (date.today() - date.fromisoformat(iso_day)).days
+    except (ValueError, TypeError):
+        return None

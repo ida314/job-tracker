@@ -253,6 +253,36 @@ def postings_with_decision(
     )
 
 
+def open_postings_by_verdict(conn: sqlite3.Connection, decision: str) -> list[sqlite3.Row]:
+    """Every OPEN posting with this verdict, regardless of when it was first seen.
+
+    postings_with_decision() answers the daily report's question — "what is new since
+    <date>". The dashboard asks a different one: "what is the standing backlog right
+    now", which includes a match first seen three weeks ago and still open. Same join,
+    no date floor, newest first because recency is how you triage a backlog.
+    """
+    return list(
+        conn.execute(
+            """
+            SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
+                   p.first_seen, v.reason
+            FROM postings p JOIN verdicts v
+              ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+            WHERE v.verdict=? AND p.closed_at IS NULL
+            ORDER BY p.first_seen DESC, p.company, p.title
+            """,
+            (decision,),
+        )
+    )
+
+
+def last_run(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+    """The most recent run row, or None if the pipeline has never run."""
+    return conn.execute(
+        "SELECT * FROM runs ORDER BY started_at DESC LIMIT 1"
+    ).fetchone()
+
+
 def unhealthy_boards(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return list(
         conn.execute(

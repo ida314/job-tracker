@@ -33,11 +33,36 @@ python -m jobtracker.cli verify-slugs --write   # + seed expected_board_name for
 python -m jobtracker.cli check           # the daily run: fetch -> health -> store -> match -> report
 python -m jobtracker.cli rematch         # re-apply criteria to stored postings (no network)
 python -m jobtracker.cli report          # re-render the latest state (no network)
+python -m jobtracker.cli dashboard       # render state.db to data/dashboard.html (no network)
 python -m jobtracker.cli add-company --name X --ats greenhouse --slug x --tier 2
 ```
 
 `check` writes the report to **stdout**; progress goes to **stderr**, so `check > report.md`
 stays clean. `--output report.md` writes the file directly.
+
+## Two dashboards
+
+They answer different questions and are independent — either works without the other.
+
+| | `jobtracker dashboard` | Grafana (`otel/grafana-dashboard.json`) |
+|---|---|---|
+| Question | *What should I apply to?* | *Did last night's run work?* |
+| Source | `state.db` | Prometheus metrics |
+| Needs | nothing — one HTML file | the tier-3 stack up |
+
+```bash
+python -m jobtracker.cli dashboard      # -> data/dashboard.html, open it with file://
+```
+
+Open matches and the uncertain backlog, filterable by tier / ATS / location / text, plus
+flagged boards and the manual companies that are never scraped. Self-contained: no server,
+no network at view time, works offline, and readable with JavaScript disabled. It is a pure
+read — unlike `report`, it never writes to the database.
+
+**Location ranks, it never disqualifies.** Results come out NYC first, then the rest of the
+US, then unspecified, then abroad — but nothing is dropped for where it is, and the location
+filter defaults to "Anywhere". See `criteria.yaml` for the lists and `match.location_rank()`
+for the ordering (including why an unspecified location outranks an explicitly foreign one).
 
 Global flags (before the subcommand): `-v` for per-request DEBUG, `-q` for warnings only,
 `--telemetry {off,console,otlp}`.
