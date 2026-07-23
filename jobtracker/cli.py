@@ -169,7 +169,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     )
 
     log.info("rendering report")
-    text = report_mod.build_report(conn, companies, today, since=today, mark_manual=True)
+    text = report_mod.build_report(
+        conn, companies, today, since=today, mark_manual=True, criteria=criteria
+    )
     conn.commit()
     conn.close()
 
@@ -264,7 +266,10 @@ def cmd_report(args: argparse.Namespace) -> int:
     companies = config.load_companies(args.companies)
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     since = args.since or _today()
-    text = report_mod.build_report(conn, companies, _today(), since=since, mark_manual=False)
+    criteria = load_criteria(args.criteria)
+    text = report_mod.build_report(
+        conn, companies, _today(), since=since, mark_manual=False, criteria=criteria
+    )
     conn.close()
     print(text)
     return 0
@@ -339,6 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
     rm.set_defaults(func=cmd_rematch)
 
     r = sub.add_parser("report", help="re-render state.db without fetching")
+    r.add_argument("--criteria", default=str(config.CRITERIA_YAML))
     r.add_argument("--db", default=None)
     r.add_argument("--since", default=None)
     r.set_defaults(func=cmd_report)

@@ -120,44 +120,193 @@ role_type_exclude:
   - account executive
   - account manager
 
-# Location handling. A posting whose location clearly matches an exclude token is
-# REJECTed; preferred/acceptable are recorded for ranking. Remote-US and unknown
-# locations are never rejected on geography alone.
-locations_preferred:
+# ---------------------------------------------------------------------------------
+# Location: RANKS, never gates (2026-07-22, at the user's direction — no location is
+# disqualifying, but US is preferred and NYC preferred above all).
+#
+# The old `locations_exclude` was a hard gate that fired BEFORE the level gate, so 390
+# postings in London / Dublin / Bengaluru / Toronto / Singapore were rejected without
+# their titles ever being read. That is gone. These three lists only order results:
+#
+#   rank 0  NYC              locations_nyc
+#   rank 1  elsewhere in US  locations_us
+#   rank 2  unknown          no list matched — deliberately ranked ABOVE explicit non-US
+#   rank 3  outside the US   locations_non_us
+#
+# Unknown sits at 2, not last, because a bare "Remote" is more likely US-eligible than
+# a posting that says "Bengaluru". Ranking is conservative where the data is vague.
+#
+# match.location_rank() checks NYC first, then non-US, then US. That order matters: the
+# two-letter state codes below are ambiguous ("CA" is both California and Canada), so an
+# explicit country name has to win before codes are consulted.
+locations_nyc:
   - New York
   - NYC
+  - Manhattan
+  - Brooklyn
+
+locations_us:
+  # Explicit country markers first — these are unambiguous.
+  - United States
+  - USA
   - Remote US
-  - Remote
-  - Hybrid NYC
-locations_acceptable:
+  - Remote - US
+  - US
+  # Cities that appear often enough in these boards to be worth naming.
   - Boston
   - Austin
   - Seattle
   - San Francisco
   - Bay Area
+  - Palo Alto
+  - Mountain View
   - Chicago
   - Atlanta
-  - Washington DC
-# Clearly out-of-scope geographies. Kept conservative to avoid false rejects.
-locations_exclude:
+  - Denver
+  - Washington
+  - Los Angeles
+  - San Jose
+  - Portland
+  - Pittsburgh
+  - Philadelphia
+  - Madison
+  # Full state names. Unambiguous, and boards often write these instead of a city
+  # ("Wisconsin (relocation)"). Worth the length — each one is a miss otherwise.
+  - Alabama
+  - Alaska
+  - Arizona
+  - Arkansas
+  - California
+  - Colorado
+  - Connecticut
+  - Delaware
+  - Florida
+  - Idaho
+  - Illinois
+  - Indiana
+  - Iowa
+  - Kansas
+  - Kentucky
+  - Louisiana
+  - Maine
+  - Maryland
+  - Massachusetts
+  - Michigan
+  - Minnesota
+  - Mississippi
+  - Missouri
+  - Montana
+  - Nebraska
+  - Nevada
+  - New Hampshire
+  - New Jersey
+  - New Mexico
+  - North Carolina
+  - North Dakota
+  - Ohio
+  - Oklahoma
+  - Oregon
+  - Pennsylvania
+  - Rhode Island
+  - South Carolina
+  - South Dakota
+  - Tennessee
+  - Texas
+  - Utah
+  - Vermont
+  - Virginia
+  - Wisconsin
+  - Wyoming
+  # State codes. Ambiguous in isolation, which is why non-US is checked first.
+  - NY
+  - CA
+  - WA
+  - TX
+  - MA
+  - IL
+  - GA
+  - CO
+  - DC
+  - VA
+  - MD
+  - PA
+  - NJ
+  - NC
+  - FL
+  - OH
+  - MI
+  - MN
+  - WI
+  - OR
+  - UT
+  - AZ
+  - TN
+
+locations_non_us:
+  - Canada
+  - Toronto
+  - Vancouver
+  - Montreal
+  - Ontario
   - London
+  - United Kingdom
   - Dublin
+  - Ireland
+  - Berlin
+  - Munich
+  - Germany
+  - Paris
+  - France
+  - Amsterdam
+  - Netherlands
+  - Spain
+  - Portugal
+  - Lisbon
+  - Poland
+  - Warsaw
+  - Krakow
+  - Czech Republic
+  - Brno
+  - Prague
+  - Iceland
+  - Reykjavik
+  - Reykjavík          # boards write it both ways; tokens match literally
+  - Sweden
+  - Stockholm
+  - Israel
+  - Tel Aviv
+  - India
   - Bengaluru
   - Bangalore
   - Hyderabad
   - Gurgaon
-  - India
+  - Pune
   - Singapore
+  - Japan
   - Tokyo
+  - China
+  - Beijing
+  - Shanghai
+  - Hangzhou
+  - Shenzhen
+  - Hong Kong
+  - Taiwan
+  - Korea
+  - Seoul
+  - Australia
   - Sydney
-  - Toronto
-  - Vancouver
-  - Berlin
-  - Paris
-  - Amsterdam
-  - Tel Aviv
+  - Melbourne
+  - Brazil
   - "São Paulo"
   - Sao Paulo
+  - Mexico
+  - Argentina
+  - Colombia
+  - Bogota
+  - Zurich
+  - Switzerland
+  - Italy
+  - Milan
 
 # Non-gating: recorded for later ranking of the MATCH bucket.
 keywords_bonus:

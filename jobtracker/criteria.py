@@ -22,9 +22,10 @@ _LIST_KEYS = {
     "engineering_terms",
     "role_type_include",
     "role_type_exclude",
-    "locations_preferred",
-    "locations_acceptable",
-    "locations_exclude",
+    # Location lists RANK, they never gate. See match.location_rank().
+    "locations_nyc",
+    "locations_us",
+    "locations_non_us",
     "keywords_bonus",
 }
 
@@ -47,9 +48,9 @@ class Criteria:
     engineering_terms: list[str] = field(default_factory=list)
     role_type_include: list[str] = field(default_factory=list)
     role_type_exclude: list[str] = field(default_factory=list)
-    locations_preferred: list[str] = field(default_factory=list)
-    locations_acceptable: list[str] = field(default_factory=list)
-    locations_exclude: list[str] = field(default_factory=list)
+    locations_nyc: list[str] = field(default_factory=list)
+    locations_us: list[str] = field(default_factory=list)
+    locations_non_us: list[str] = field(default_factory=list)
     keywords_bonus: list[str] = field(default_factory=list)
 
     # Compiled patterns, keyed by list name -> [(token, pattern), ...].

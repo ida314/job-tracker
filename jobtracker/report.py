@@ -13,6 +13,8 @@ import sqlite3
 from collections import defaultdict
 
 from . import store
+from .criteria import Criteria
+from .match import location_label, location_rank
 from .models import Company
 
 MANUAL_INTERVAL_DAYS = 7
@@ -24,7 +26,13 @@ def build_report(
     today: str,
     since: str,
     mark_manual: bool = True,
+    criteria: Criteria | None = None,
 ) -> str:
+    """Render the daily report.
+
+    `criteria` is optional only so a caller with no criteria file still gets a report;
+    pass it and matches are ordered NYC first, then the rest of the US.
+    """
     by_name = {c.name: c for c in companies}
     lines: list[str] = []
     lines.append(f"# Job tracker — {today}")
@@ -37,7 +45,7 @@ def build_report(
     )
     lines.append("")
 
-    _new_matches(lines, conn, by_name, since)
+    _new_matches(lines, conn, by_name, since, criteria)
     _uncertain(lines, conn, since)
     _failures(lines, conn, by_name)
     _manual(lines, conn, companies, today, mark_manual)
@@ -45,7 +53,7 @@ def build_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _new_matches(lines, conn, by_name, since) -> None:
+def _new_matches(lines, conn, by_name, since, criteria=None) -> None:
     rows = store.postings_with_decision(conn, "match", since)
     lines.append(f"## New matches ({len(rows)})")
     if not rows:
@@ -64,9 +72,18 @@ def _new_matches(lines, conn, by_name, since) -> None:
         lines.append("")
         label = f"Tier {tier}" if tier != "—" else "Untiered"
         lines.append(f"### {label}")
-        for r in by_tier[tier]:
+        # Within a tier, NYC first, then the rest of the US, then unknown, then abroad.
+        # Location never removes a row — it only decides what you read first.
+        entries = by_tier[tier]
+        if criteria is not None:
+            entries = sorted(entries, key=lambda r: location_rank(r["location"], criteria))
+        for r in entries:
             loc = f" · {r['location']}" if r["location"] else ""
-            lines.append(f"- **{r['company']}** — {r['title']}{loc}")
+            tag = ""
+            if criteria is not None:
+                rank = location_rank(r["location"], criteria)
+                tag = "  **[NYC]**" if rank == 0 else ""
+            lines.append(f"- **{r['company']}** — {r['title']}{loc}{tag}")
             lines.append(f"  {r['url']}")
     lines.append("")
 

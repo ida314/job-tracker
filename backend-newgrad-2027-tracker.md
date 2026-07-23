@@ -40,8 +40,11 @@ role_type_include: [backend, full-stack, fullstack, platform, infrastructure, di
 level_include: [new grad, new graduate, entry level, entry-level, associate, university grad, early career, "2027", "L3", "E3", "SDE I, "SWE I", "Software Engineer I", junior, grad]
 exclude_titles: [senior, sr., staff, principal, lead, manager, director, head of, vp, intern, internship, ii, iii, "2026 grad", contractor, "5+ years", "3+ years"]
 graduation_eligibility: 2027 or open "new grad" (exclude roles explicitly requiring 2025/2026 graduation)
-locations_preferred: [New York, NYC, Remote US, Remote, Hybrid NYC]
-locations_acceptable: [Boston, Austin, Seattle, San Francisco, Bay Area, Chicago, Atlanta, Washington DC]
+# Location RANKS, it never disqualifies (2026-07-22). NYC first, then the rest of the
+# US, then unspecified, then abroad. See criteria.yaml for the authoritative lists.
+locations_nyc: [New York, NYC, Manhattan, Brooklyn]
+locations_us: [Remote US, Boston, Austin, Seattle, San Francisco, Bay Area, Chicago, Atlanta, Washington DC, ...]
+locations_non_us: [London, Dublin, Toronto, Bengaluru, Singapore, Tokyo, ...]   # ranked last, NOT excluded
 citizenship_note: exclude roles requiring active security clearance unless user updates this
 keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRPC, microservices, PostgreSQL, databases, Kubernetes]
 ```
@@ -1047,10 +1050,11 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 > run on Feishu/Lark boards that return HTTP 405 on unauthenticated API reads; the rest are
 > bespoke SPAs. Verified 2026-07-20.
 >
-> **These entries do not satisfy the Match Criteria as written.** `locations_preferred` is
-> NYC/Remote US; most roles here are Beijing/Hangzhou/Shanghai and would need relocation and
-> China work authorization. Only ByteDance Seed and Alibaba have confirmed US hiring. Treat
-> the mainland-only entries as research-interest targets, not as new-grad pipeline.
+> **These rank last on location, but are no longer excluded by it.** As of 2026-07-22
+> geography ranks rather than gates, so Beijing/Hangzhou/Shanghai roles sort to the bottom
+> instead of being dropped. The practical caveats are unchanged: relocation and China work
+> authorization. Only ByteDance Seed and Alibaba have confirmed US hiring. Treat the
+> mainland-only entries as research-interest targets, not as new-grad pipeline.
 >
 > **Known slug trap:** `ashby/moonshot-ai` returns live jobs belonging to an unrelated US
 > startup in NYC, not 月之暗面. Same failure mode as `ashby/cedar`. Do not add it.

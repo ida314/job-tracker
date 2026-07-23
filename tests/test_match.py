@@ -4,7 +4,7 @@ import pytest
 
 from jobtracker import config
 from jobtracker.criteria import load_criteria
-from jobtracker.match import match
+from jobtracker.match import location_rank, match
 from jobtracker.models import Decision, Posting
 
 
@@ -39,7 +39,6 @@ REJECT_CASES = [
     ("New Grad Frontend Engineer", "excluded_role:frontend"),
     ("New Grad Machine Learning Engineer", "excluded_role:machine learning"),
     ("New Grad iOS Engineer", "excluded_role:ios"),
-    ("Backend Engineer, New Grad", "location:London", "London, UK"),
     ("Software Engineering Intern", "excluded_title:intern"),
     # Entry-level but non-engineering business roles -> REJECT, not MATCH.
     ("Finance Associate", "non_engineering_role:level=associate"),
@@ -92,3 +91,45 @@ def test_swe_i_not_matched_by_engineer_ii(criteria):
 def test_verdict_carries_identity(criteria):
     v = match(_p("Senior Engineer"), criteria)
     assert v.company == "Acme" and v.ats_job_id == "1" and v.decided_by == "rules"
+
+
+# -- location: ranks, never gates --------------------------------------------------
+def test_location_never_rejects(criteria):
+    """Geography stopped being a gate on 2026-07-22. Nothing is disqualified for it."""
+    for loc in ("London, UK", "Bengaluru, India", "Toronto, ON", "Shanghai, China"):
+        v = match(_p("Software Engineer, New Grad", loc), criteria)
+        assert v.decision is Decision.MATCH, f"{loc} -> {v.decision} ({v.reason})"
+        assert "location" not in v.reason
+
+
+@pytest.mark.parametrize(
+    "location,expected",
+    [
+        ("New York, NY", 0),
+        ("Remote / New York, NY (HQ)", 0),
+        ("Brooklyn, NY", 0),
+        ("Seattle, WA, US; San Francisco, CA, US", 1),
+        ("Remote - US", 1),
+        ("Wisconsin (relocation)", 1),
+        ("Remote", 2),
+        ("", 2),
+        (None, 2),
+        ("London, UK", 3),
+        ("Remote Spain", 3),
+        ("Brno, Czech Republic", 3),
+    ],
+)
+def test_location_rank(criteria, location, expected):
+    assert location_rank(location, criteria) == expected
+
+
+def test_country_name_beats_ambiguous_state_code(criteria):
+    """'CA' is both California and Canada, so non-US must be checked before US."""
+    assert location_rank("Toronto, Canada", criteria) == 3
+    assert location_rank("Toronto, ON", criteria) == 3
+    assert location_rank("Palo Alto, CA", criteria) == 1
+
+
+def test_unknown_outranks_explicit_non_us(criteria):
+    """A bare 'Remote' is likelier to be US-eligible than one that names Bengaluru."""
+    assert location_rank("Remote", criteria) < location_rank("Bengaluru, India", criteria)

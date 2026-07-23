@@ -18,8 +18,12 @@ as the change.
   distributed-systems work early beats a bigger name with a narrower first role. Tier 1
   (backend scale-ups) and Tier 2 (infra/devtools, where backend *is* the product) are the
   anchor. Tier 4 (Big Tech) is applied to but not anchored on.
-- **Location: NYC or remote.** New York / NYC / Hybrid NYC / Remote US are preferred.
-  Boston, Austin, Seattle, SF/Bay Area, Chicago, Atlanta, DC are acceptable.
+- **Location ranks, it does not disqualify** (set 2026-07-22). NYC is preferred above
+  all, then anywhere else in the US, then unspecified, then outside the US. Nothing is
+  rejected for where it is. Until 2026-07-22 `locations_exclude` was a hard gate that
+  fired *before* the level gate, so 390 postings — London, Dublin, Bengaluru, Toronto,
+  Singapore — were discarded without their titles ever being read. Don't reintroduce a
+  geography gate; `match.location_rank()` is the mechanism, and it only sorts.
 
 Full include/exclude rules live in the `Match Criteria` YAML block in the tracker. That
 block is the source of truth for role matching — don't duplicate it here.
@@ -109,10 +113,12 @@ confirmed against the company name. Current composition of the 98 entries:
 
 **Tier 6 added 2026-07-20** — seven Chinese frontier AI labs, all `manual`. None has a
 keyless JSON board; MiniMax, Zhipu, and Moonshot run Feishu/Lark boards that 405 on
-unauthenticated reads. These entries do **not** satisfy the Match Criteria (`locations_*`
-is US-only) and were added as research-interest targets at the user's request — only
-ByteDance Seed and Alibaba have confirmed US hiring. Do not silently drop them for failing
-the location filter, and do not "promote" any of them to `api`.
+unauthenticated reads. Added as research-interest targets at the user's request — only
+ByteDance Seed and Alibaba have confirmed US hiring. Do not "promote" any of them to `api`.
+
+(Their original caveat was that they failed the US-only location filter. That filter no
+longer exists — location ranks rather than gates as of 2026-07-22 — so these rank last
+rather than being excluded. They stay tier 6 on hiring-pipeline grounds, not geography.)
 
 **Known name collision:** `ashby/moonshot-ai` is an unrelated NYC startup, not 月之暗面.
 Live jobs, wrong company — the `ashby/cedar` failure mode again.
