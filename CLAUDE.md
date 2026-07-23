@@ -99,12 +99,12 @@ pretending to have checked it is not. Never let a `manual` entry silently report
 ## Validation state
 
 **Audited 2026-07-09.** Every `check_method: api` entry was fetched and its board identity
-confirmed against the company name. Current composition of the 89 entries:
+confirmed against the company name. Current composition of the 98 entries:
 
 | | Count | Status |
 |---|---|---|
-| `api` | 56 | All return valid JSON. 43 Greenhouse, 12 Ashby, 1 Lever. |
-| `manual` | 31 | Never scraped, by rule. Flagged weekly. |
+| `api` | 62 | All return valid JSON. 47 Greenhouse, 13 Ashby, 2 Lever. |
+| `manual` | 34 | Never scraped, by rule. Flagged weekly. |
 | `aggregator` | 2 | GitHub new-grad lists, diffed daily. |
 
 **Tier 6 added 2026-07-20** — seven Chinese frontier AI labs, all `manual`. None has a
@@ -117,9 +117,47 @@ the location filter, and do not "promote" any of them to `api`.
 **Known name collision:** `ashby/moonshot-ai` is an unrelated NYC startup, not 月之暗面.
 Live jobs, wrong company — the `ashby/cedar` failure mode again.
 
-**Validated:** all 56 api slugs resolve, return parseable JSON, and belong to the intended
-company. 15 entries were corrected in that audit — see the bucketed commits following the
-`pre-audit baseline` commit.
+**Observability vendors added 2026-07-22** — five entries at the user's request. SolarWinds
+(`greenhouse/solarwinds`, 95 reqs), Sumo Logic (`greenhouse/sumologic`, 16 reqs) and Five9
+(`greenhouse/five9`, 160 reqs) were confirmed by board identity before being written.
+Coralogix and SAP are `manual`: Coralogix runs **Comeet**, whose careers-api needs a company
+uid plus a page-embedded token, and SAP runs its own SuccessFactors site (`jobs.sap.com`) —
+neither is a keyless JSON board, so neither may be promoted to `api`. Datadog (tier 1) and
+Elastic (tier 2) were already present and were not duplicated.
+
+**Tiers rank growth opportunity, not product category.** SolarWinds and Sumo Logic were
+first filed at tier 2 because observability is their product — that was the wrong axis and
+they were moved to **tier 5** the same day. Both are PE-owned take-privates (Turn/River and
+Francisco Partners respectively), which structurally means cost discipline over growth
+investment, illiquid or immaterial equity, and thin new-grad hiring; SolarWinds adds heavy
+engineering offshoring and a legacy, maintenance-shaped product surface. Sumo Logic's 16-req
+board next to SolarWinds' 95 and Five9's 160 is a hiring-appetite signal, not a bad slug —
+do not flag either as `SUSPECT_EMPTY`, and do not re-promote them on product category alone.
+
+Tier 5 now ends with the enterprise/PE cluster in ascending risk: Five9 → SAP → SolarWinds →
+Sumo Logic. **Coralogix stays at tier 2 but is the least certain entry there** — the
+technology is genuinely observability-infra, but engineering is centered in Israel with a
+small US footprint, which limits both the backend work open to a US new grad and the
+mentorship attached to it. Demote it if no US role materializes.
+
+**Tier 7 added 2026-07-22** — four data-versioning / lakehouse companies, isolated from the
+new-grad pipeline the same way Tier 6 is. The tech is genuinely distributed-systems-shaped
+but none runs a new-grad program, so a near-empty result here is the expected state:
+Dremio has 6 reqs (1 engineering), LanceDB's postings are 100% `Senior` and match zero roles
+against `exclude_titles`, Onehouse puts backend/infra in Bangalore and only senior/staff in
+the US, and lakeFS is Tel Aviv with no US roles. Do not flag these as `SUSPECT_EMPTY`.
+
+Three traps recorded while adding them:
+
+- **Lever slugs are case-sensitive.** Onehouse is `lever/Onehouse`; `lever/onehouse` 404s.
+- **`lakeFS` acquired `DVC`** — one company, one entry. DVC's original company, Iterative,
+  rebranded to **DataChain**, and `iterative.ai/careers` 302s to a 404.
+- **`Delta Lake` is a Databricks project**, not a company — Databricks is already Tier 1.
+  Adding a project as a company is the duplicate-target version of the `ashby/cedar` trap.
+
+**Validated:** all 62 api slugs resolve, return parseable JSON, and belong to the intended
+company. 15 entries were corrected in the 2026-07-09 audit — see the bucketed commits
+following the `pre-audit baseline` commit.
 
 **Valid but currently empty** — correct slugs, genuinely zero open reqs. Do not "fix"
 these; they are not broken:
@@ -130,7 +168,7 @@ these; they are not broken:
 **Not yet done:**
 
 - No Match Criteria filtering has ever been run. No role matching has happened.
-- `status`, `last_checked`, and `last_posting_seen` are untouched across all 89 entries.
+- `status`, `last_checked`, and `last_posting_seen` are untouched across all 98 entries.
   The first real daily run is still pending.
 - The two aggregator sources have never been fetched or diffed. The Ouckah/CVrve repo URL
   is unverified and these repos rename by cycle year.

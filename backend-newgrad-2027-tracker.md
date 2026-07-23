@@ -491,6 +491,18 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_posting_seen:
 - notes: API gateway. 2026-07-09 — resolved: migrated Greenhouse → Ashby, slug is `kong`, not `konginc`.
 
+### Coralogix
+- ats: bespoke
+- slug:
+- board_url:
+- careers_page: https://coralogix.com/careers/
+- category: observability-infra
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. Runs Comeet; greenhouse/lever/ashby `coralogix` all 404. Comeet's careers-api needs a company uid plus a page-embedded token, so there is no keyless JSON board — manual by rule. Israeli HQ; US roles are Boston-area and remote, so check locations by hand.
+
 ---
 
 ## Tier 3 — Regulated industry (fintech / healthcare / insurance)  *(underrated: correctness + scale, less competition)*
@@ -978,6 +990,54 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_checked:
 - last_posting_seen:
 
+### Five9
+- ats: greenhouse
+- slug: five9
+- board_url: https://boards-api.greenhouse.io/v1/boards/five9/jobs?content=true
+- careers_page: https://www.five9.com/about/careers
+- category: enterprise-saas
+- check_method: api
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. Slug confirmed via board identity (name "Five9"), 160 open reqs. Cloud contact-center SaaS — real telephony/streaming scale behind it, but the product is an application, not infra, hence tier 5 rather than tier 2. Remote-friendly.
+
+### SAP
+- ats: bespoke
+- slug:
+- board_url:
+- careers_page: https://jobs.sap.com
+- category: enterprise-saas
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. Runs its own SuccessFactors career site (jobs.sap.com); greenhouse/lever/ashby all 404. No keyless JSON board — manual by rule. Large, reliable US new-grad hiring (Palo Alto, Newtown Square, NYC).
+
+### SolarWinds
+- ats: greenhouse
+- slug: solarwinds
+- board_url: https://boards-api.greenhouse.io/v1/boards/solarwinds/jobs?content=true
+- careers_page: https://www.solarwinds.com/careers
+- category: observability-infra
+- check_method: api
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. Identity confirmed (name "SolarWinds"), 95 reqs. Austin HQ. Observability is the product, which is why this was first filed at tier 2 — but that tiered on product category, and this list ranks growth opportunity. Taken private by Turn/River (2025): cost discipline over growth investment, no liquid equity, heavy engineering offshoring, and a legacy product surface that is more maintenance than frontier work. Honest "no" as a FIRST job.
+
+### Sumo Logic
+- ats: greenhouse
+- slug: sumologic
+- board_url: https://boards-api.greenhouse.io/v1/boards/sumologic/jobs?content=true
+- careers_page: https://www.sumologic.com/careers/
+- category: observability-infra
+- check_method: api
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. Identity confirmed (name "Sumo Logic"). Cloud log analytics — good technology, but PE-owned by Francisco Partners since the 2023 take-private, meaning illiquid/immaterial equity and thin new-grad hiring. The 16-req board (vs SolarWinds 95, Five9 160) is a real signal of hiring appetite, not a broken slug — do not flag SUSPECT_EMPTY. Honest "no" as a FIRST job.
+
 ---
 
 ## Tier 6 — Chinese frontier AI labs  *(reach: frontier research + training infra; see caveats)*
@@ -1083,6 +1143,75 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
   to hr@pjlab.org.cn. Shanghai and Beijing only. Strong on open-source models, multimodality,
   evaluation, embodied AI, safety, AI for science, training systems. Advertises daily
   internships and joint PhD programs with major Chinese universities.
+
+---
+
+## Tier 7 — Data infrastructure / lakehouse  *(research interest: strong tech, thin new-grad hiring)*
+
+> **Read before checking.** These are data-versioning and lakehouse companies. The
+> engineering is genuinely distributed-systems-shaped — table formats, query engines, object
+> storage — but every entry here is **small and none runs a new-grad program**. Dremio has
+> 6 open reqs (1 engineering); LanceDB's postings are 100% `Senior`, so it matches zero roles
+> against `exclude_titles`; Onehouse puts its backend/infra reqs in Bangalore and only
+> senior/staff reqs in the US; lakeFS is Tel Aviv with no listed US roles.
+>
+> Like Tier 6, these are tracked as **research interest, not new-grad pipeline** — a
+> near-empty result here is the expected state, not a broken slug. `tier` is organizational
+> only (`report.py` groups by it; nothing filters on it), so the `api` entries below are
+> still fetched on every daily run.
+>
+> **Not separate companies — do not add:** *Delta Lake* is a Databricks project and
+> Databricks is already Tier 1. *DVC* was acquired by lakeFS and is covered by that entry.
+> DVC's original company, Iterative, rebranded to **DataChain**; `iterative.ai/careers` now
+> 302s to a 404 and it has no careers presence.
+
+### Dremio
+- ats: greenhouse
+- slug: dremio
+- board_url: https://boards-api.greenhouse.io/v1/boards/dremio/jobs?content=true
+- careers_page: https://www.dremio.com/careers/
+- category: data-infra
+- check_method: api
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. Identity confirmed (name "Dremio"). Lakehouse query engine (Iceberg / Arrow / Nessie) — best pure distributed-systems work on this tier, and 3 of 6 reqs are New York. But only 6 reqs with ONE engineering role. Real board, company not in growth mode — do not flag SUSPECT_EMPTY.
+
+### Onehouse
+- ats: lever
+- slug: Onehouse
+- board_url: https://api.lever.co/v0/postings/Onehouse?mode=json
+- careers_page: https://www.onehouse.ai
+- category: data-infra
+- check_method: api
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. Slug is capital-O `Onehouse`; `lever/onehouse` 404s — the Lever API is case-sensitive. 12 reqs. Managed Apache Hudi lakehouse. Offshoring signal: Backend/Distributed-Systems and Kubernetes-Infra reqs are all Bangalore; US (Sunnyvale) reqs are senior/staff/open-source only.
+
+### LanceDB
+- ats: ashby
+- slug: lancedb
+- board_url: https://api.ashbyhq.com/posting-api/job-board/lancedb
+- careers_page: https://lancedb.com/careers
+- category: data-infra
+- check_method: api
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. Identity confirmed via jobUrl path. 9 reqs, but every engineering posting is titled "Senior ..." and several are Solutions/CS/RevOps — matches zero roles today. Kept because it is cheap to poll and would surface a junior req. Remote ("Americas timezones").
+
+### lakeFS (Treeverse)
+- ats: bespoke
+- slug:
+- board_url:
+- careers_page: https://lakefs.io/careers/
+- category: data-infra
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-07-22 — added. **Carries DVC**, which lakeFS acquired — do not add DVC separately. Self-hosts postings at lakefs.io/careers/<role>/ with no JSON board, so manual by rule. Tel Aviv HQ, ~3 open roles, no listed US locations — fails the location filter; research-interest only.
 
 ---
 

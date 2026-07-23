@@ -330,6 +330,20 @@
   careers_page: https://konghq.com/company/careers
   notes: 'API gateway. 2026-07-09 — resolved: migrated Greenhouse → Ashby, slug is `kong`, not `konginc`.'
   expected_board_name: kong
+- name: Coralogix
+  ats: bespoke
+  tier: 2
+  category: observability-infra
+  check_method: manual
+  careers_page: https://coralogix.com/careers/
+  notes: 2026-07-22 — added. Runs Comeet, not Greenhouse/Lever/Ashby (greenhouse/coralogix,
+    lever/coralogix and ashby/coralogix all 404). Comeet's careers-api needs a company uid
+    plus a token embedded in the page, so there is no keyless JSON board — manual by rule.
+    Kept at tier 2 on the strength of the technology, but it is the least certain entry on
+    this tier — engineering is centered in Israel with a small US footprint, which limits
+    both what backend work is open to a US new grad and how much mentorship comes with it.
+    Verify a US role actually exists before investing effort. Demote to tier 5 if not.
+  expected_board_name: null
 - name: Bloomberg
   ats: bespoke
   tier: 3
@@ -680,6 +694,59 @@
   check_method: manual
   careers_page: https://tech.target.com/job-search
   expected_board_name: null
+- name: Five9
+  ats: greenhouse
+  slug: five9
+  tier: 5
+  category: enterprise-saas
+  check_method: api
+  careers_page: https://www.five9.com/about/careers
+  notes: 2026-07-22 — added. Slug confirmed via board identity (name "Five9"), 160 open reqs.
+    Cloud contact-center SaaS — real telephony/streaming scale behind it, but the product is
+    an application, not infra, hence tier 5 rather than tier 2. Remote-friendly. A genuine
+    unknown — much of the backend work is integration-shaped rather than systems-shaped, and
+    CCaaS sits squarely in the path of AI disruption. Read the req text closely.
+  expected_board_name: Five9
+- name: SAP
+  ats: bespoke
+  tier: 5
+  category: enterprise-saas
+  check_method: manual
+  careers_page: https://jobs.sap.com
+  notes: 2026-07-22 — added. Runs its own SuccessFactors career-site (jobs.sap.com);
+    greenhouse/lever/ashby all 404. No keyless JSON board — manual by rule. The inverted
+    case on this tier — real structured new-grad programs, genuine stability and good WLB,
+    but enterprise-application backend work here is narrow and slow-moving — a good place
+    to be, not a fast place to grow. A fine second job, a mediocre first one. US sites are
+    mainly Palo Alto and Newtown Square PA, NOT NYC — check location before applying.
+  expected_board_name: null
+- name: SolarWinds
+  ats: greenhouse
+  slug: solarwinds
+  tier: 5
+  category: observability-infra
+  check_method: api
+  careers_page: https://www.solarwinds.com/careers
+  notes: 2026-07-22 — added. Slug confirmed via board identity (name "SolarWinds"), 95 open
+    reqs. Austin HQ. Observability is the product, which is why this was first filed at
+    tier 2 — but that tiered on product category, and this list ranks growth opportunity.
+    Taken private by Turn/River (2025), so cost discipline over growth investment and no
+    liquid equity; add heavy engineering offshoring and a legacy product surface that is
+    more maintenance than frontier work. Honest "no" as a FIRST job.
+  expected_board_name: SolarWinds
+- name: Sumo Logic
+  ats: greenhouse
+  slug: sumologic
+  tier: 5
+  category: observability-infra
+  check_method: api
+  careers_page: https://www.sumologic.com/careers/
+  notes: 2026-07-22 — added. Slug confirmed via board identity (name "Sumo Logic"). Cloud
+    log analytics — good technology, but PE-owned by Francisco Partners since the 2023
+    take-private, meaning illiquid/immaterial equity and thin new-grad hiring. The 16-req
+    board (vs SolarWinds 95, Five9 160) is a real signal of hiring appetite, not a broken
+    slug — do not flag SUSPECT_EMPTY. Honest "no" as a FIRST job.
+  expected_board_name: Sumo Logic
 - name: ByteDance Seed
   ats: bespoke
   tier: 6
@@ -735,6 +802,56 @@
   check_method: manual
   careers_page: https://www.shlab.org.cn/joinus
   notes: Application flow splits into /joinus/social and /joinus/campus with an email fallback
+  expected_board_name: null
+- name: Dremio
+  ats: greenhouse
+  slug: dremio
+  tier: 7
+  category: data-infra
+  check_method: api
+  careers_page: https://www.dremio.com/careers/
+  notes: 2026-07-22 — added. Slug confirmed via board identity (name "Dremio"). Lakehouse
+    query engine (Apache Iceberg / Arrow / Nessie) — the best pure distributed-systems work
+    on this tier, and 3 of 6 reqs are New York. But the board is only 6 reqs with exactly
+    ONE engineering role (Lead Product Security Engineer), so this is a real board on a
+    company not in growth mode, not a broken slug. Do not flag as SUSPECT_EMPTY.
+  expected_board_name: Dremio
+- name: Onehouse
+  ats: lever
+  slug: Onehouse
+  tier: 7
+  category: data-infra
+  check_method: api
+  careers_page: https://www.onehouse.ai
+  notes: 2026-07-22 — added. Slug is capital-O `Onehouse`; lever/onehouse 404s, the API is
+    case-sensitive. 12 reqs. Managed Apache Hudi lakehouse. Offshoring signal worth reading
+    before applying — the Backend/Distributed-Systems and Kubernetes-Infra reqs are all
+    Bangalore, while the US (Sunnyvale) reqs are senior/staff/open-source. No new-grad US
+    backend pipeline today.
+  expected_board_name: Onehouse
+- name: LanceDB
+  ats: ashby
+  slug: lancedb
+  tier: 7
+  category: data-infra
+  check_method: api
+  careers_page: https://lancedb.com/careers
+  notes: 2026-07-22 — added. Slug confirmed via jobUrl path. 9 reqs, but EVERY engineering
+    posting is titled "Senior ..." and several are Solutions/CS/RevOps — so it currently
+    matches zero roles against `exclude_titles`. Kept because it is cheap to poll and would
+    surface a junior req if one ever opens. Remote ("Americas timezones").
+  expected_board_name: lancedb
+- name: lakeFS (Treeverse)
+  ats: bespoke
+  tier: 7
+  category: data-infra
+  check_method: manual
+  careers_page: https://lakefs.io/careers/
+  notes: 2026-07-22 — added. **Carries DVC**, which lakeFS acquired ("lakeFS Acquires DVC");
+    do not add DVC as a separate entry. Self-hosts postings at lakefs.io/careers/<role>/
+    with no JSON board — manual by rule. Tel Aviv HQ, ~3 open roles, no listed US locations,
+    so it fails the location filter; research-interest only. Note DVC's original company,
+    Iterative, rebranded to DataChain — iterative.ai/careers now 302s to a 404.
   expected_board_name: null
 - name: Simplify New-Grad-Positions
   ats: aggregator
