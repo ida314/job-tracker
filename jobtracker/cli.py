@@ -28,7 +28,7 @@ from opentelemetry import metrics
 from . import config, report as report_mod, store, telemetry
 from .criteria import load_criteria
 from .fetch import Fetcher
-from .health import evaluate
+from .health import evaluate, is_degraded
 from .match import match
 from .migrate import migrate as run_migrate
 from .models import Company
@@ -36,6 +36,13 @@ from .sources import get_source
 
 
 log = logging.getLogger("jobtracker")
+
+# Exit codes. When this runs unattended, the exit status is the *only* thing the
+# scheduler sees, so it has to encode the operationally meaningful distinction rather
+# than just "was anything non-OK". health.is_degraded() draws that line and explains
+# why; this module only maps it onto a process exit status.
+EXIT_OK = 0
+EXIT_DEGRADED = 2
 
 # Run-level metrics. These are the `runs` table's stats columns, expressed as something
 # that can actually be graphed over time — see CLAUDE.md on retiring those columns.
@@ -108,6 +115,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     started = _now()
     run_started = time.monotonic()
 
+    # Log the *resolved* input paths. In a container these can be either baked into the
+    # image or mounted over, and the failure mode of getting it wrong is silent: a run
+    # against a stale baked criteria.yaml ignores every rule you tuned and still exits 0.
+    # One line in the log turns that into something you can actually see.
+    log.info(
+        "companies=%s criteria=%s db=%s",
+        args.companies or config.COMPANIES_YAML,
+        args.criteria,
+        args.db or config.DB_PATH,
+    )
+
     api = [c for c in companies if c.check_method == "api" and get_source(c.ats)]
     skipped = [c for c in companies if c.check_method == "api" and not get_source(c.ats)]
     for c in skipped:
@@ -131,6 +149,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     by_name = {c.name: c for c in api}
 
     stats = {"companies": len(api), "ok": 0, "failed": 0, "new_postings": 0, "matches": 0}
+    degraded: list[str] = []  # boards worth failing the run over — see EXIT_DEGRADED
     log.info("evaluating health, storing postings, and matching against criteria")
     for res in results:
         company = by_name[res.company]
@@ -154,6 +173,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         else:
             stats["failed"] += 1
             log.warning("%s unhealthy: %s (%s)", company.name, health.status.value, res.error or "—")
+            if is_degraded(health):
+                degraded.append(f"{company.name}={health.status.value}")
 
     store.record_run(conn, started, _now(), stats)
     conn.commit()
@@ -180,7 +201,17 @@ def cmd_check(args: argparse.Namespace) -> int:
         log.info("report written to %s (%d bytes)", args.output, len(text))
     else:
         print(text)
-    return 0
+
+    if degraded:
+        # ERROR, not WARNING: this is the line that should surface in `systemctl status`
+        # alongside the non-zero exit, so the two agree about what happened.
+        log.error(
+            "run DEGRADED — %d board(s) need attention: %s",
+            len(degraded),
+            ", ".join(sorted(degraded)),
+        )
+        return EXIT_DEGRADED
+    return EXIT_OK
 
 
 # -- verify-slugs ------------------------------------------------------------------

@@ -98,3 +98,23 @@ def evaluate(
         last_ok_at=now,
         detail=f"{len(result.postings)} postings",
     )
+
+
+def is_degraded(health: BoardHealth) -> bool:
+    """Is this board broken enough to fail the whole run?
+
+    Deliberately narrower than `status != OK`. A board can be legitimately non-OK
+    forever: dbt Labs and Root Insurance are correct slugs with genuinely zero reqs
+    and have never been populated, so they are SUSPECT_EMPTY on every run. Treating
+    those as failures means the run is red every night, which is the same as having
+    no signal at all — the night something actually breaks would look identical.
+
+    So: FETCH_FAILED and IDENTITY_DRIFT always count (data is missing or wrong), and
+    SUSPECT_EMPTY counts only once `alerting` is set, which by construction requires
+    the board to have been populated before. A board that went from 500 postings to
+    zero is an emergency; a board that was always zero is a fact about the company.
+    """
+    return (
+        health.status in (HealthStatus.FETCH_FAILED, HealthStatus.IDENTITY_DRIFT)
+        or health.alerting
+    )
