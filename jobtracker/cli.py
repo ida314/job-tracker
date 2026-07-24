@@ -485,6 +485,20 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- serve -------------------------------------------------------------------------
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Live tuning UI. The counterpart to `dashboard`, which stays a static export."""
+    from . import server as server_mod
+
+    return server_mod.serve(
+        db_path=config.DB_PATH if args.db is None else Path(args.db),
+        criteria_path=Path(args.criteria),
+        companies_path=Path(args.companies) if args.companies else None,
+        host=args.host,
+        port=args.port,
+    )
+
+
 # -- add-company -------------------------------------------------------------------
 def cmd_add_company(args: argparse.Namespace) -> int:
     path = Path(args.companies or config.COMPANIES_YAML)
@@ -599,6 +613,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="output path, or '-' for stdout (default: data/dashboard.html)",
     )
     d.set_defaults(func=cmd_dashboard)
+
+    sv = sub.add_parser("serve", help="live tuning UI on localhost")
+    sv.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    sv.add_argument("--db", default=None)
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="default 127.0.0.1 — it has no auth and can edit criteria.yaml")
+    sv.set_defaults(func=cmd_serve)
 
     a = sub.add_parser("add-company", help="append a curated entry")
     a.add_argument("--name", required=True)
