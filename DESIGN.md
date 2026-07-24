@@ -291,7 +291,25 @@ postings today."
 The rewrite does not eliminate the language model. It relocates it from the runtime to two
 bounded roles:
 
-1. **Ambiguity resolution** (§6) — batched, schema-constrained, on the residual only.
+1. **Ambiguity resolution** (§6) — schema-constrained, on the residual only.
+   **Implemented** as `jobtracker resolve`; see `docs/llm.md`. It came out narrower than
+   this section anticipated in three ways worth recording:
+
+   - **Local only.** The provider is an address you point at (vLLM first), not a hosted
+     API. There is no key handling anywhere in `jobtracker/llm/`.
+   - **Level extraction only.** It answers "what experience level does this description
+     require" and nothing else. An `entry` reading still has to pass the *rules'* own
+     engineering gate before it can produce a MATCH, so the `Finance Associate` guard
+     holds against a model verdict exactly as it does against a rule one. The model
+     supplies a missing fact; the criteria decide what to do with it.
+   - **Failure is absence.** Unreachable, slow, malformed, or unsure all leave the
+     posting UNCERTAIN — where it already was. The pass can add resolution; it cannot
+     subtract correctness. This is the §7.3 principle applied to inference.
+
+   Constrained decoding (`guided_json`) turned out to matter more than model choice:
+   malformed output stops being a failure mode you parse around. The client validates
+   anyway, since a server ignoring the field would otherwise let prose through as a
+   verdict.
 2. **Repair.** When `health.py` raises `IDENTITY_DRIFT` or persistent `FETCH_FAILED`, an
    agent is dispatched to read the company's careers page, locate the current board
    identifier — a Greenhouse `job_board?for=X` embed, or a link to `jobs.lever.co/X` — and
@@ -336,11 +354,17 @@ Planned expansion, in descending value-per-hour:
 | `criteria.yaml` + validating loader (the §2.1 fix) | **Complete** |
 | Markdown → `companies.yaml` migration | **Complete** — all 89 entries, 0 data loss |
 | Container packaging (Dockerfile, volume-mounted `state.db`) | **Complete** |
-| Test suite (`tests/`) | **Complete** — 56 passing |
+| Test suite (`tests/`) | **Complete** — 127 passing |
 | Grafana operational dashboard (`otel/grafana-dashboard.json`) | **Complete** — provisioned, 9 panels |
 | Job-search dashboard (`jobtracker dashboard` → HTML) | **Complete** — self-contained, no network |
 | First live run against the 56 API boards | **Complete** — see below |
 | Curated target data (89 companies, 56 slugs hand-verified) | **Complete** — carries over unchanged |
+| Unattended operation (exit codes + container contract) | **Complete** — `docs/deployment.md`; no orchestrator in-repo |
+| Tuning loop (decisions, `eval`, suggestions, overrides) | **Complete** — `docs/tuning.md` |
+| Tuning UI (`jobtracker serve`) | **Complete** — stdlib only, localhost, writes back |
+| Ambiguity pass (§6) — local, provider-pluggable | **Complete** — `docs/llm.md`; vLLM first |
+| Slug-repair agent (§8) | Deferred |
+| Aggregator sources (§9) | Deferred — still never fetched |
 
 The verified slug data is the asset worth preserving from version 1. The audit that
 produced it — fetching every board, confirming identity against the company name, and
@@ -355,7 +379,25 @@ Zero `fetch_failed`, zero `identity_drift`. The first matching pass exposed exac
 kind of rule gap §6 predicts: "associate" alone matched business roles (Finance/Operations
 Associate), so a MATCH now additionally requires an engineering signal — this dropped MATCH
 from 129 (mostly noise) to 27 genuine SWE entry/new-grad roles, leaving 1,109 UNCERTAIN to
-read by hand. Deferred, unchanged: the LLM ambiguity pass (§6) and slug-repair agent (§8).
+read by hand.
+
+**Since that run.** The ambiguity pass (§6/§8) is implemented and local; the slug-repair
+agent (§8) is still deferred. Two things the first live run could not have shown:
+
+The engineering gate was necessary but not sufficient. Stripe's *"Seller Systems
+Operations Associate (Night Shift)"* matched on `level:associate+role:systems` — the
+`Finance Associate` bug again, arriving through `role_type_include` instead of through a
+bare level token. Fixing one instance by hand-editing YAML is how the *first* one came
+back, so the response was a tuning loop (`docs/tuning.md`): judgments are recorded as a
+regression corpus, and `jobtracker eval` replays any proposed rule change against it
+before it ships. The rule matters less than being able to tell whether the next rule
+breaks something already decided.
+
+The UNCERTAIN bucket is not what §6 assumed. Of 1,537 open uncertain postings, only 674
+have any engineering signal in the title at all; the rest are `Field Marketer` and
+`Talent Strategist`. The residual is dominated not by genuinely ambiguous levels but by
+roles the tracker was never going to want — which is a scoping fact the design should
+have predicted and did not.
 
 ---
 

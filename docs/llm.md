@@ -1,0 +1,168 @@
+# The ambiguity pass (local LLM)
+
+About 1,500 open postings sit in `uncertain`: their titles carry no level token, so the
+deterministic matcher cannot honestly say yes or no. `"Backend Software Engineer"` might
+be a new-grad role or might want eight years. The answer is in the job description,
+which the nightly sweep does not read.
+
+This pass reads it. It is **entirely optional** and **entirely local**.
+
+## Scope: level extraction, nothing else
+
+The model answers exactly one question — *what experience level does this description
+require* — and returns `entry`, `not_entry`, or `unclear`.
+
+It does **not** decide whether a role is backend, whether the company is interesting, or
+whether you want it. All of that stays in `criteria.yaml` where you can read it, diff
+it, and test it against the corpus.
+
+```
+UNCERTAIN + engineering-looking title
+   └─▶ description  (free from Ashby/Lever · fetched for Greenhouse)
+        └─▶ local model: entry | not_entry | unclear
+             ├─ entry     → re-apply the RULES' engineering gate → match or reject
+             ├─ not_entry → reject
+             └─ unclear   → stays uncertain
+```
+
+An `entry` reading does not by itself produce a match. It still has to pass the same
+engineering gate `match.py` applies to a title carrying an explicit level token — so the
+`Finance Associate` guard holds against an LLM verdict exactly as it does against a rule
+one. The model supplies a missing fact; the criteria decide what to do with it.
+
+Verdicts from this path are stored with `decided_by='llm'`, so they are always
+distinguishable from rules verdicts, and the reason carries the evidence:
+
+```
+Asana    Backend Software Engineer     reject   llm:not_entry:3+ years
+Discord  Software Engineer, Notifications  reject   llm:not_entry:Senior
+```
+
+## Failure is absence, never a wrong answer
+
+No provider configured, connection refused, timeout, malformed response, low confidence
+— **every one of these leaves the posting `uncertain`**, which is where it already was.
+
+That is the whole safety argument. The pass can only ever add resolution; it cannot
+subtract correctness. Matching must not depend on an inference server being up, so
+nothing here raises for an unreachable host.
+
+With no provider configured, `resolve` reports what it *would* do and changes nothing:
+
+```
+$ jobtracker resolve
+No LLM provider configured — nothing was changed.
+  1537 uncertain postings open, 674 with an engineering-looking title.
+  Configure one with --llm-provider vllm --llm-url http://HOST:PORT
+```
+
+## Running it
+
+```sh
+jobtracker resolve --llm-provider vllm --llm-url http://192.168.1.50:8000
+jobtracker resolve --llm-provider vllm --llm-url http://192.168.1.50:8000 --limit 50
+```
+
+Or via environment, following the same convention as `--telemetry`:
+
+```sh
+export JOBTRACKER_LLM_PROVIDER=vllm
+export JOBTRACKER_LLM_URL=http://192.168.1.50:8000
+```
+
+**Which model is out of scope.** Point it at an address; the client asks the server what
+it is serving via `/v1/models` and uses that. `--llm-model` overrides if the server hosts
+several. vLLM rejects a request naming a model it is not serving, so asking beats
+guessing.
+
+`probe()` runs first and contacts the server *even when a model name is configured* —
+short-circuiting there would report "ready" against a switched-off box, and the failure
+would then surface as one silent miss per posting for the rest of the run.
+
+## Why only 674 of 1,537
+
+The queue is scoped to postings whose title carries some engineering signal. The other
+863 are `Field Marketer`, `Talent Strategist`, `Data Analyst` — reading their
+descriptions spends a rate-limited ATS request to learn what the title already said.
+
+The cost is real and worth stating: a title like **"Member of Technical Staff"** is
+genuinely engineering with no matching token, and it is never read. It stays `uncertain`
+and visible in the queue for a human rather than being silently rejected. That is the
+same tradeoff this project makes everywhere — surface the blind spot, do not hide it.
+There is a test asserting it stays out of scope rather than regressing into a reject.
+
+## Where descriptions come from
+
+| ATS | Cost |
+|---|---|
+| Ashby (13 boards) | **Free** — `descriptionPlain` is in the bulk payload |
+| Lever (2 boards) | **Free** — `descriptionPlain` plus the requirement `lists` |
+| Greenhouse (47 boards) | One request per posting |
+
+Greenhouse is the exception because the bulk call deliberately drops `?content=true` —
+full-content payloads blow the 20-second timeout on large boards (Databricks carries
+~790 reqs). So its descriptions are fetched one at a time, only for postings this pass
+will actually read, and cached in `postings.description` so a posting is fetched once
+ever. `NULL` means never fetched; `''` means fetched and genuinely empty.
+
+Description fetches go through `Fetcher._request_json`, so they inherit the per-host
+rate limiter, the retry policy, and the trace shape. **The ATS is the scarce resource
+here, not the model** — a local GPU is not rate-limited, `boards-api.greenhouse.io` very
+much is.
+
+One Greenhouse quirk worth knowing: `content` is HTML-escaped *inside* a JSON string, so
+it arrives as `&lt;h2&gt;Who we are&lt;/h2&gt;`. Unescaping has to happen before
+tag-stripping, or the model is handed a wall of `&lt;p&gt;`.
+
+## Adding a provider
+
+`jobtracker/llm/` deliberately mirrors `jobtracker/sources/`:
+
+| File | Role |
+|---|---|
+| `llm/base.py` | `Provider` interface, `_REGISTRY`, `register()` / `get_provider()` |
+| `llm/vllm.py` | vLLM's wire format — the reference implementation |
+| `llm/client.py` | The **only** module that opens a socket |
+
+The rule that matters: **adapters are pure.** A provider builds a request body and
+parses a response payload; it never touches the network, exactly as ATS adapters never
+do. That is what lets providers be tested against recorded payloads with no HTTP
+mocking.
+
+To add one, implement `Provider` and add a line to `llm/__init__.py`:
+
+```python
+class Ollama(Provider):
+    name = "ollama"
+    def chat_url(self, base_url): return f"{base_url}/v1/chat/completions"
+    def build_request(self, model, system, user, schema, max_tokens=512): ...
+    def parse_response(self, raw): ...
+
+register(Ollama())
+```
+
+There is no API-key handling anywhere in this package, and there should not be. A
+provider is an address you point at.
+
+## Why vLLM first
+
+- **No SDK.** OpenAI-compatible JSON over HTTP, so `requests` — already a dependency for
+  the ATS fetches — is the entire client. Nothing to install is what makes "optional"
+  structurally true rather than aspirational.
+- **Constrained decoding.** `guided_json` restricts sampling so the server emits text
+  conforming to the schema. Malformed output stops being a failure mode to parse around.
+  The client validates anyway: a server that silently ignored `guided_json` would
+  otherwise let free-form prose through as a verdict.
+- `temperature: 0`, so the same posting classifies the same way on a rerun. Otherwise
+  `eval` scores noise instead of the model.
+
+## Checking its work
+
+The tuning corpus doubles as a scoring harness. Judge some postings by hand, run the
+pass, then diff — no network, no re-fetching:
+
+```sh
+jobtracker eval
+```
+
+Verdicts the model produced that contradict yours show up as regressions like any other.

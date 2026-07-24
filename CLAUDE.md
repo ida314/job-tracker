@@ -325,6 +325,71 @@ boards, and the manual companies that are never scraped.
   NYC rows carry a pin, and there is a location dropdown that defaults to "Anywhere".
   A location filter the user did not choose would silently hide roles they asked to see.
 
+## The tuning loop
+
+`criteria.yaml` is easy to edit and hard to edit safely: a token added to stop one bad
+match silently changes the verdict on thousands of postings already judged. Full guide
+in `docs/tuning.md`; the rules that matter here:
+
+- **Never hand-edit `criteria.yaml` without running `jobtracker eval`.** It replays the
+  current rules against every recorded judgment and exits 1 on a regression. This is the
+  only thing standing between "fixed one leak" and "silently re-broke three".
+- **`uncertain` is not a regression.** If the rules say `uncertain` where a human said
+  `match`, that is correct behaviour — the level genuinely is not in the title. Counting
+  it as failure pushes toward rules that guess level from titles, which is the
+  over-fitting the whole mechanism exists to prevent. Only active contradiction blocks.
+- **Suggestions are string counting, not a model**, and they are scoped to rejects the
+  rules do *not* already handle so the list terminates. Do not "improve" this by feeding
+  it to an LLM; the zero-in-accepted test is what keeps `engineer` and `software` out
+  without a hand-maintained blocklist.
+- **Overrides outrank rules** and survive rematch, carrying `decided_by='human'`. They
+  are applied in the caller path (`cmd_check`, `cmd_rematch`, `serve`), never inside
+  `match()` — that function's purity is load-bearing for the tests.
+- `decisions.title` is denormalized on purpose. Joining to `postings` would shrink the
+  corpus every time a req closed, which is exactly when the evidence matters most.
+
+## The ambiguity pass
+
+`jobtracker resolve`, documented in `docs/llm.md`. **Local only** — a provider is an
+address, and there is no API-key handling anywhere in `jobtracker/llm/`. Do not add a
+hosted provider.
+
+- `jobtracker/llm/` mirrors `jobtracker/sources/`: **adapters are pure**, `client.py` is
+  the only module that opens a socket. Keep it that way — it is what lets providers be
+  tested against recorded payloads with no HTTP mocking.
+- **Scope is level extraction only.** The model never decides that a role is on-target;
+  an `entry` reading still has to pass the rules' engineering gate. Widening this would
+  put a nondeterministic component back in the main loop, which is what DESIGN.md was
+  written to undo.
+- **Every failure path must leave the posting UNCERTAIN.** Unreachable, timeout,
+  malformed, unsure — all of them. Nothing here may raise for a down server. If you add
+  a code path that can produce a verdict from a failed call, that is a bug.
+- Ashby and Lever ship `descriptionPlain` in the **bulk** payload; only Greenhouse needs
+  a per-posting fetch, and its `content` is HTML-escaped *inside* the JSON string, so
+  unescape before stripping tags. Description fetches must go through
+  `Fetcher._request_json` so they inherit the per-host limiter — the ATS is the scarce
+  resource, not the local model.
+- The queue is scoped to titles with an engineering signal (674 of 1,537). Known blind
+  spot: "Member of Technical Staff" is never read. It stays UNCERTAIN rather than being
+  rejected, and there is a test asserting that. Do not "fix" it by rejecting no-signal
+  titles.
+
+## Deployment
+
+`docs/deployment.md`. **This repo does not know about orchestrators** — no Kubernetes
+manifests, no systemd units in-tree. The deliverable is a container plus a documented
+contract; the units live on the machine that runs them.
+
+- `check` exits 0 (clean), 2 (a board needs attention), or 1 (could not run).
+- Exit 2 is narrower than `status != OK` — see `health.is_degraded()`. dbt Labs and Root
+  Insurance are permanently `suspect_empty` and must never fail a run.
+- **Containers must set `TZ`.** The image is UTC; `date.today()` drives `first_seen`, the
+  report's `since` window, and `manual_due()`. A UTC container running at 21:00 local
+  stamps tomorrow onto everything.
+- `otel/stack.sh run` mounts the repo's `./data` — it is a **real run against real
+  state.db**, not a smoke test. Point `JOBTRACKER_DB` at a scratch copy to exercise the
+  stack without writing history.
+
 ## Repo conventions
 
 - Each change to the tracker is its own commit, grouped by *failure class* (not by tier),

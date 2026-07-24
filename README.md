@@ -6,8 +6,10 @@ rationale for the rewrite is in [`DESIGN.md`](DESIGN.md), the operating rules in
 [`CLAUDE.md`](CLAUDE.md).
 
 Fetching, parsing, diffing, matching, and storing are ordinary tested code. A language
-model is **not** in the loop — the residual it would handle is surfaced as an
-`UNCERTAIN` bucket for now (DESIGN.md §6).
+model is **not** in the loop. Titles the rules cannot honestly judge land in an
+`UNCERTAIN` bucket, which an optional, entirely local pass can resolve by reading job
+descriptions — see [`docs/llm.md`](docs/llm.md). With no model configured, nothing
+about the pipeline changes.
 
 ## Layout
 
@@ -15,11 +17,19 @@ model is **not** in the loop — the residual it would handle is surfaced as an
 companies.yaml   curated targets — human-authored, git-tracked, NEVER machine-written
 criteria.yaml    match rules — validated on load (the v1 bug was invalid, unparsed YAML)
 jobtracker/      the package (models, sources, fetch, match, health, store, report, cli)
+jobtracker/llm/  optional local inference providers — same registry shape as sources/
 data/state.db    run state — SQLite, gitignored, lives on a mounted volume in the container
 tests/           unit + integration suite
 otel/            optional observability stack (collector, Prometheus, Grafana configs)
-docs/            reference notes — see docs/observability.md
+docs/            reference notes — see the table below
 ```
+
+| Doc | Covers |
+|---|---|
+| [`docs/deployment.md`](docs/deployment.md) | Running it unattended: the container contract, exit codes, and five silent failure modes |
+| [`docs/tuning.md`](docs/tuning.md) | Fixing bad matches so they stay fixed — decisions, `eval`, suggestions |
+| [`docs/llm.md`](docs/llm.md) | The optional local ambiguity pass and how to add a provider |
+| [`docs/observability.md`](docs/observability.md) | Traces, metrics, and the query idioms that are not obvious |
 
 State (`postings`, `verdicts`, `board_health`, `runs`) is separate from curation, so
 `companies.yaml`'s git history stays a clean record of curation decisions.
@@ -35,20 +45,39 @@ python -m jobtracker.cli rematch         # re-apply criteria to stored postings 
 python -m jobtracker.cli report          # re-render the latest state (no network)
 python -m jobtracker.cli dashboard       # render state.db to data/dashboard.html (no network)
 python -m jobtracker.cli add-company --name X --ats greenhouse --slug x --tier 2
+
+# tuning — see docs/tuning.md
+python -m jobtracker.cli decide Stripe 7966029 reject --note "operations, not engineering"
+python -m jobtracker.cli eval            # replay criteria against your judgments; exits 1 on a regression
+python -m jobtracker.cli serve           # live tuning UI on http://127.0.0.1:8765
+
+# optional local ambiguity pass — see docs/llm.md
+python -m jobtracker.cli resolve --llm-provider vllm --llm-url http://HOST:PORT
 ```
 
 `check` writes the report to **stdout**; progress goes to **stderr**, so `check > report.md`
 stays clean. `--output report.md` writes the file directly.
 
-## Two dashboards
+**Exit codes.** `check` returns `0` when no board needs attention, `2` when at least one
+does, and `1` if it could not run at all. Exit `2` is narrower than "something was not
+OK": dbt Labs and Root Insurance are correct slugs with genuinely zero reqs, so a healthy
+run reports `60 ok, 2 failed` and still exits `0`. Details in
+[`docs/deployment.md`](docs/deployment.md).
 
-They answer different questions and are independent — either works without the other.
+## Three views
 
-| | `jobtracker dashboard` | Grafana (`otel/grafana-dashboard.json`) |
-|---|---|---|
-| Question | *What should I apply to?* | *Did last night's run work?* |
-| Source | `state.db` | Prometheus metrics |
-| Needs | nothing — one HTML file | the tier-3 stack up |
+They answer different questions and are independent — each works without the others.
+
+| | `jobtracker dashboard` | `jobtracker serve` | Grafana (`otel/grafana-dashboard.json`) |
+|---|---|---|---|
+| Question | *What should I apply to?* | *Why did this match, and how do I fix it?* | *Did last night's run work?* |
+| Source | `state.db` | `state.db` + `criteria.yaml` | Prometheus metrics |
+| Needs | nothing — one HTML file | a local process | the tier-3 stack up |
+| Writes | never | only on POST | — |
+
+`serve` does not replace `dashboard`. The static file is a snapshot you can mail to
+yourself and open offline years from now; that property is worth keeping, so `serve` is
+a second surface for the one thing a static file cannot do — write back.
 
 ```bash
 python -m jobtracker.cli dashboard      # -> data/dashboard.html, open it with file://
