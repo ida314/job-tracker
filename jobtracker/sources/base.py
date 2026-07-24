@@ -33,6 +33,19 @@ class Source:
     def identity_from_jobs(self, raw: object) -> Optional[str]:
         return None
 
+    # Per-posting description. Only needed where the bulk jobs payload omits it:
+    # Ashby and Lever both ship `descriptionPlain` in the list call, so they leave
+    # this alone and cost zero extra requests. Greenhouse is the exception, because
+    # we deliberately drop ?content=true from the bulk call (it blows the timeout on
+    # large boards — CLAUDE.md), so its descriptions are fetched one at a time and
+    # only for postings the LLM pass actually needs to read.
+    def job_detail_url(self, slug: str, ats_job_id: str) -> Optional[str]:
+        return None
+
+    def parse_job_detail(self, raw: object) -> Optional[str]:
+        """Plain-text description from a single-job payload."""
+        return None
+
 
 _REGISTRY: dict[str, Source] = {}
 

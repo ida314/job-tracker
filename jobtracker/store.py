@@ -460,6 +460,26 @@ def postings_needing_description(
     return list(conn.execute(sql))
 
 
+def uncertain_for_resolution(
+    conn: sqlite3.Connection, limit: Optional[int] = None
+) -> list[sqlite3.Row]:
+    """Open UNCERTAIN postings, with whatever description we already hold.
+
+    Includes rows whose description is NULL — the caller fetches those. Ordered
+    newest-first so a --limit run spends its budget on the freshest postings.
+    """
+    sql = """
+        SELECT p.company, p.ats_job_id, p.title, p.location, p.description
+        FROM postings p JOIN verdicts v
+          ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        WHERE v.verdict='uncertain' AND p.closed_at IS NULL
+        ORDER BY p.first_seen DESC, p.company
+    """
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return list(conn.execute(sql))
+
+
 def set_description(
     conn: sqlite3.Connection, company: str, ats_job_id: str, description: str
 ) -> None:

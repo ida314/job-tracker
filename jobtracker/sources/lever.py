@@ -8,6 +8,7 @@ hostedUrl path, which begins with the org slug.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -42,6 +43,11 @@ class Lever(Source):
                     url=str(job.get("hostedUrl") or job.get("applyUrl") or ""),
                     location=location,
                     posted_at=str(job.get("createdAt")) if job.get("createdAt") else None,
+                    # Free in the bulk payload, like Ashby. `descriptionPlain` is the
+                    # opening blurb; `lists` holds the requirements — which is where
+                    # the level signal ("0-2 years", "recent graduate") usually lives,
+                    # so the two are concatenated rather than taking the first.
+                    description=_description(job),
                 )
             )
         return postings
@@ -54,6 +60,19 @@ class Lever(Source):
                     if path:
                         return path.split("/")[0]
         return None
+
+
+def _description(job: dict) -> str:
+    """Opening blurb plus the requirement lists, flattened to plain text."""
+    parts = [str(job.get("descriptionPlain") or "")]
+    for section in job.get("lists") or []:
+        if not isinstance(section, dict):
+            continue
+        text = str(section.get("text") or "")
+        # `content` is an HTML <li> blob; strip tags rather than pull in a parser.
+        content = re.sub(r"<[^>]+>", " ", str(section.get("content") or ""))
+        parts.append(f"{text}: {content}" if text else content)
+    return "\n".join(p.strip() for p in parts if p.strip())
 
 
 register(Lever())

@@ -46,6 +46,9 @@ class Ashby(Source):
                     url=str(job.get("jobUrl") or job.get("applyUrl") or ""),
                     location=str(location),
                     posted_at=job.get("publishedAt"),
+                    # Ashby ships descriptionPlain in the bulk payload at no extra
+                    # cost, so the LLM pass never needs a per-posting fetch here.
+                    description=str(job.get("descriptionPlain") or ""),
                 )
             )
         return postings

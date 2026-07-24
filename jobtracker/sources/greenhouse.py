@@ -11,6 +11,8 @@ pass, which will fetch them per-posting when it exists.
 
 from __future__ import annotations
 
+import html
+import re
 from typing import Optional
 
 from ..models import Posting
@@ -33,6 +35,27 @@ class Greenhouse(Source):
             name = raw.get("name")
             return str(name) if name else None
         return None
+
+    def job_detail_url(self, slug: str, ats_job_id: str) -> Optional[str]:
+        return f"{BASE}/{slug}/jobs/{ats_job_id}"
+
+    def parse_job_detail(self, raw: object) -> Optional[str]:
+        """Plain text from the single-job `content` field.
+
+        Greenhouse HTML-escapes the markup *inside* a JSON string, so `content`
+        arrives as `&lt;h2&gt;Who we are&lt;/h2&gt;` rather than `<h2>`. Unescaping
+        has to happen before tag-stripping — strip first and the entities survive
+        verbatim, and the model is handed a wall of `&lt;p&gt;`.
+        """
+        if not isinstance(raw, dict):
+            return None
+        content = raw.get("content")
+        if not content:
+            return None
+        text = html.unescape(str(content))
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html.unescape(text)  # entities like &amp;nbsp; survive the first pass
+        return re.sub(r"[ \t\xa0]+", " ", text).strip()
 
     def parse_jobs(self, company: str, raw: object) -> list[Posting]:
         if not isinstance(raw, dict):

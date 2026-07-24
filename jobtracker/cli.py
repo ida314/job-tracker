@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 from datetime import date, datetime
@@ -171,6 +172,14 @@ def cmd_check(args: argparse.Namespace) -> int:
             for posting in res.postings:
                 verdict = apply_override(match(posting, criteria), overrides)
                 store.record_verdict(conn, verdict, today)
+                # Ashby and Lever hand us the description for free in the bulk
+                # payload. Keep it only for the uncertain residual — that is the
+                # only bucket anything reads it for, and storing 9k full job
+                # descriptions to serve 674 of them is pure waste.
+                if verdict.decision.value == "uncertain" and posting.description:
+                    store.set_description(
+                        conn, posting.company, posting.ats_job_id, posting.description
+                    )
                 if verdict.decision.value == "match" and posting in new_postings:
                     stats["matches"] += 1
         else:
@@ -300,6 +309,66 @@ def cmd_rematch(args: argparse.Namespace) -> int:
         b, a = before.get(verdict, 0), after.get(verdict, 0)
         arrow = f"  {b} → {a}" + (f"  ({a - b:+d})" if a != b else "")
         print(f"  {verdict:<10}{arrow}")
+    return 0
+
+
+# -- resolve -----------------------------------------------------------------------
+def cmd_resolve(args: argparse.Namespace) -> int:
+    """Read descriptions for the UNCERTAIN queue and resolve what the level allows.
+
+    Entirely optional. With no provider configured this reports what it *would* do
+    and changes nothing, so the command is safe to run before you have a model up.
+    """
+    from . import llm as llm_pkg, resolve as resolve_mod
+
+    provider_name = args.llm_provider or os.environ.get("JOBTRACKER_LLM_PROVIDER", "none")
+    base_url = args.llm_url or os.environ.get("JOBTRACKER_LLM_URL", "")
+
+    criteria = load_criteria(args.criteria)
+    companies = {c.name: c for c in config.load_companies(args.companies)}
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    rows = store.uncertain_for_resolution(conn, limit=args.limit)
+
+    if provider_name == "none" or not base_url:
+        eligible = sum(1 for r in rows if resolve_mod.looks_engineering(r["title"], criteria))
+        conn.close()
+        print(f"No LLM provider configured — nothing was changed.")
+        print(f"  {len(rows)} uncertain postings open, {eligible} with an engineering-looking title.")
+        print(f"  Configure one with --llm-provider vllm --llm-url http://HOST:PORT")
+        print(f"  (or $JOBTRACKER_LLM_PROVIDER / $JOBTRACKER_LLM_URL)")
+        return 0
+
+    provider = llm_pkg.get_provider(provider_name)
+    if provider is None:
+        print(f"error: unknown provider {provider_name!r}; "
+              f"known: {', '.join(llm_pkg.provider_names())}", file=sys.stderr)
+        conn.close()
+        return 1
+
+    client = llm_pkg.LlmClient(provider, base_url, model=args.llm_model)
+    if not client.probe():
+        # Unreachable is not an error: the queue is simply left as it was.
+        client.close()
+        conn.close()
+        return 0
+
+    fetcher = Fetcher()
+    today = args.since or _today()
+    try:
+        verdicts, stats = resolve_mod.resolve_postings(
+            rows, companies, criteria, client,
+            fetcher=fetcher, store_mod=store, conn=conn, now=today,
+        )
+        for v in verdicts:
+            store.record_verdict(conn, v, today)
+        conn.commit()
+    finally:
+        fetcher.close()
+        client.close()
+
+    conn.close()
+    log.info("resolve complete: %s", stats.summary())
+    print(stats.summary())
     return 0
 
 
@@ -483,6 +552,20 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--db", default=None)
     rm.add_argument("--since", default=None)
     rm.set_defaults(func=cmd_rematch)
+
+    rs = sub.add_parser("resolve", help="read descriptions to resolve uncertain postings")
+    rs.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    rs.add_argument("--db", default=None)
+    rs.add_argument("--since", default=None)
+    rs.add_argument("--limit", type=int, default=None,
+                    help="stop after N postings (default: the whole queue)")
+    rs.add_argument("--llm-provider", default=None,
+                    help="local inference server type. Env: $JOBTRACKER_LLM_PROVIDER")
+    rs.add_argument("--llm-url", default=None,
+                    help="http://HOST:PORT of that server. Env: $JOBTRACKER_LLM_URL")
+    rs.add_argument("--llm-model", default=None,
+                    help="model name (default: ask the server what it serves)")
+    rs.set_defaults(func=cmd_resolve)
 
     e = sub.add_parser("eval", help="replay criteria against your recorded judgments")
     e.add_argument("--criteria", default=str(config.CRITERIA_YAML))
