@@ -73,10 +73,15 @@ case "${1:-}" in
     # random value on every `--rm` run. That mints a new Prometheus series per run and
     # defeats the whole point of pinning service.instance.id. Passing the host's name
     # restores the intended behaviour: one stable series for this machine.
+    #
+    # TZ matters for the same reason: the image is UTC, and date.today() drives
+    # first_seen, the report's `since` window, and manual_due()'s day arithmetic. A
+    # UTC container running at 21:00 local stamps *tomorrow* on everything it stores.
     podman run --rm -v "$PWD/data:/data:Z" \
       -e JOBTRACKER_TELEMETRY=otlp \
       -e OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
       -e JOBTRACKER_INSTANCE_ID="${JOBTRACKER_INSTANCE_ID:-$(hostname)}" \
+      -e TZ="${TZ:-$(readlink /etc/localtime | sed 's#.*/zoneinfo/##')}" \
       --network "$NET" jobtracker:latest check "$@"
     ;;
 
