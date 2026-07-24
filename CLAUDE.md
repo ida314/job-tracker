@@ -364,6 +364,16 @@ hosted provider.
 - **Every failure path must leave the posting UNCERTAIN.** Unreachable, timeout,
   malformed, unsure — all of them. Nothing here may raise for a down server. If you add
   a code path that can produce a verdict from a failed call, that is a bug.
+- **The schema request is `response_format`, not `guided_json`** (changed 2026-07-24).
+  vLLM dropped the `guided_json` / `guided_decoding_backend` pair; 0.23 accepts a body
+  carrying them, *ignores* them, and answers in prose. `_parse_verdict` then rejected
+  every response and the whole pass became a silent no-op — it still fetched a
+  description per posting and resolved nothing. Because failure-is-absence is the
+  design, this cost no accuracy and raised no error, which is exactly why it could sit
+  undetected. Diagnostic: `resolve` reporting ~zero resolutions while the server is up
+  means the wire format, not the model. Verify against the server you actually run —
+  `test_request_constrains_output_and_is_deterministic` pins the request shape, but only
+  a live call proves the server honours it.
 - Ashby and Lever ship `descriptionPlain` in the **bulk** payload; only Greenhouse needs
   a per-posting fetch, and its `content` is HTML-escaped *inside* the JSON string, so
   unescape before stripping tags. Description fetches must go through

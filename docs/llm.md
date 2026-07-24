@@ -149,10 +149,23 @@ provider is an address you point at.
 - **No SDK.** OpenAI-compatible JSON over HTTP, so `requests` — already a dependency for
   the ATS fetches — is the entire client. Nothing to install is what makes "optional"
   structurally true rather than aspirational.
-- **Constrained decoding.** `guided_json` restricts sampling so the server emits text
+- **Constrained decoding.** `response_format` restricts sampling so the server emits text
   conforming to the schema. Malformed output stops being a failure mode to parse around.
-  The client validates anyway: a server that silently ignored `guided_json` would
+  The client validates anyway: a server that silently ignored the schema would
   otherwise let free-form prose through as a verdict.
+
+  That validation earned its keep on 2026-07-24. The request used vLLM's older
+  `guided_json` + `guided_decoding_backend` pair, both since dropped from the request
+  schema. vLLM 0.23 does not reject a body carrying them — it **accepts the request,
+  ignores the keys, and answers in prose**. Every response then failed `_parse_verdict`,
+  so every posting stayed `uncertain`: the pass ran, spent a description fetch per
+  posting, and resolved nothing. Failure-is-absence meant this cost accuracy nothing,
+  which is also why nothing surfaced it — a no-op pass and a pass with no work to do
+  look identical from the outside. If `resolve` reports zero resolutions against a
+  server that is demonstrably up, suspect the wire format before the model.
+
+  `response_format` is OpenAI's own spelling and the portable one. **Check it against
+  the server you actually run** — a schema request is a request, not a guarantee.
 - `temperature: 0`, so the same posting classifies the same way on a rerun. Otherwise
   `eval` scores noise instead of the model.
 

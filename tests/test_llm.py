@@ -41,7 +41,12 @@ def test_registry_mirrors_the_sources_pattern(vllm):
 def test_request_constrains_output_and_is_deterministic(vllm):
     body = vllm.build_request("m", "sys", "user", LEVEL_SCHEMA)
     assert body["model"] == "m"
-    assert body["guided_json"] == LEVEL_SCHEMA      # constrained decoding, not hope
+    # Constrained decoding, not hope. Must be the OpenAI-standard `response_format`:
+    # vLLM dropped `guided_json` and silently ignores it, answering in prose, which
+    # makes every posting unparseable and the whole pass a no-op. See vllm.py.
+    assert body["response_format"]["type"] == "json_schema"
+    assert body["response_format"]["json_schema"]["schema"] == LEVEL_SCHEMA
+    assert "guided_json" not in body
     assert body["temperature"] == 0                 # same posting -> same verdict
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
 
@@ -82,7 +87,11 @@ def test_parse_verdict_accepts_a_well_formed_answer():
     '"entry"',
 ])
 def test_parse_verdict_rejects_anything_unexpected(text):
-    """A provider ignoring guided_json would otherwise let prose through as a verdict."""
+    """A server ignoring the schema request lets prose through as a verdict.
+
+    Not hypothetical: vLLM 0.23 does exactly this when sent the older `guided_json`.
+    This check is what turned that into "resolves nothing" instead of "wrong verdicts".
+    """
     assert _parse_verdict(text) is None
 
 
