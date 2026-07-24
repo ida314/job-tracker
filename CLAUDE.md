@@ -171,11 +171,31 @@ these; they are not broken:
 - `greenhouse/dbtlabsinc` (dbt Labs)
 - `greenhouse/root` (Root Insurance)
 
+**Matching has run.** Three pipeline runs are recorded in `state.db` — 2026-07-20, 07-22,
+and 07-23 — covering 8,961 postings across 62 boards. Every posting carries a verdict:
+
+| Verdict | Count | Meaning |
+|---|---|---|
+| `reject` | 7,370 | A rule fired. The reason names which one. |
+| `uncertain` | 1,558 | No level token in the title. The residual the LLM pass reads. |
+| `match` | 33 | Open matches, not run totals. |
+
+The first run reported 129 matches, mostly noise; adding the engineering-gate requirement
+(a level token alone is not enough — see `match.py`) cut it to the current figure. That
+fix is the reason `role_type_include` and `engineering_terms` are separate lists.
+
+**Still leaking, as of 2026-07-23.** The engineering gate can still be satisfied by a
+non-engineering role: Stripe's *"Seller Systems Operations Associate (Night Shift)"*
+matches on `level:associate+role:systems`, because `systems` in `role_type_include` fires
+on an operations title. This is the `Finance Associate` bug through a different door. Fix
+it with the tuning loop and a regression check, not with a bare YAML edit.
+
 **Not yet done:**
 
-- No Match Criteria filtering has ever been run. No role matching has happened.
-- `status`, `last_checked`, and `last_posting_seen` are untouched across all 98 entries.
-  The first real daily run is still pending.
+- **The tracker markdown is a stale mirror.** `status`, `last_checked`, and
+  `last_posting_seen` are still untouched across all 98 entries — not because nothing has
+  run, but because v2 keeps run state in `state.db` and never writes back to the markdown.
+  Don't read the markdown to learn what happened; query `state.db` or open the dashboard.
 - The two aggregator sources have never been fetched or diffed. The Ouckah/CVrve repo URL
   is unverified and these repos rename by cycle year.
 
