@@ -64,7 +64,52 @@ CREATE TABLE IF NOT EXISTS manual_checks (
     company        TEXT PRIMARY KEY,
     last_surfaced  TEXT
 );
+
+-- Your judgments. This is the regression corpus, not a cache: `jobtracker eval`
+-- replays the criteria over these to answer "what would this rule change break?"
+--
+-- `title` is denormalized on purpose. A posting closes and eventually gets pruned,
+-- but the judgment "a title shaped like this is not what I want" stays true forever.
+-- Joining to postings would silently shrink the corpus every time a req closed, which
+-- is exactly when you least want to lose the evidence.
+CREATE TABLE IF NOT EXISTS decisions (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    location    TEXT,
+    decision    TEXT NOT NULL,        -- 'match' | 'reject'
+    note        TEXT,
+    decided_at  TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
+
+-- Per-posting escape hatch. Survives rematch: once you have ruled on something
+-- specific, no rule change should quietly re-open it.
+CREATE TABLE IF NOT EXISTS overrides (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    decision    TEXT NOT NULL,
+    reason      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
 """
+
+# Columns added after the initial schema shipped. CREATE TABLE IF NOT EXISTS cannot
+# express these, and SQLite has no ADD COLUMN IF NOT EXISTS, so they are applied by
+# inspecting the table and swallowing the duplicate-column error.
+_ADDED_COLUMNS = [
+    # Job descriptions, fetched lazily by the LLM pass for UNCERTAIN postings only.
+    # NULL means "never fetched", which is distinct from "fetched and empty".
+    ("postings", "description", "TEXT"),
+]
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    for table, column, decl in _ADDED_COLUMNS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -72,6 +117,8 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    _apply_column_migrations(conn)
+    conn.commit()
     return conn
 
 
@@ -305,3 +352,128 @@ def _days_between(a: str, b: str) -> int:
     from datetime import date
 
     return abs((date.fromisoformat(b[:10]) - date.fromisoformat(a[:10])).days)
+
+
+# -- decisions: your judgments, kept as a regression corpus -------------------------
+def record_decision(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    title: str,
+    decision: str,
+    now: str,
+    location: str = "",
+    note: str = "",
+) -> None:
+    """Record how *you* judged a posting. Re-judging the same posting overwrites."""
+    if decision not in ("match", "reject"):
+        raise ValueError(f"decision must be 'match' or 'reject', got {decision!r}")
+    conn.execute(
+        """
+        INSERT INTO decisions
+            (company, ats_job_id, title, location, decision, note, decided_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            title=excluded.title, location=excluded.location,
+            decision=excluded.decision, note=excluded.note,
+            decided_at=excluded.decided_at
+        """,
+        (company, ats_job_id, title, location, decision, note, now),
+    )
+
+
+def all_decisions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every judgment ever recorded, newest first. The input to `eval`."""
+    return list(
+        conn.execute(
+            "SELECT company, ats_job_id, title, location, decision, note, decided_at "
+            "FROM decisions ORDER BY decided_at DESC, company, title"
+        )
+    )
+
+
+def decision_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) n FROM decisions").fetchone()["n"]
+
+
+# -- overrides: per-posting, survives rematch ---------------------------------------
+def set_override(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    decision: str,
+    now: str,
+    reason: str = "",
+) -> None:
+    if decision not in ("match", "reject", "uncertain"):
+        raise ValueError(f"bad override decision {decision!r}")
+    conn.execute(
+        """
+        INSERT INTO overrides (company, ats_job_id, decision, reason, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            decision=excluded.decision, reason=excluded.reason,
+            created_at=excluded.created_at
+        """,
+        (company, ats_job_id, decision, reason, now),
+    )
+
+
+def clear_override(conn: sqlite3.Connection, company: str, ats_job_id: str) -> None:
+    conn.execute(
+        "DELETE FROM overrides WHERE company=? AND ats_job_id=?", (company, ats_job_id)
+    )
+
+
+def load_overrides(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Row]:
+    """All overrides keyed by (company, ats_job_id).
+
+    Loaded once per run rather than queried per posting: there are ~9k postings and
+    a handful of overrides, so this is one small dict instead of 9k point lookups.
+    """
+    return {
+        (r["company"], r["ats_job_id"]): r
+        for r in conn.execute(
+            "SELECT company, ats_job_id, decision, reason FROM overrides"
+        )
+    }
+
+
+# -- descriptions: fetched lazily, only for the UNCERTAIN residual ------------------
+def postings_needing_description(
+    conn: sqlite3.Connection, limit: Optional[int] = None
+) -> list[sqlite3.Row]:
+    """Open UNCERTAIN postings whose description has never been fetched.
+
+    NULL means never fetched; '' means fetched and genuinely empty. Only the former
+    is retried, so a description-less posting is not re-requested every night.
+    """
+    sql = """
+        SELECT p.company, p.ats_job_id, p.title, p.url, p.location
+        FROM postings p JOIN verdicts v
+          ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        WHERE v.verdict='uncertain' AND p.closed_at IS NULL AND p.description IS NULL
+        ORDER BY p.first_seen DESC
+    """
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return list(conn.execute(sql))
+
+
+def set_description(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, description: str
+) -> None:
+    conn.execute(
+        "UPDATE postings SET description=? WHERE company=? AND ats_job_id=?",
+        (description, company, ats_job_id),
+    )
+
+
+def get_description(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[str]:
+    row = conn.execute(
+        "SELECT description FROM postings WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+    return row["description"] if row else None

@@ -25,8 +25,9 @@ from pathlib import Path
 import yaml
 from opentelemetry import metrics
 
-from . import config, report as report_mod, store, telemetry
+from . import config, report as report_mod, store, telemetry, tuning
 from .criteria import load_criteria
+from .tuning import apply_override
 from .fetch import Fetcher
 from .health import evaluate, is_degraded
 from .match import match
@@ -147,6 +148,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     config.ensure_data_dir()
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     by_name = {c.name: c for c in api}
+    # One dict for the whole run: ~9k postings, a handful of overrides.
+    overrides = store.load_overrides(conn)
 
     stats = {"companies": len(api), "ok": 0, "failed": 0, "new_postings": 0, "matches": 0}
     degraded: list[str] = []  # boards worth failing the run over — see EXIT_DEGRADED
@@ -166,7 +169,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             new_postings, _ = store.sync_postings(conn, company.name, res.postings, today)
             stats["new_postings"] += len(new_postings)
             for posting in res.postings:
-                verdict = match(posting, criteria)
+                verdict = apply_override(match(posting, criteria), overrides)
                 store.record_verdict(conn, verdict, today)
                 if verdict.decision.value == "match" and posting in new_postings:
                     stats["matches"] += 1
@@ -270,6 +273,8 @@ def cmd_rematch(args: argparse.Namespace) -> int:
     criteria = load_criteria(args.criteria)
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
+    overrides = store.load_overrides(conn)
+    before = store.counts_by_verdict(conn)
     rows = conn.execute(
         "SELECT company, ats_job_id, title, location, url, posted_at "
         "FROM postings WHERE closed_at IS NULL"
@@ -283,12 +288,91 @@ def cmd_rematch(args: argparse.Namespace) -> int:
             location=r["location"] or "",
             posted_at=r["posted_at"],
         )
-        store.record_verdict(conn, match(posting, criteria), today)
+        store.record_verdict(conn, apply_override(match(posting, criteria), overrides), today)
     conn.commit()
-    counts = store.counts_by_verdict(conn)
+    after = store.counts_by_verdict(conn)
     conn.close()
-    print(f"rematched {len(rows)} open postings")
-    print(f"  verdicts: {counts}")
+
+    print(f"rematched {len(rows)} open postings ({len(overrides)} override(s) applied)")
+    # Show the delta, not just the totals: after a rule change the question is always
+    # "what moved", and diffing two dicts by eye is exactly the step people skip.
+    for verdict in sorted(set(before) | set(after)):
+        b, a = before.get(verdict, 0), after.get(verdict, 0)
+        arrow = f"  {b} → {a}" + (f"  ({a - b:+d})" if a != b else "")
+        print(f"  {verdict:<10}{arrow}")
+    return 0
+
+
+# -- eval --------------------------------------------------------------------------
+def cmd_eval(args: argparse.Namespace) -> int:
+    """Replay the current criteria against every judgment you have recorded.
+
+    Exits 1 when a regression exists, so this composes into a pre-apply gate rather
+    than being something you have to remember to read.
+    """
+    criteria = load_criteria(args.criteria)
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    decisions = store.all_decisions(conn)
+    conn.close()
+
+    if not decisions:
+        print("No decisions recorded yet — nothing to evaluate.")
+        print("Judge some postings first (`jobtracker decide`, or the tuning tab).")
+        return 0
+
+    report = tuning.evaluate(decisions, criteria)
+    print(report.summary())
+
+    if report.regressions:
+        print(f"\nREGRESSIONS ({len(report.regressions)}) — rules contradict your judgment:")
+        for c in report.regressions:
+            print(f"  {c.company:<18} {c.title[:52]:<52} you:{c.yours:<8} rules:{c.rules}")
+            print(f"  {'':<18} └─ fired: {c.rule_reason}")
+
+    if report.unresolved and args.verbose:
+        print(f"\nUnresolved ({len(report.unresolved)}) — rules say uncertain, you decided:")
+        for c in report.unresolved:
+            print(f"  {c.company:<18} {c.title[:52]:<52} you:{c.yours}")
+
+    suggestions = tuning.suggest_rules(decisions, criteria, min_count=args.min_count)
+    if suggestions:
+        print(f"\nSuggested rules — phrases in ≥{args.min_count} rejects, never in an accept:")
+        for s in suggestions:
+            print(f"  {s.phrase!r:<28} {s.rejected} rejects   e.g. {s.examples[0][:44]!r}")
+
+    return 1 if report.regressions else 0
+
+
+# -- decide ------------------------------------------------------------------------
+def cmd_decide(args: argparse.Namespace) -> int:
+    """Record a judgment on one posting, and optionally pin it with an override."""
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    row = conn.execute(
+        "SELECT company, ats_job_id, title, location FROM postings "
+        "WHERE company=? AND ats_job_id=?",
+        (args.company, args.job_id),
+    ).fetchone()
+    if row is None:
+        print(f"error: no posting {args.company}/{args.job_id}", file=sys.stderr)
+        conn.close()
+        return 1
+
+    now = _now()
+    store.record_decision(
+        conn, row["company"], row["ats_job_id"], row["title"], args.decision,
+        now, location=row["location"] or "", note=args.note,
+    )
+    if args.pin:
+        store.set_override(
+            conn, row["company"], row["ats_job_id"], args.decision, now,
+            reason=args.note or "manual",
+        )
+    conn.commit()
+    n = store.decision_count(conn)
+    conn.close()
+    pinned = " (pinned as an override)" if args.pin else ""
+    print(f"recorded {args.decision}: {row['title']}{pinned}")
+    print(f"corpus is now {n} decision(s) — run `jobtracker eval` before changing rules")
     return 0
 
 
@@ -399,6 +483,23 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--db", default=None)
     rm.add_argument("--since", default=None)
     rm.set_defaults(func=cmd_rematch)
+
+    e = sub.add_parser("eval", help="replay criteria against your recorded judgments")
+    e.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    e.add_argument("--db", default=None)
+    e.add_argument("--min-count", type=int, default=3,
+                   help="rejects a phrase needs before it is suggested (default: 3)")
+    e.set_defaults(func=cmd_eval)
+
+    d2 = sub.add_parser("decide", help="record your judgment on one posting")
+    d2.add_argument("company")
+    d2.add_argument("job_id")
+    d2.add_argument("decision", choices=["match", "reject"])
+    d2.add_argument("--note", default="", help="why — shown in eval output")
+    d2.add_argument("--pin", action="store_true",
+                    help="also set a per-posting override, so rematch cannot undo it")
+    d2.add_argument("--db", default=None)
+    d2.set_defaults(func=cmd_decide)
 
     r = sub.add_parser("report", help="re-render state.db without fetching")
     r.add_argument("--criteria", default=str(config.CRITERIA_YAML))

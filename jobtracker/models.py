@@ -79,7 +79,10 @@ class Verdict:
     ats_job_id: str
     decision: Decision
     reason: str
-    decided_by: str = "rules"  # 'rules' | 'llm'
+    # 'rules'  — the deterministic matcher (match.py)
+    # 'llm'    — the ambiguity pass, resolving an UNCERTAIN title from its description
+    # 'human'  — a per-posting override you set; outranks both
+    decided_by: str = "rules"
 
 
 @dataclass

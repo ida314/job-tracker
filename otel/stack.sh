@@ -65,6 +65,12 @@ case "${1:-}" in
 
   run)
     shift
+    # NOTE: this mounts the repo's ./data, so it is a REAL run against your real
+    # state.db -- it adds a `runs` row and stores whatever the boards return. That is
+    # intended for a genuine run through the stack, but it makes `stack.sh run` a poor
+    # way to smoke-test the stack itself. To verify the collector without touching
+    # your data, point JOBTRACKER_DB at a scratch copy:
+    #   podman run --rm -v /tmp/scratch:/data:Z ... jobtracker:latest check
     # host.containers.internal reaches the host's published 4318 from inside the job
     # container; --network jt-otel would also work and skip the host hop.
     #
