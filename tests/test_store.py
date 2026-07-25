@@ -68,3 +68,27 @@ def test_closed_posting_excluded_from_report():
     )
     store.sync_postings(conn, "Acme", [], "2026-07-02")  # closes id 1
     assert store.postings_with_decision(conn, "match", "2026-07-01") == []
+
+
+def test_application_advances_but_keeps_applied_at():
+    conn = _conn()
+    store.record_application(conn, "Acme", "1", "SWE, New Grad", "applied", "2026-07-01")
+    store.record_application(
+        conn, "Acme", "1", "SWE, New Grad", "interviewing", "2026-07-10", note="phone screen"
+    )
+    rows = store.all_applications(conn)
+    assert len(rows) == 1  # same posting, advanced in place
+    assert rows[0]["status"] == "interviewing"
+    assert rows[0]["applied_at"] == "2026-07-01"  # set once, preserved on update
+    assert rows[0]["updated_at"] == "2026-07-10"  # moves on every change
+    assert rows[0]["note"] == "phone screen"
+    assert store.application_count(conn) == 1
+
+
+def test_application_rejects_unknown_status():
+    conn = _conn()
+    try:
+        store.record_application(conn, "Acme", "1", "SWE", "ghosted", "2026-07-01")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass

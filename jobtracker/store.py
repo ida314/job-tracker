@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS overrides (
     created_at  TEXT NOT NULL,
     PRIMARY KEY (company, ats_job_id)
 );
+
+-- The outer loop: which surfaced roles you actually applied to, and what came of it.
+-- `title` is denormalized for the same reason as `decisions` — a req closes and gets
+-- pruned, but "I applied here and got an interview" stays true and worth keeping.
+-- `applied_at` is set once; `status`/`updated_at` move as the application progresses.
+CREATE TABLE IF NOT EXISTS applications (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    status      TEXT NOT NULL,   -- applied | interviewing | offer | rejected | withdrawn
+    note        TEXT,
+    applied_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
 """
 
 # Columns added after the initial schema shipped. CREATE TABLE IF NOT EXISTS cannot
@@ -394,6 +409,54 @@ def all_decisions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 def decision_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) n FROM decisions").fetchone()["n"]
+
+
+# -- applications: the outer loop (which roles you applied to, and the outcome) --------
+# The lifecycle of one application. Ordered, but not enforced as a state machine — you
+# can jump straight to `rejected`, and `withdrawn` is a terminal you reach from anywhere.
+APPLICATION_STATUSES = ("applied", "interviewing", "offer", "rejected", "withdrawn")
+
+
+def record_application(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    title: str,
+    status: str,
+    now: str,
+    note: str = "",
+) -> None:
+    """Record (or advance) an application. First write sets applied_at; later writes
+    move status/note/updated_at and leave applied_at untouched."""
+    if status not in APPLICATION_STATUSES:
+        raise ValueError(
+            f"status must be one of {APPLICATION_STATUSES}, got {status!r}"
+        )
+    conn.execute(
+        """
+        INSERT INTO applications
+            (company, ats_job_id, title, status, note, applied_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            title=excluded.title, status=excluded.status,
+            note=excluded.note, updated_at=excluded.updated_at
+        """,
+        (company, ats_job_id, title, status, note, now, now),
+    )
+
+
+def all_applications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every application, most-recently-updated first."""
+    return list(
+        conn.execute(
+            "SELECT company, ats_job_id, title, status, note, applied_at, updated_at "
+            "FROM applications ORDER BY updated_at DESC, company, title"
+        )
+    )
+
+
+def application_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) n FROM applications").fetchone()["n"]
 
 
 # -- overrides: per-posting, survives rematch ---------------------------------------

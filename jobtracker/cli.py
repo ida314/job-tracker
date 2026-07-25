@@ -71,6 +71,16 @@ matches_total = _meter.create_counter(
     unit="{posting}",
     description="New postings that satisfied the match criteria",
 )
+applications_total = _meter.create_counter(
+    "jobtracker.applications",
+    unit="{application}",
+    description="Applications recorded, by status — the outer loop over `check`",
+)
+matches_rejected_total = _meter.create_counter(
+    "jobtracker.matches.rejected",
+    unit="{posting}",
+    description="Rule-matched postings a human later rejected — the false-positive signal",
+)
 
 
 # Attributes the stdlib puts on every LogRecord. Anything on a record that is NOT one of
@@ -494,6 +504,16 @@ def cmd_decide(args: argparse.Namespace) -> int:
         conn.close()
         return 1
 
+    # A human reject on a posting the rules called `match` is a false positive — the
+    # tuning loop's headline quality signal. Read the standing verdict before overwriting.
+    if args.decision == "reject":
+        prior = conn.execute(
+            "SELECT verdict FROM verdicts WHERE company=? AND ats_job_id=?",
+            (row["company"], row["ats_job_id"]),
+        ).fetchone()
+        if prior and prior["verdict"] == "match":
+            matches_rejected_total.add(1)
+
     now = _now()
     store.record_decision(
         conn, row["company"], row["ats_job_id"], row["title"], args.decision,
@@ -510,6 +530,38 @@ def cmd_decide(args: argparse.Namespace) -> int:
     pinned = " (pinned as an override)" if args.pin else ""
     print(f"recorded {args.decision}: {row['title']}{pinned}")
     print(f"corpus is now {n} decision(s) — run `jobtracker eval` before changing rules")
+    return 0
+
+
+# -- apply -------------------------------------------------------------------------
+def cmd_apply(args: argparse.Namespace) -> int:
+    """Record or advance an application to a surfaced posting — the outer loop.
+
+    `check`/`resolve` find roles; this records which ones you acted on and what came
+    of them, so tiers can eventually be re-ranked by what actually converts rather
+    than by prior. Re-running with a new --status advances the same application.
+    """
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    row = conn.execute(
+        "SELECT company, ats_job_id, title FROM postings WHERE company=? AND ats_job_id=?",
+        (args.company, args.job_id),
+    ).fetchone()
+    if row is None:
+        print(f"error: no posting {args.company}/{args.job_id}", file=sys.stderr)
+        conn.close()
+        return 1
+
+    store.record_application(
+        conn, row["company"], row["ats_job_id"], row["title"],
+        args.status, _now(), note=args.note,
+    )
+    conn.commit()
+    # status is a 5-value bounded set — safe as a metric attribute (CLAUDE.md).
+    applications_total.add(1, {"status": args.status})
+    n = store.application_count(conn)
+    conn.close()
+    print(f"recorded {args.status}: {row['title']}")
+    print(f"tracking {n} application(s)")
     return 0
 
 
@@ -665,6 +717,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also set a per-posting override, so rematch cannot undo it")
     d2.add_argument("--db", default=None)
     d2.set_defaults(func=cmd_decide)
+
+    ap = sub.add_parser("apply", help="record or advance an application to a posting")
+    ap.add_argument("company")
+    ap.add_argument("job_id")
+    ap.add_argument("--status", choices=store.APPLICATION_STATUSES, default="applied",
+                    help="application state (default: applied); re-run to advance it")
+    ap.add_argument("--note", default="")
+    ap.add_argument("--db", default=None)
+    ap.set_defaults(func=cmd_apply)
 
     r = sub.add_parser("report", help="re-render state.db without fetching")
     r.add_argument("--criteria", default=str(config.CRITERIA_YAML))

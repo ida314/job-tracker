@@ -279,6 +279,18 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             if row is None:
                 return {"ok": False, "error": "no such posting"}
+            # A reject on a rule-`match` is a false positive — the same quality signal
+            # the CLI `decide` emits. Counter lives in cli.py; import lazily to avoid a
+            # cycle (cli imports this module). Read the standing verdict before overwriting.
+            if decision == "reject":
+                prior = conn.execute(
+                    "SELECT verdict FROM verdicts WHERE company=? AND ats_job_id=?",
+                    (company, job_id),
+                ).fetchone()
+                if prior and prior["verdict"] == "match":
+                    from .cli import matches_rejected_total
+
+                    matches_rejected_total.add(1)
             now = datetime.now().isoformat(timespec="seconds")
             store.record_decision(
                 conn, company, job_id, row["title"], decision, now,
