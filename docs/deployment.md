@@ -47,6 +47,8 @@ is a fact about the company.
 | `JOBTRACKER_COMPANIES` | No | Defaults to the copy baked into the image |
 | `JOBTRACKER_TELEMETRY` | No | `off` (default), `console`, or `otlp` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | With `otlp` | Where the collector is |
+| `JOBTRACKER_LLM_PROVIDER` | For `resolve` | e.g. `vllm`. Absent → `resolve` is a no-op that reports and changes nothing |
+| `JOBTRACKER_LLM_URL` | For `resolve` | `http://HOST:PORT` of the local model. The model name is discovered from `/v1/models` |
 
 Every run logs the resolved `companies=`/`criteria=`/`db=` paths as its first line. When
 something behaves as though your config changed nothing, read that line first.
@@ -56,6 +58,36 @@ something behaves as though your config changed nothing, read that line first.
 - `/data` — **required.** Holds `state.db`. The image is disposable; this is not.
 - `/app/criteria.yaml` — optional, but mount it once you start tuning. See the schema-skew
   trap below.
+
+## The nightly sequence
+
+`check` is the one command that has to run; the other two turn on the parts of the
+pipeline that drain and display what `check` finds. A complete nightly run is three
+one-shot commands against the same `$JOBTRACKER_DB`, in order:
+
+```sh
+jobtracker check              # fetch → health → store → match → report
+jobtracker resolve            # read descriptions, settle the UNCERTAIN residual (needs a model)
+jobtracker dashboard          # render state.db → a static HTML file
+```
+
+- **`resolve` is the automated drain for the review pile.** `check` leaves every
+  no-level-token title `uncertain`; `resolve` reads the description with the local model
+  and settles what it can (→ match/reject), leaving only the genuinely ambiguous. Without
+  `JOBTRACKER_LLM_PROVIDER`/`_URL` it is a safe no-op, so it is always fine to include in
+  the sequence — it simply does nothing until a model is reachable. Every failure path
+  leaves a posting `uncertain`, so a down model never corrupts a verdict.
+- **Order matters only in that `resolve` reads what `check` wrote** and `dashboard` shows
+  the result of both. Each is independently idempotent and re-runnable.
+- **Sequencing is the caller's job, not the app's.** Three `Exec=` lines, three cron
+  entries, or three steps in one wrapper — the container does not care. Keep each a
+  separate invocation so one failing does not abort the others (a model being down should
+  not stop the dashboard from rendering).
+
+The **weekly** cadence is separate: `manual` companies are surfaced for hand-checking at
+most once per week (rate-limited by `last_checked`), and the aggregator feeds
+(`check_method: aggregator`) are worth a look on the same weekly beat. Both ride along
+inside `check`; there is no separate command.
 
 ---
 
