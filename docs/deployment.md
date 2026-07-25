@@ -184,7 +184,27 @@ journald writes each line twice, doubling journal usage for nothing. `LogDriver=
 leaves systemd as the single path. Since the container is `--rm`, there is no `podman
 logs` to lose.
 
-### 5. Lingering disabled → the timer stops when you log out
+### 5. A root-in-container image → a state.db you cannot write
+
+The image does not declare a `USER`, so it runs as root. Under a runtime that does not
+remap uids — Docker, or rootful podman — every file it creates on the `/data` bind
+mount comes out owned by root. The nightly run keeps working, because it is also root.
+
+You notice when you run `jobtracker serve` or `jobtracker dashboard` from the repo as
+yourself and the read succeeds but the write does not: SQLite needs to write `-wal` and
+`-shm` alongside the database just to open it for writing, so this surfaces as a
+confusing "unable to open database file" on a file you can plainly read.
+
+Pass the host uid; the process only ever writes `/data`, so it costs nothing:
+
+```sh
+docker run --user "$(id -u):$(id -g)" -e HOME=/tmp ...
+```
+
+`HOME` is redirected because the image's home directory is not writable by the dropped
+uid. Rootless podman is not affected — it already maps the container root to you.
+
+### 6. Lingering disabled → the timer stops when you log out
 
 `systemctl --user` timers only run while the user has a session. On a server that means
 the nightly sweep silently stops the moment you disconnect. Check and fix:
