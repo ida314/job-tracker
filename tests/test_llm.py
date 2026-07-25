@@ -13,7 +13,7 @@ import json
 import pytest
 
 from jobtracker import config
-from jobtracker.criteria import Criteria, load_criteria
+from jobtracker.criteria import load_criteria
 from jobtracker.llm import LlmClient, get_provider, provider_names
 from jobtracker.llm.client import LEVEL_SCHEMA, LevelVerdict, _parse_verdict
 from jobtracker.models import Decision

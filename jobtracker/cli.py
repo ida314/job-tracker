@@ -34,7 +34,6 @@ from .fetch import Fetcher
 from .health import evaluate, is_degraded
 from .match import match
 from .migrate import migrate as run_migrate
-from .models import Company
 from .sources import get_source
 
 
@@ -410,10 +409,10 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     if provider_name == "none" or not base_url:
         eligible = sum(1 for r in rows if resolve_mod.looks_engineering(r["title"], criteria))
         conn.close()
-        print(f"No LLM provider configured — nothing was changed.")
+        print("No LLM provider configured — nothing was changed.")
         print(f"  {len(rows)} uncertain postings open, {eligible} with an engineering-looking title.")
-        print(f"  Configure one with --llm-provider vllm --llm-url http://HOST:PORT")
-        print(f"  (or $JOBTRACKER_LLM_PROVIDER / $JOBTRACKER_LLM_URL)")
+        print("  Configure one with --llm-provider vllm --llm-url http://HOST:PORT")
+        print("  (or $JOBTRACKER_LLM_PROVIDER / $JOBTRACKER_LLM_URL)")
         return 0
 
     provider = llm_pkg.get_provider(provider_name)

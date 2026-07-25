@@ -14,7 +14,7 @@ from collections import defaultdict
 
 from . import store
 from .criteria import Criteria
-from .match import location_label, location_rank
+from .match import location_rank
 from .models import Company
 
 MANUAL_INTERVAL_DAYS = 7
