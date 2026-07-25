@@ -171,18 +171,29 @@ these; they are not broken:
 - `greenhouse/dbtlabsinc` (dbt Labs)
 - `greenhouse/root` (Root Insurance)
 
-**Matching has run.** Three pipeline runs are recorded in `state.db` — 2026-07-20, 07-22,
-and 07-23 — covering 8,961 postings across 62 boards. Every posting carries a verdict:
+**Matching has run, and `resolve` has now drained the queue (2026-07-25).** Verdicts
+in `state.db` by who decided them:
 
-| Verdict | Count | Meaning |
-|---|---|---|
-| `reject` | 7,370 | A rule fired. The reason names which one. |
-| `uncertain` | 1,558 | No level token in the title. The residual the LLM pass reads. |
-| `match` | 33 | Open matches, not run totals. |
+| Verdict | rules | llm | Meaning |
+|---|---|---|---|
+| `reject` | 7,084 | 572 | A rule fired, or the model read the description as not-entry. |
+| `uncertain` | 867 | — | No level token in the title *and* not engineering-signal (the model's queue is scoped to engineering titles; the rest correctly park). |
+| `match` | 30 | 99 | Open matches, not run totals. |
 
-The first run reported 129 matches, mostly noise; adding the engineering-gate requirement
-(a level token alone is not enough — see `match.py`) cut it to the current figure. That
-fix is the reason `role_type_include` and `engineering_terms` are separate lists.
+`resolve` was a silent no-op until the 2026-07-24 `response_format` fix; its first real
+run (2026-07-25) considered 670 engineering-signal uncertains and settled 665 (99 → match,
+566 → reject), leaving 5. The uncertain backlog fell 1,538 → 867 — and the remainder is
+the non-engineering tail `looks_engineering()` deliberately leaves alone, not a review pile.
+Re-run order is **`check` then `resolve`**: `check` re-records the rules verdict for every
+posting and would clobber an llm verdict that isn't pinned.
+
+The first check run reported 129 matches, mostly noise; adding the engineering-gate
+requirement (a level token alone is not enough — see `match.py`) cut it. That fix is the
+reason `role_type_include` and `engineering_terms` are separate lists.
+
+The **aggregator** feed adds ~318 postings on the next `check` (151 rules-matches — new-grad
+roles across many employers, some not otherwise tracked). Validated on a scratch copy
+2026-07-25; not yet in the live DB because it enters via `check`.
 
 **Still leaking, as of 2026-07-23.** The engineering gate can still be satisfied by a
 non-engineering role: Stripe's *"Seller Systems Operations Associate (Night Shift)"*
