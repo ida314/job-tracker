@@ -46,6 +46,8 @@ class Company:
     check_method: str = "manual"  # api | manual | aggregator
     expected_board_name: Optional[str] = None
     careers_page: str = ""  # human-facing fallback + where slug-repair reads
+    board_url: str = ""  # aggregator feeds fetch this directly (a raw README URL), since
+    #                      they have no slug to template — see sources/aggregator.py.
     notes: str = ""
 
     @property

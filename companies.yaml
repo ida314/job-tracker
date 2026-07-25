@@ -856,12 +856,13 @@
 - name: Simplify New-Grad-Positions
   ats: aggregator
   check_method: aggregator
-  notes: README table of 2026/2027 new-grad roles; updates via commits. Diff the raw README.
+  board_url: https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md
+  notes: HTML <table> README of new-grad roles; ~2k rows, mostly closed (🔒, skipped). Verified 2026-07-25.
   expected_board_name: null
 - name: Ouckah / CVrve New-Grad list
   ats: aggregator
   check_method: aggregator
-  notes: Verify current repo name/URL on first run — these repos rename by cycle year.
+  notes: No board_url — the 2026/2027 new-grad repo URL is unconfirmed (2025 archived, 2026 404s), so this stays skipped until verified. Same table format as Simplify, so it works once a URL is set.
   expected_board_name: null
 - name: YC Work at a Startup
   ats: aggregator

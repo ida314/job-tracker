@@ -132,6 +132,18 @@ class Fetcher:
     # -- single request with backoff -------------------------------------------------
     def _request_json(self, url: str, method: str = "GET"):
         """Return (status_code, parsed_json, error). Retries transient failures."""
+        return self._request(url, method, want="json")
+
+    def _request_text(self, url: str, method: str = "GET"):
+        """Return (status_code, body_text, error). For non-JSON feeds (aggregator READMEs).
+
+        Same retry/pacing/trace machinery as _request_json — an aggregator's GitHub host
+        gets the same per-host governor as any board, and a 404 on a renamed repo is a
+        FETCH_FAILED like any other, not a crash.
+        """
+        return self._request(url, method, want="text")
+
+    def _request(self, url: str, method: str = "GET", want: str = "json"):
         last_error = "unknown error"
         status: int | None = None
         host = urlparse(url).netloc
@@ -168,10 +180,13 @@ class Fetcher:
                         return self._fail(span, status, f"HTTP {status}", attempt)
                     if attempt:
                         log.info("%s recovered on attempt %d/%d", url, attempt + 1, MAX_RETRIES)
-                    try:
-                        payload = resp.json()
-                    except ValueError:
-                        return self._fail(span, status, "malformed JSON", attempt)
+                    if want == "text":
+                        payload = resp.text
+                    else:
+                        try:
+                            payload = resp.json()
+                        except ValueError:
+                            return self._fail(span, status, "malformed JSON", attempt)
                     span.set_attribute("http.resend_count", attempt)
                     return status, payload, None
                 except requests.RequestException as exc:
@@ -281,6 +296,37 @@ class Fetcher:
                     result.observed_board_name = source.parse_identity(id_raw)
             else:
                 result.observed_board_name = source.identity_from_jobs(raw)
+            return self._finish(span, result)
+
+    def fetch_aggregator(self, company: Company) -> FetchResult:
+        """Fetch one aggregator feed (a raw README URL) and parse it to postings.
+
+        Parallel to fetch_company but for `check_method: aggregator`: the URL is the
+        company's `board_url` (there is no slug to template), the body is text not JSON,
+        and there is no identity endpoint — a feed either parses to rows or it does not.
+        The result flows through the same health/sync/match loop as any board.
+        """
+        with tracer.start_as_current_span("fetch.aggregator") as span:
+            span.set_attribute("company.name", company.name)
+            span.set_attribute("company.ats", company.ats)
+
+            source = get_source(company.ats)
+            result = FetchResult(company=company.name, ats=company.ats, slug="")
+            if source is None:
+                result.error = f"no source adapter for ats={company.ats!r}"
+                return self._finish(span, result)
+            if not company.board_url:
+                result.error = "no board_url"
+                return self._finish(span, result)
+
+            status, text, error = self._request_text(company.board_url)
+            result.status_code = status
+            if error is not None:
+                result.error = error
+                return self._finish(span, result)
+
+            result.ok = True
+            result.postings = source.parse_jobs(company.name, text)
             return self._finish(span, result)
 
     @staticmethod

@@ -64,6 +64,7 @@ def load_companies(path: str | Path | None = None) -> list[Company]:
                     else None
                 ),
                 careers_page=str(entry.get("careers_page") or ""),
+                board_url=str(entry.get("board_url") or ""),
                 notes=str(entry.get("notes") or ""),
             )
         )

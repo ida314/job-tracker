@@ -39,7 +39,7 @@ field order below; the parser and every `awk`/`grep` sweep in this repo depends 
 |---|---|
 | `ats` | `greenhouse`, `lever`, `ashby`, `workday`, `gem`, `bespoke`, `aggregator`, or `unknown` (Snowflake — portal type never confirmed) |
 | `slug` | The board identifier within that ATS. Empty for `bespoke`/`workday`. |
-| `board_url` | Full JSON API URL. Empty when `check_method` is not `api`. |
+| `board_url` | Full JSON API URL for `api`; the raw README URL for `aggregator`. Loaded into `Company.board_url`. Empty for `manual`. |
 | `careers_page` | Human-facing careers URL. The fallback when the API breaks. |
 | `category` | Free-text bucket, e.g. `data-infra`, `fintech-backend`. |
 | `check_method` | `api`, `manual`, or `aggregator`. Governs what the agent may do. |
@@ -196,8 +196,9 @@ it with the tuning loop and a regression check, not with a bare YAML edit.
   `last_posting_seen` are still untouched across all 98 entries — not because nothing has
   run, but because v2 keeps run state in `state.db` and never writes back to the markdown.
   Don't read the markdown to learn what happened; query `state.db` or open the dashboard.
-- The two aggregator sources have never been fetched or diffed. The Ouckah/CVrve repo URL
-  is unverified and these repos rename by cycle year.
+- The Ouckah/CVrve aggregator is still unwired — its 2026/2027 new-grad repo URL is
+  unconfirmed (2025 archived, 2026 404s), so its `companies.yaml` entry has no `board_url`
+  and is skipped. Simplify **is** wired and fetched (2026-07-25) — see "Aggregator sources".
 
 ---
 
@@ -389,6 +390,31 @@ hosted provider.
   spot: "Member of Technical Staff" is never read. It stays UNCERTAIN rather than being
   rejected, and there is a test asserting that. Do not "fix" it by rejecting no-signal
   titles.
+
+## Aggregator sources
+
+`jobtracker/sources/aggregator.py`. Community new-grad list repos (SimplifyJobs-style) are
+the highest-yield source for new-grad roles specifically — they aggregate across every
+company, including ones not on our list (DESIGN.md §9). One `check_method: aggregator`
+entry with a `board_url` = one feed. The adapter parses the README's HTML `<table>`; the
+fetch is `Fetcher.fetch_aggregator` → `_request_text` (text, not JSON), then it flows
+through the same health/`sync_postings`/`match` loop as any board in `cmd_check`.
+
+- **The feed is the `company`, the employer is in the title.** One feed lists many
+  employers, so we keep the feed name as `Posting.company` (one stable diff namespace per
+  feed) and set `title = "Employer — Role"`. The title-only matcher reads that fine and the
+  employer stays visible in the dashboard without a schema change. Caveat: an employer name
+  containing a title-shaped exclude token would be conservatively rejected — near-zero risk,
+  not yet observed.
+- **`ats_job_id` is the Simplify `/p/<uuid>` when present, else a hash of employer+role.**
+  Stable across runs so `sync_postings` recognizes the same row and closes a dropped one.
+- **Closed rows (`🔒`) are skipped** — a filled req is not an opening. At last check 1,745
+  of 2,072 rows were closed; ~318 open.
+- **A missing `board_url` skips the feed** rather than failing the run. That is why the
+  unverified Ouckah/CVrve entry costs nothing — the subsystem is generic, so it works the
+  moment a confirmed URL is set (same table format).
+- **Parsing tolerates garbage** (`[]` on any unexpected shape) — these repos rename by cycle
+  and restyle the table; an empty feed is a visible SUSPECT_EMPTY, never a crash.
 
 ## Deployment
 

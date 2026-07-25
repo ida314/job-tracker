@@ -182,22 +182,41 @@ def cmd_check(args: argparse.Namespace) -> int:
     for c in skipped:
         log.warning("no adapter for %s (ats=%s) — skipping", c.name, c.ats)
 
+    # Aggregator feeds (community new-grad lists) need a board_url to fetch. An
+    # aggregator entry without one — e.g. a repo whose current URL isn't yet confirmed —
+    # stays in the "never scraped" bucket rather than failing the run every night.
+    aggregators = [
+        c
+        for c in companies
+        if c.check_method == "aggregator" and c.board_url and get_source(c.ats)
+    ]
+
     log.info(
-        "loaded %d companies: %d fetchable, %d manual/aggregator (never scraped)",
+        "loaded %d companies: %d api + %d aggregator fetchable, %d manual (never scraped)",
         len(companies),
         len(api),
-        len(companies) - len(api) - len(skipped),
+        len(aggregators),
+        len(companies) - len(api) - len(skipped) - len(aggregators),
     )
 
     fetcher = Fetcher()
     try:
         results = fetcher.fetch_all(api)
+        for c in aggregators:
+            log.info("fetching aggregator %s", c.name)
+            res = fetcher.fetch_aggregator(c)
+            log.info(
+                "aggregator %s: %s",
+                c.name,
+                f"FAIL {res.error}" if res.error else f"{len(res.postings)} postings",
+            )
+            results.append(res)
     finally:
         fetcher.close()
 
     config.ensure_data_dir()
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
-    by_name = {c.name: c for c in api}
+    by_name = {c.name: c for c in api + aggregators}
     # One dict for the whole run: ~9k postings, a handful of overrides.
     overrides = store.load_overrides(conn)
 

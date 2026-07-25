@@ -70,3 +70,61 @@ def test_parsers_tolerate_garbage():
         src = get_source(ats)
         assert src.parse_jobs("X", None) == []
         assert src.parse_jobs("X", {"jobs": "nope"} if ats != "lever" else []) == []
+
+
+# A hand-built fixture mirroring the SimplifyJobs README <table>: a header row, an open
+# role carrying a Simplify UUID, a ↳ continuation that inherits the employer, a 🔒 closed
+# row (must be dropped), and a multi-location row.
+_AGGREGATOR_HTML = """
+<table>
+<tr><th>Company</th><th>Role</th><th>Location</th><th>Application</th><th>Age</th></tr>
+<tr>
+<td><strong><a href="https://simplify.jobs/c/NVIDIA">🔥 NVIDIA</a></strong></td>
+<td>Software Engineer, New Grad</td>
+<td>Santa Clara, CA</td>
+<td><div align="center"><a href="https://nvidia.com/apply/42"><img alt="Apply"></a> <a href="https://simplify.jobs/p/dcb78e15-a5c5-4a55-89dc-2420d65990d0"><img alt="Simplify"></a></div></td>
+<td>2d</td>
+</tr>
+<tr>
+<td>↳</td>
+<td>Backend Engineer New Grad 🎓</td>
+<td>Redmond, WA</br>Austin, TX</td>
+<td><div><a href="https://nvidia.com/apply/43"><img alt="Apply"></a></div></td>
+<td>2d</td>
+</tr>
+<tr>
+<td><strong><a href="https://simplify.jobs/c/Fidelity">Fidelity</a></strong></td>
+<td>Mainframe Software Engineer 1</td>
+<td>Columbus, GA</td>
+<td>🔒</td>
+<td>3d</td>
+</tr>
+</table>
+"""
+
+
+def test_aggregator_parses_open_rows_and_carries_employer():
+    src = get_source("aggregator")
+    postings = src.parse_jobs("Simplify New-Grad-Positions", _AGGREGATOR_HTML)
+
+    # The 🔒 Fidelity row is closed and dropped; two open roles remain.
+    assert len(postings) == 2
+
+    p0 = postings[0]
+    assert p0.company == "Simplify New-Grad-Positions"  # the feed, not the employer
+    assert p0.title == "NVIDIA — Software Engineer, New Grad"  # employer moved into title
+    assert p0.ats_job_id == "dcb78e15-a5c5-4a55-89dc-2420d65990d0"  # stable Simplify UUID
+    assert p0.url == "https://nvidia.com/apply/42"  # the Apply link, not the Simplify one
+    assert p0.location == "Santa Clara, CA"
+
+    p1 = postings[1]
+    assert p1.title == "NVIDIA — Backend Engineer New Grad"  # ↳ inherited the employer
+    assert p1.location == "Redmond, WA; Austin, TX"  # </br> split
+    assert p1.ats_job_id != p0.ats_job_id  # no Simplify UUID → hashed, still distinct
+
+
+def test_aggregator_tolerates_garbage():
+    src = get_source("aggregator")
+    assert src.parse_jobs("X", None) == []
+    assert src.parse_jobs("X", "") == []
+    assert src.parse_jobs("X", "<table><tr><td>only one cell</td></tr></table>") == []
