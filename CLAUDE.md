@@ -217,6 +217,12 @@ stays clean, and a run is watchable live rather than silent until it finishes.
 - Default level is INFO: one line per board as it lands (`[12/56] Stripe  518 jobs (1.1s)`),
   plus a phase line for health/match and for report rendering.
 - `-v` → DEBUG, one line per HTTP attempt. `-q` → warnings and errors only.
+- **Log format follows the terminal.** A TTY gets the human lines above; a pipe or
+  container gets one JSON object per line — same content, with any `extra={...}` fields
+  promoted to top-level keys and a UTC-offset timestamp. Override with
+  `JOBTRACKER_LOG_FORMAT=json|text|auto` (default `auto`, keyed off `stderr.isatty()`).
+  Still stderr-only, so `check > out.md` is unaffected. The JSON formatter is hand-rolled
+  in `cli.py` — no dependency, same rule that keeps a web framework out of `server.py`.
 - `fetch_all` uses `as_completed` so lines appear as boards finish, but reassembles results
   into **input order** before returning. Downstream stays reproducible — don't "simplify"
   this back to `pool.map`.
@@ -391,6 +397,12 @@ manifests, no systemd units in-tree. The deliverable is a container plus a docum
 contract; the units live on the machine that runs them.
 
 - `check` exits 0 (clean), 2 (a board needs attention), or 1 (could not run).
+- `serve` is the one long-running process, so it carries the service affordances: it
+  exposes `/healthz` (liveness — a constant, never touches the DB) and `/readyz`
+  (readiness — 503 until state.db opens *and* criteria.yaml parses, payload names which
+  failed), and it drains the in-flight request and exits 0 on SIGTERM/SIGINT. This is
+  what lets an orchestrator run it while the app stays orchestrator-agnostic; the app
+  ships the endpoints, the deployment repo decides how to poll them.
 - Exit 2 is narrower than `status != OK` — see `health.is_degraded()`. dbt Labs and Root
   Insurance are permanently `suspect_empty` and must never fail a run.
 - **Containers must set `TZ`.** The image is UTC; `date.today()` drives `first_seen`, the

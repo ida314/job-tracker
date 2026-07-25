@@ -129,3 +129,48 @@ def test_regressions_are_surfaced(criteria):
     page = server.render_tuning(conn, criteria)
     assert "regressions 1" in page
     assert "banner bad" in page
+
+
+# -- readiness ---------------------------------------------------------------------
+# _readiness is the meaningful health logic (liveness is a constant), and like
+# render_tuning it needs no socket: a Handler carries only the paths off .server.
+class _FakeServer:
+    def __init__(self, db_path, criteria_path):
+        self.db_path = db_path
+        self.criteria_path = criteria_path
+        self.companies_path = None
+
+
+def _handler_for(db_path, criteria_path):
+    h = server.Handler.__new__(server.Handler)
+    h.server = _FakeServer(db_path, criteria_path)
+    return h
+
+
+def test_readyz_ready_when_db_and_criteria_load(tmp_path):
+    db = tmp_path / "state.db"
+    store.connect(db).close()  # a real, openable database
+    payload, status = server.Handler._readiness(_handler_for(db, config.CRITERIA_YAML))
+    assert status == 200
+    assert payload["status"] == "ready"
+    assert payload["checks"] == {"db": "ok", "criteria": "ok"}
+
+
+def test_readyz_503_when_db_cannot_be_opened(tmp_path):
+    # Parent directory does not exist, so sqlite cannot open the file — the "DB not
+    # mounted yet" case an orchestrator must see as not-ready, never as dead.
+    bogus = tmp_path / "missing-dir" / "state.db"
+    payload, status = server.Handler._readiness(_handler_for(bogus, config.CRITERIA_YAML))
+    assert status == 503
+    assert payload["status"] == "unready"
+    assert payload["checks"]["db"].startswith("error:")
+    assert payload["checks"]["criteria"] == "ok"
+
+
+def test_readyz_503_when_criteria_missing(tmp_path):
+    db = tmp_path / "state.db"
+    store.connect(db).close()
+    payload, status = server.Handler._readiness(_handler_for(db, tmp_path / "nope.yaml"))
+    assert status == 503
+    assert payload["checks"]["db"] == "ok"
+    assert payload["checks"]["criteria"].startswith("error:")

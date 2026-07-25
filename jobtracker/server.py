@@ -33,7 +33,9 @@ import html
 import json
 import logging
 import shutil
+import signal
 import sqlite3
+import threading
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -184,6 +186,16 @@ class Handler(BaseHTTPRequestHandler):
     # -- routing -------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        # Health checks answer before the try/except so they can never be turned into the
+        # HTML 500 page, and so an orchestrator polling them adds no DB load on the
+        # liveness path. Kept off the nav — they are for machines, not the user.
+        if path == "/healthz":
+            self._send_json({"status": "ok"})
+            return
+        if path == "/readyz":
+            payload, status = self._readiness()
+            self._send_json(payload, status)
+            return
         try:
             if path == "/":
                 self._send(self._render_dashboard())
@@ -215,6 +227,30 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             log.exception("POST %s failed", path)
             self._send_json({"ok": False, "error": str(exc)}, 500)
+
+    def _readiness(self) -> tuple[dict, int]:
+        """Ready = the DB opens and answers and criteria parses. Deliberately distinct
+        from liveness: a locked or missing DB means 'do not send traffic yet', not 'kill
+        the process'. 503 is the signal to hold traffic; the payload names what failed."""
+        checks: dict[str, str] = {}
+        ok = True
+        try:
+            conn = self._conn()
+            try:
+                conn.execute("SELECT 1")
+            finally:
+                conn.close()
+            checks["db"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            checks["db"] = f"error: {exc}"
+            ok = False
+        try:
+            load_criteria(self.server.criteria_path)
+            checks["criteria"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            checks["criteria"] = f"error: {exc}"
+            ok = False
+        return {"status": "ready" if ok else "unready", "checks": checks}, (200 if ok else 503)
 
     def _render_dashboard(self) -> str:
         """The existing dashboard, regenerated live. Unchanged code, unchanged output."""
@@ -373,15 +409,44 @@ document.addEventListener('click', async (e) => {
 def serve(db_path: Path, criteria_path: Path, companies_path: Optional[Path],
           host: str = "127.0.0.1", port: int = 8765) -> int:
     httpd = TuningServer((host, port), Handler, db_path, criteria_path, companies_path)
-    log.info("serving on http://%s:%d  (dashboard: /  tuning: /tuning)", host, port)
+    log.info(
+        "serving on http://%s:%d  (dashboard: /  tuning: /tuning  health: /healthz /readyz)",
+        host, port,
+    )
     if host not in ("127.0.0.1", "localhost", "::1"):
         log.warning(
             "bound to %s — this has no authentication and can edit %s", host, criteria_path
         )
+
+    # Graceful shutdown. SIGTERM is how an orchestrator asks a process to stop, so it has
+    # to mean "drain and exit 0", not "die". serve_forever() runs on a worker thread and
+    # the signal sets an Event the main thread waits on; httpd.shutdown() then stops the
+    # loop *from a different thread* (calling it from within serve_forever's thread would
+    # deadlock). The server handles one request at a time, so once shutdown() returns the
+    # single in-flight request, if any, has already completed — that is the drain.
+    stop = threading.Event()
+
+    def _handle_signal(signum: int, _frame) -> None:
+        log.info("received %s — draining and shutting down", signal.Signals(signum).name)
+        stop.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle_signal)
+        except ValueError:
+            # signal() only works on the main thread; a serve() invoked from a worker
+            # (e.g. a test) falls back to the KeyboardInterrupt path below.
+            pass
+
+    worker = threading.Thread(target=httpd.serve_forever, name="jobtracker-serve", daemon=True)
+    worker.start()
     try:
-        httpd.serve_forever()
+        stop.wait()
     except KeyboardInterrupt:
-        log.info("stopped")
+        pass  # only reached if SIGINT could not be installed above
     finally:
+        httpd.shutdown()          # returns once serve_forever has stopped accepting
+        worker.join(timeout=5)
         httpd.server_close()
+    log.info("stopped")
     return 0

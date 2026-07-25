@@ -16,6 +16,7 @@ therefore still clean, and you can watch a run without waiting for it to finish.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -72,15 +73,63 @@ matches_total = _meter.create_counter(
 )
 
 
+# Attributes the stdlib puts on every LogRecord. Anything on a record that is NOT one of
+# these was attached by a caller via logging's `extra={...}`, and belongs in the
+# structured output as its own field. Computed from a bare record so it tracks the
+# stdlib rather than a hand-copied list that rots.
+_RESERVED_LOGRECORD = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime", "taskName"}
+
+
+class _JsonLogFormatter(logging.Formatter):
+    """One JSON object per line — the structured format for deployed (non-TTY) runs.
+
+    Hand-rolled on purpose: this repo installs from a two-line requirements file, and a
+    structured logger is not worth breaking that (same rule that keeps a web framework
+    out of server.py). Only fields that carry information are emitted; host/stream and
+    other envelope data are the aggregator's job, not ours. Any `extra={...}` a caller
+    attaches rides along as top-level keys, so a call site can log an event as data.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            # astimezone() attaches the offset: an aggregator must not have to guess the
+            # zone, and this box runs America/New_York while UTC underneath (see CLAUDE.md).
+            "ts": datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="milliseconds"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        for key, value in record.__dict__.items():
+            if key not in _RESERVED_LOGRECORD and not key.startswith("_"):
+                payload[key] = value
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _log_formatter() -> logging.Formatter:
+    """Structured JSON when deployed, human lines interactively.
+
+    `JOBTRACKER_LOG_FORMAT` = json | text | auto (default auto). auto keys off whether
+    stderr is a TTY: a terminal gets the readable `12:03:41 INFO  [12/56] Stripe ...`
+    lines the repo is built around, while a pipe or container — where a human is not
+    watching and an aggregator is — gets JSON. No machine identity is baked in; see the
+    runtime contract in memory.
+    """
+    fmt = os.environ.get("JOBTRACKER_LOG_FORMAT", "auto").strip().lower()
+    if fmt == "auto":
+        fmt = "text" if sys.stderr.isatty() else "json"
+    if fmt == "json":
+        return _JsonLogFormatter()
+    return logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
+
+
 def _setup_logging(verbose: bool, quiet: bool) -> None:
     """stderr only. INFO by default so a run is watchable without extra flags."""
     level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
-    logging.basicConfig(
-        level=level,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)-7s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_log_formatter())
+    logging.basicConfig(level=level, handlers=[handler])
     # urllib3's DEBUG chatter drowns out ours; -v is about this package.
     logging.getLogger("urllib3").setLevel(logging.INFO)
 
