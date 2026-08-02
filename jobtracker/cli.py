@@ -1,13 +1,24 @@
 """Command-line entry point.
 
-Subcommands:
-  migrate       backend-newgrad-2027-tracker.md -> companies.yaml (one-time)
-  check         the daily pipeline: fetch -> health -> store -> match -> report
-  verify-slugs  fetch each API board's identity; --write seeds expected_board_name
-  report        re-render the latest state from state.db without fetching
-  add-company   append a curated entry to companies.yaml
+The nightly sequence is  check -> resolve -> rank -> dashboard,  and only `check`
+touches an ATS. Everything after it reads state.db and, at most, a local model.
 
-Only `check` touches the network in the normal daily path; `report` is offline.
+Subcommands:
+  check         the daily pipeline: fetch -> health -> store -> match -> report,
+                caching descriptions so every later pass can run offline
+  resolve       read those descriptions to settle uncertain postings (needs a model)
+  rank          score open matches against profile.yaml (a model helps; not required)
+  today         the jobs to apply to today; --applied/--skip/--snooze to act on one
+  dashboard     render state.db to a single self-contained HTML file
+  serve         the same view, plus editing: decisions, criteria, dispositions
+  report        re-render the latest state from state.db without fetching
+  rematch       re-apply criteria to stored postings without fetching
+  eval          replay criteria against your recorded judgments
+  decide        record a judgment on one posting; --pin makes it an override
+  apply         record an application and its outcome
+  verify-slugs  fetch each API board's identity; --write seeds expected_board_name
+  add-company   append a curated entry to companies.yaml
+  migrate       backend-newgrad-2027-tracker.md -> companies.yaml (one-time)
 
 Progress goes to stderr via `logging`; the report goes to stdout. `check > out.md` is
 therefore still clean, and you can watch a run without waiting for it to finish.
@@ -22,7 +33,7 @@ import os
 import sys
 import time
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -587,6 +598,172 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 1 if report.regressions else 0
 
 
+# -- rank --------------------------------------------------------------------------
+def cmd_rank(args: argparse.Namespace) -> int:
+    """Judge open matches against profile.yaml and score the queue.
+
+    Two phases, and only the first needs a model. Judging asks the local model about
+    postings it has not read yet; scoring recomputes every score in Python. So a
+    weights-only edit to profile.yaml re-sorts the whole queue with no model at all —
+    which is why running this with the server down is useful rather than pointless.
+
+    Like `resolve`, it is entirely optional and never fails for want of a model. With
+    no provider configured it reports what it would do and changes nothing.
+    """
+    from . import llm as llm_pkg, rank as rank_mod
+    from .profile import load_profile
+
+    provider_name = args.llm_provider or os.environ.get("JOBTRACKER_LLM_PROVIDER", "none")
+    base_url = args.llm_url or os.environ.get("JOBTRACKER_LLM_URL", "")
+
+    criteria = load_criteria(args.criteria)
+    try:
+        profile = load_profile(args.profile)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    companies = config.load_companies(args.companies)
+    tiers = rank_mod.tier_lookup(companies)
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = args.since or _today()
+
+    pending = store.matches_needing_judgment(conn, profile.prose_hash, limit=args.limit)
+    stats = rank_mod.RankStats()
+
+    if provider_name == "none" or not base_url:
+        log.info("no llm provider configured — scoring with the judgments already held")
+        if pending:
+            print(f"No LLM provider configured — {len(pending)} match(es) left unjudged.")
+            print("  Configure one with --llm-provider vllm --llm-url http://HOST:PORT")
+    elif pending:
+        provider = llm_pkg.get_provider(provider_name)
+        if provider is None:
+            print(f"error: unknown provider {provider_name!r}; "
+                  f"known: {', '.join(llm_pkg.provider_names())}", file=sys.stderr)
+            conn.close()
+            return 1
+        client = llm_pkg.LlmClient(provider, base_url, model=args.llm_model)
+        if not client.probe():
+            # Unreachable is not an error. Fall through to scoring: yesterday's
+            # judgments still order the queue, which beats surfacing nothing.
+            client.close()
+        else:
+            try:
+                log.info("judging %d match(es) against profile %s",
+                         len(pending), profile.prose_hash)
+                judged, stats = rank_mod.judge_matches(pending, client, profile)
+                for company_name, job_id, judgment in judged:
+                    store.record_judgment(
+                        conn, company_name, job_id, judgment, profile.prose_hash, today
+                    )
+                conn.commit()
+            finally:
+                client.close()
+
+    # Scoring is pure arithmetic over stored judgments — no model, every run.
+    rows = store.ranked_matches(conn)
+    for row in rows:
+        breakdown = rank_mod.score_posting(
+            row, profile, criteria, tiers.get(row["company"]), today
+        )
+        if breakdown is None:
+            stats.unranked += 1
+            continue
+        store.set_score(conn, row["company"], row["ats_job_id"], breakdown.total, today)
+        stats.scored += 1
+    conn.commit()
+
+    top = rank_mod.top_n(store.ranked_matches(conn), 3, today)
+    conn.close()
+
+    log.info("rank complete: %s", stats.summary())
+    print(stats.summary())
+    if stats.unranked:
+        # Surface the blind spot rather than hiding it: these are open matches the
+        # model has not read, and they are excluded from the top 3.
+        print(f"  {stats.unranked} match(es) unranked — run again with a model up.")
+    if top:
+        print("\nTop 3 for tomorrow:")
+        for i, row in enumerate(top, 1):
+            print(f"  {i}. {row['company']} — {row['title'][:60]}  [{row['score']:.1f}]")
+    return 0
+
+
+# -- today -------------------------------------------------------------------------
+def cmd_today(args: argparse.Namespace) -> int:
+    """Show the three jobs to apply to today, or record what you did about one.
+
+    A job holds its slot until you say what happened to it. That is what stops
+    tomorrow from repeating today's list, and stops one you meant to apply to from
+    quietly falling off the bottom.
+    """
+    from . import rank as rank_mod
+
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = _today()
+
+    action = args.applied or args.skip or args.snooze
+    if action:
+        company, job_id = action
+        row = conn.execute(
+            "SELECT company, ats_job_id, title FROM postings WHERE company=? AND ats_job_id=?",
+            (company, job_id),
+        ).fetchone()
+        if row is None:
+            print(f"error: no posting {company}/{job_id}", file=sys.stderr)
+            conn.close()
+            return 1
+        now = _now()
+        if args.applied:
+            store.record_application(
+                conn, row["company"], row["ats_job_id"], row["title"], "applied",
+                now, note=args.note,
+            )
+            applications_total.add(1)
+            what = "applied"
+        elif args.skip:
+            store.set_deferral(conn, row["company"], row["ats_job_id"], "skipped",
+                               now, note=args.note or "")
+            what = "skipped"
+        else:
+            until = (date.fromisoformat(today) + timedelta(days=args.days)).isoformat()
+            store.set_deferral(conn, row["company"], row["ats_job_id"], "snoozed",
+                               now, until=until, note=args.note or "")
+            what = f"snoozed until {until}"
+        conn.commit()
+        conn.close()
+        print(f"{row['company']} — {row['title'][:60]}: {what}")
+        return 0
+
+    rows = store.ranked_matches(conn)
+    conn.close()
+    top = rank_mod.top_n(rows, args.count, today)
+    unranked = sum(1 for r in rows if r["score"] is None)
+
+    if not top:
+        print("Nothing queued. Run `jobtracker rank` after `check`.")
+        if unranked:
+            print(f"  {unranked} open match(es) are unranked — the model has not read them.")
+        return 0
+
+    print(f"Top {len(top)} for {today}\n")
+    for i, row in enumerate(top, 1):
+        days = rank_mod.days_since(row["posted_on"], today)
+        age = f"{days}d ago" if days is not None else "date unknown"
+        print(f"{i}. {row['company']} — {row['title']}")
+        print(f"   {row['location'] or 'location unspecified'} · posted {age} · "
+              f"score {row['score']:.1f}")
+        if row["why"]:
+            print(f"   {row['why']}")
+        print(f"   {row['url']}")
+        print(f"   applied:  jobtracker today --applied {row['company']!r} {row['ats_job_id']}")
+        print()
+    if unranked:
+        print(f"({unranked} open match(es) unranked and not shown — run `jobtracker rank`.)")
+    return 0
+
+
 # -- decide ------------------------------------------------------------------------
 def cmd_decide(args: argparse.Namespace) -> int:
     """Record a judgment on one posting, and optionally pin it with an override."""
@@ -744,7 +921,13 @@ def cmd_add_company(args: argparse.Namespace) -> int:
 
 # -- arg parsing -------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="jobtracker", description=__doc__)
+    # Raw, not the default reflow: the module docstring is a subcommand table and an
+    # ordered pipeline, both of which argparse otherwise rewraps into one prose blob.
+    p = argparse.ArgumentParser(
+        prog="jobtracker",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--companies", help="path to companies.yaml (default: repo root)")
     verbosity = p.add_mutually_exclusive_group()
     verbosity.add_argument(
@@ -802,6 +985,34 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--llm-model", default=None,
                     help="model name (default: ask the server what it serves)")
     rs.set_defaults(func=cmd_resolve)
+
+    rk = sub.add_parser("rank", help="score open matches against profile.yaml")
+    rk.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    rk.add_argument("--profile", default=str(config.PROFILE_YAML))
+    rk.add_argument("--db", default=None)
+    rk.add_argument("--since", default=None)
+    rk.add_argument("--limit", type=int, default=None,
+                    help="judge at most N postings (scoring always covers all)")
+    rk.add_argument("--llm-provider", default=None,
+                    help="local inference server type. Env: $JOBTRACKER_LLM_PROVIDER")
+    rk.add_argument("--llm-url", default=None,
+                    help="http://HOST:PORT of that server. Env: $JOBTRACKER_LLM_URL")
+    rk.add_argument("--llm-model", default=None,
+                    help="model name (default: ask the server what it serves)")
+    rk.set_defaults(func=cmd_rank)
+
+    td = sub.add_parser("today", help="the jobs to apply to today, or record what you did")
+    td.add_argument("--db", default=None)
+    td.add_argument("--count", type=int, default=3, help="how many to show (default: 3)")
+    td.add_argument("--applied", nargs=2, metavar=("COMPANY", "JOB_ID"),
+                    help="record that you applied; also logs it in `applications`")
+    td.add_argument("--skip", nargs=2, metavar=("COMPANY", "JOB_ID"),
+                    help="drop this one from the queue for good")
+    td.add_argument("--snooze", nargs=2, metavar=("COMPANY", "JOB_ID"),
+                    help="defer it; it returns on its own after --days")
+    td.add_argument("--days", type=int, default=7, help="snooze length (default: 7)")
+    td.add_argument("--note", default=None)
+    td.set_defaults(func=cmd_today)
 
     e = sub.add_parser("eval", help="replay criteria against your recorded judgments")
     e.add_argument("--criteria", default=str(config.CRITERIA_YAML))

@@ -237,3 +237,67 @@ def test_unreadable_postings_are_counted_not_defaulted():
     out, stats = rank.judge_matches(rows, _Silent(), load_profile(config.PROFILE_YAML))
     assert out == []
     assert stats.considered == 1 and stats.unreadable == 1 and stats.judged == 0
+
+
+# -- the CLI disposition loop ------------------------------------------------------
+def _seed(db, jid="1", score=90.0):
+    conn = store.connect(db)
+    store.sync_postings(conn, "Acme", [Posting("Acme", jid, "SWE", f"https://x/{jid}")],
+                        "2026-08-02")
+    store.set_description(conn, "Acme", jid, "a description")
+    store.record_verdict(conn, Verdict("Acme", jid, Decision.MATCH, "r", "rules"),
+                         "2026-08-02")
+    store.record_judgment(conn, "Acme", jid, RankJudgment("strong", "strong", "low", "w"),
+                          "h", "2026-08-02")
+    store.set_score(conn, "Acme", jid, score, "2026-08-02")
+    conn.commit()
+    conn.close()
+
+
+def test_today_applied_leaves_the_queue_and_lands_in_applications(tmp_path):
+    """One action, two records: the queue forgets it, the outer loop remembers it."""
+    from jobtracker.cli import main
+
+    db = str(tmp_path / "s.db")
+    _seed(db)
+    assert main(["today", "--db", db, "--applied", "Acme", "1"]) == 0
+
+    conn = store.connect(db)
+    assert len(store.all_applications(conn)) == 1
+    assert rank.top_n(store.ranked_matches(conn), 3, "2026-08-02") == []
+    conn.close()
+
+
+def test_today_snooze_returns_the_posting_after_the_window(tmp_path):
+    from jobtracker.cli import main
+
+    db = str(tmp_path / "s.db")
+    _seed(db)
+    assert main(["today", "--db", db, "--snooze", "Acme", "1", "--days", "7"]) == 0
+
+    conn = store.connect(db)
+    rows = store.ranked_matches(conn)
+    assert rank.top_n(rows, 3, "2026-08-02") == []          # gone today
+    assert len(rank.top_n(rows, 3, "2026-08-20")) == 1      # back later
+    conn.close()
+
+
+def test_today_on_an_unknown_posting_is_an_error_not_a_silent_no_op(tmp_path):
+    from jobtracker.cli import main
+
+    db = str(tmp_path / "s.db")
+    _seed(db)
+    assert main(["today", "--db", db, "--skip", "Nope", "999"]) == 1
+
+
+def test_rank_with_no_model_still_scores_what_it_has(tmp_path):
+    """A weights-only edit must re-sort the queue with no model involved at all."""
+    from jobtracker.cli import main
+
+    db = str(tmp_path / "s.db")
+    _seed(db, score=0.0)  # stale score; judgment already stored
+    assert main(["rank", "--db", db]) == 0
+
+    conn = store.connect(db)
+    assert store.ranked_matches(conn)[0]["score"] > 0  # rescored without a model
+    conn.close()
