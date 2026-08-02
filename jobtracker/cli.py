@@ -703,6 +703,13 @@ def cmd_today(args: argparse.Namespace) -> int:
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = _today()
 
+    if args.snooze and args.days < 1:
+        # A zero or negative snooze expires the moment it is written, which looks like
+        # the command silently did nothing.
+        print("error: --days must be at least 1", file=sys.stderr)
+        conn.close()
+        return 1
+
     action = args.applied or args.skip or args.snooze
     if action:
         company, job_id = action

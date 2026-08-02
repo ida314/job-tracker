@@ -36,14 +36,14 @@ import shutil
 import signal
 import sqlite3
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
-from . import config, dashboard as dashboard_mod, store, tuning
+from . import config, dashboard as dashboard_mod, rank as rank_mod, store, tuning
 from .criteria import _LIST_KEYS, load_criteria
 from .match import location_label, location_rank, match
 from .models import Decision, Posting, Verdict
@@ -163,10 +163,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         # No external anything, matching the static dashboard's guarantee.
+        #
+        # `connect-src 'self'` is required, not optional: every write on this server
+        # goes out as a fetch() to /api/..., and connect-src falls back to default-src
+        # when unset — which is 'none' here. Without it the browser blocks the request
+        # and the buttons silently do nothing.
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; style-src 'unsafe-inline'; "
-            "script-src 'unsafe-inline'; form-action 'none'",
+            "script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
         )
         self.end_headers()
         self.wfile.write(data)
@@ -218,6 +223,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/decision":
                 self._send_json(self._api_decision(payload))
+            elif path == "/api/disposition":
+                self._send_json(self._api_disposition(payload))
             elif path == "/api/rule":
                 self._send_json(self._api_rule(payload))
             elif path == "/api/rematch":
@@ -258,7 +265,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             companies = config.load_companies(self.server.companies_path)
             criteria = load_criteria(self.server.criteria_path)
-            page = dashboard_mod.build_dashboard(conn, companies, _today(), criteria)
+            # interactive=True: only the served page gets the disposition buttons,
+            # because only here is there something for them to POST to.
+            page = dashboard_mod.build_dashboard(
+                conn, companies, _today(), criteria, interactive=True
+            )
         finally:
             conn.close()
         return page.replace("</h1>", "</h1>" + _NAV, 1)
@@ -310,6 +321,74 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         return {"ok": True, "decisions": n}
+
+    def _api_disposition(self, payload: dict) -> dict:
+        """Act on one of today's picks: applied, skipped, or snoozed.
+
+        This is what makes the top 3 a queue rather than a rolling sample. A pick holds
+        its slot until it gets one of these, so nothing you meant to apply to falls off
+        unseen, and tomorrow does not just repeat today.
+
+        'applied' goes to `applications`, not `deferrals` — it is not a deferral, it is
+        the start of the outer loop that table already tracks.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        action = str(payload.get("action") or "")
+        if action not in ("applied", "skipped", "snoozed"):
+            return {"ok": False, "error": "action must be applied, skipped, or snoozed"}
+
+        # `payload.get("days") or 7` would be wrong: 0 is falsy, so an explicit
+        # "snooze for 0 days" would silently become a 7-day snooze.
+        raw_days = payload.get("days")
+        try:
+            days = 7 if raw_days is None else int(raw_days)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "days must be a number"}
+        if days < 1:
+            return {"ok": False, "error": "days must be at least 1"}
+
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
+                (company, job_id),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "error": "no such posting"}
+
+            now = datetime.now().isoformat(timespec="seconds")
+            note = str(payload.get("note") or "")
+            if action == "applied":
+                store.record_application(
+                    conn, company, job_id, row["title"], "applied", now, note=note
+                )
+                from .cli import applications_total
+
+                applications_total.add(1)
+                detail = "applied"
+            elif action == "skipped":
+                store.set_deferral(conn, company, job_id, "skipped", now, note=note)
+                detail = "skipped"
+            else:
+                until = (date.fromisoformat(_today()) + timedelta(days=days)).isoformat()
+                store.set_deferral(
+                    conn, company, job_id, "snoozed", now, until=until, note=note
+                )
+                detail = f"snoozed until {until}"
+
+            conn.commit()
+            # Hand back the next pick so the card can be replaced without a reload.
+            remaining = rank_mod.top_n(store.ranked_matches(conn), 3, _today())
+            nxt = [
+                {"company": r["company"], "ats_job_id": r["ats_job_id"],
+                 "title": r["title"], "score": r["score"]}
+                for r in remaining
+            ]
+        finally:
+            conn.close()
+        log.info("%s %s/%s", detail, company, job_id)
+        return {"ok": True, "detail": detail, "top": nxt}
 
     def _api_rule(self, payload: dict) -> dict:
         phrase = str(payload.get("phrase") or "").strip()

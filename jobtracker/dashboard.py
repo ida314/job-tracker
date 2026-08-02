@@ -271,6 +271,44 @@ _JS = """
   show(tabs[0].dataset.panel);
 })();
 
+// Disposition buttons. Only present when rendered by `serve` — the static file has
+// none, because there is nothing there for them to POST to.
+(function () {
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('.pick [data-act]'));
+  if (!buttons.length) return;
+
+  buttons.forEach(function (b) {
+    b.addEventListener('click', function () {
+      var card = b.closest('.pick');
+      var row = card.querySelectorAll('[data-act]');
+      Array.prototype.forEach.call(row, function (x) { x.disabled = true; });
+      fetch('/api/disposition', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          company: b.dataset.company,
+          ats_job_id: b.dataset.job,
+          action: b.dataset.act,
+          days: 7
+        })
+      }).then(function (r) { return r.json(); }).then(function (res) {
+        if (!res.ok) {
+          Array.prototype.forEach.call(row, function (x) { x.disabled = false; });
+          b.textContent = res.error || 'failed';
+          return;
+        }
+        // Reload rather than splice the next pick in by hand: the server has already
+        // recomputed the queue, and re-rendering from it is the one version of the
+        // truth. Cheap on a local page, and it cannot drift from the database.
+        location.reload();
+      }).catch(function () {
+        Array.prototype.forEach.call(row, function (x) { x.disabled = false; });
+        b.textContent = 'failed';
+      });
+    });
+  });
+})();
+
 (function () {
   var q = document.getElementById('q');
   if (!q) return;

@@ -174,3 +174,99 @@ def test_readyz_503_when_criteria_missing(tmp_path):
     assert status == 503
     assert payload["checks"]["db"] == "ok"
     assert payload["checks"]["criteria"].startswith("error:")
+
+
+# -- disposition endpoint ----------------------------------------------------------
+# The write path behind Today's buttons. Tested through the handler method rather than
+# a socket, the same way render_tuning is tested as a pure function.
+def _handler_over(db_path):
+    """A Handler with just enough wired up to call an api method. No socket."""
+    return _handler_for(db_path, config.CRITERIA_YAML)
+
+
+def _seed_ranked(db_path, jid="1", score=90.0):
+    from jobtracker.llm.client import RankJudgment
+    from jobtracker.models import Decision, Posting, Verdict
+
+    conn = store.connect(db_path)
+    store.sync_postings(conn, "Acme", [Posting("Acme", jid, "SWE", f"https://x/{jid}")],
+                        "2026-08-02")
+    store.record_verdict(conn, Verdict("Acme", jid, Decision.MATCH, "r", "rules"),
+                         "2026-08-02")
+    store.record_judgment(conn, "Acme", jid, RankJudgment("strong", "strong", "low", "w"),
+                          "h", "2026-08-02")
+    store.set_score(conn, "Acme", jid, score, "2026-08-02")
+    conn.commit()
+    conn.close()
+
+
+def test_applied_records_an_application_and_shortens_the_queue(tmp_path):
+    db = tmp_path / "s.db"
+    _seed_ranked(db, "1", 90.0)
+    _seed_ranked(db, "2", 80.0)
+
+    res = _handler_over(db)._api_disposition(
+        {"company": "Acme", "ats_job_id": "1", "action": "applied"})
+    assert res["ok"] and res["detail"] == "applied"
+    assert [r["ats_job_id"] for r in res["top"]] == ["2"]  # next pick handed back
+
+    conn = store.connect(db)
+    assert len(store.all_applications(conn)) == 1
+    conn.close()
+
+
+def test_snooze_sets_a_future_date_and_skip_does_not(tmp_path):
+    db = tmp_path / "s.db"
+    _seed_ranked(db, "1")
+    h = _handler_over(db)
+
+    assert h._api_disposition(
+        {"company": "Acme", "ats_job_id": "1", "action": "snoozed", "days": 7})["ok"]
+    conn = store.connect(db)
+    row = conn.execute("SELECT kind, until FROM deferrals").fetchone()
+    assert row["kind"] == "snoozed" and row["until"] > "2026-01-01"
+
+    assert h._api_disposition(
+        {"company": "Acme", "ats_job_id": "1", "action": "skipped"})["ok"]
+    row = conn.execute("SELECT kind, until FROM deferrals").fetchone()
+    assert row["kind"] == "skipped" and row["until"] is None
+    conn.close()
+
+
+@pytest.mark.parametrize("payload", [
+    {"company": "Acme", "ats_job_id": "1", "action": "deleted"},   # unknown action
+    {"company": "Acme", "ats_job_id": "1", "action": ""},
+    {"company": "Acme", "ats_job_id": "1", "action": "snoozed", "days": 0},
+    {"company": "Acme", "ats_job_id": "1", "action": "snoozed", "days": "soon"},
+])
+def test_a_bad_disposition_payload_is_refused_without_writing(tmp_path, payload):
+    db = tmp_path / "s.db"
+    _seed_ranked(db, "1")
+    res = _handler_over(db)._api_disposition(payload)
+    assert res["ok"] is False and res["error"]
+
+    conn = store.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM deferrals").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0] == 0
+    conn.close()
+
+
+def test_disposition_on_an_unknown_posting_is_refused(tmp_path):
+    db = tmp_path / "s.db"
+    _seed_ranked(db, "1")
+    res = _handler_over(db)._api_disposition(
+        {"company": "Nope", "ats_job_id": "999", "action": "skipped"})
+    assert res["ok"] is False and "no such posting" in res["error"]
+
+
+def test_csp_allows_the_fetch_the_buttons_depend_on():
+    """connect-src falls back to default-src, which is 'none' here.
+
+    Without an explicit connect-src every write on this server — the tuning page's
+    reject button included — is blocked by the browser and silently does nothing.
+    """
+    import inspect
+
+    src = inspect.getsource(server.Handler._send)
+    assert "connect-src 'self'" in src
+    assert "default-src 'none'" in src
