@@ -19,11 +19,10 @@
 
 target_roles: |
   Backend engineering, for a 2027 new grad. The target is real backend work:
-  distributed systems, infrastructure, platform, data engineering, SRE.
+  distributed systems, infrastructure, platform, data engineering, SRE, AI integration
 
   Strongly on-target: services at scale, storage and database internals, streaming
-  and messaging, developer platform and build systems, observability infrastructure,
-  compilers and runtimes, orchestration.
+  and messaging, developer platform and build systems, observability infrastructure, orchestration.
 
   Off-target: frontend and UI work, mobile, ML modelling and research (ML *infra*
   is on-target — building the training or serving platform, not training the model),
@@ -43,14 +42,11 @@ career_goals: |
   at a smaller or less famous company.
 
 profile: |
-  Graduating 2027, seeking a new-grad backend role in the United States.
+  Graduating Spring 2027, seeking a new-grad backend role mainly in the United States, would consider other countries.
 
   NYC is preferred above everywhere else, then anywhere else in the US, then
   unspecified locations, then outside the US. Location RANKS but never disqualifies —
   nothing is rejected for where it is.
-
-  Interested in companies where backend infrastructure is the product, because that
-  is where a new grad gets handed real systems work rather than glue code.
 
 # --- arithmetic, applied in Python; never sent to the model ------------------------
 # Relative magnitudes are what matter, not the absolute scale. `entry_risk` is
