@@ -128,3 +128,77 @@ def test_aggregator_tolerates_garbage():
     assert src.parse_jobs("X", None) == []
     assert src.parse_jobs("X", "") == []
     assert src.parse_jobs("X", "<table><tr><td>only one cell</td></tr></table>") == []
+
+
+# -- posted dates ------------------------------------------------------------------
+# Three sources, three mutually incomparable raw formats, one TEXT column. Before
+# normalization `ORDER BY posted_at` was silently wrong: the Lever epoch strings
+# collate before every ISO timestamp, so every Lever posting sorted to one end
+# regardless of its actual age. These pin each adapter's conversion.
+def test_each_source_normalizes_its_own_format_to_an_iso_day():
+    today = "2026-08-02"
+    assert get_source("greenhouse").normalize_posted_at(
+        "2026-08-01T01:46:42-04:00", today) == "2026-08-01"
+    assert get_source("ashby").normalize_posted_at(
+        "2026-08-01T01:57:58.337+00:00", today) == "2026-08-01"
+    assert get_source("lever").normalize_posted_at("1785533737281", today) == "2026-07-31"
+    assert get_source("aggregator").normalize_posted_at("2d", today) == "2026-07-31"
+
+
+def test_lever_epoch_millis_would_otherwise_outsort_every_iso_string():
+    """The specific bug: as raw text, '1259971200000' < '2026-...' for every ISO date."""
+    src = get_source("lever")
+    old, new = "1259971200000", "1785533737281"
+    assert old < new  # correct as numbers-as-text, by luck of equal length
+    assert new < "2026-08-01T00:00:00Z"  # but wrong against any other source
+    assert src.normalize_posted_at(old, "2026-08-02") == "2009-12-05"
+    assert src.normalize_posted_at(new, "2026-08-02") == "2026-07-31"
+
+
+def test_aggregator_relative_age_is_resolved_against_the_run_date():
+    """This source dates relatively, which is why `today` is threaded through at all.
+
+    A stored "2d" re-read a month later would silently mean something new, so it is
+    resolved once at parse time and stored absolutely.
+    """
+    src = get_source("aggregator")
+    assert src.normalize_posted_at("5h", "2026-08-02") == "2026-08-02"   # under a day
+    assert src.normalize_posted_at("2w", "2026-08-02") == "2026-07-19"
+    assert src.normalize_posted_at("3mo", "2026-08-02") == "2026-05-04"
+    assert src.normalize_posted_at("1y", "2026-08-02") == "2025-08-02"
+
+
+def test_unparseable_dates_are_none_not_today():
+    """A missing date must never read as 'posted today' — that inverts the ranking."""
+    today = "2026-08-02"
+    for ats in ("greenhouse", "ashby", "lever", "aggregator"):
+        src = get_source(ats)
+        for raw in (None, "", "garbage", "not-a-date"):
+            assert src.normalize_posted_at(raw, today) is None, (ats, raw)
+
+
+def test_aggregator_captures_the_age_column():
+    src = get_source("aggregator")
+    postings = src.parse_jobs("Simplify", _AGGREGATOR_HTML)
+    assert postings[0].posted_at == "2d"
+
+
+def test_aggregator_row_without_an_age_column_still_parses():
+    """These repos restyle their table every cycle; a missing column is not a failure."""
+    src = get_source("aggregator")
+    four_cols = _AGGREGATOR_HTML.replace("<td>2d</td>", "").replace("<td>3d</td>", "")
+    postings = src.parse_jobs("Simplify", four_cols)
+    assert postings and postings[0].posted_at is None
+
+
+def test_greenhouse_prefers_first_published_over_updated_at():
+    """`updated_at` moves whenever anyone edits the req — a salary fix re-dates a
+    six-month-old posting as fresh. Only the detail payload carries the real one."""
+    src = get_source("greenhouse")
+    detail = {"content": "x", "updated_at": "2026-08-02T00:00:00Z",
+              "first_published": "2026-03-14T00:00:00Z"}
+    assert src.parse_job_detail_posted_at(detail) == "2026-03-14T00:00:00Z"
+    # Falls back when the board does not expose it.
+    assert src.parse_job_detail_posted_at(
+        {"updated_at": "2026-08-02T00:00:00Z"}) == "2026-08-02T00:00:00Z"
+    assert src.parse_job_detail_posted_at(None) is None

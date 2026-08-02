@@ -57,6 +57,19 @@ class Greenhouse(Source):
         text = html.unescape(text)  # entities like &amp;nbsp; survive the first pass
         return re.sub(r"[ \t\xa0]+", " ", text).strip()
 
+    def parse_job_detail_posted_at(self, raw: object) -> Optional[str]:
+        """`first_published` — the only true posted date Greenhouse exposes.
+
+        The bulk call gives `updated_at`, which moves whenever anyone touches the req:
+        a fix to a salary band re-dates a six-month-old posting as fresh. That field is
+        a freshness signal at best. `first_published` only exists on the detail payload,
+        which we already fetch for the description, so this costs no extra request.
+        """
+        if not isinstance(raw, dict):
+            return None
+        value = raw.get("first_published") or raw.get("updated_at")
+        return str(value) if value else None
+
     def parse_jobs(self, company: str, raw: object) -> list[Posting]:
         if not isinstance(raw, dict):
             return []

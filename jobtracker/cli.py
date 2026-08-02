@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 
@@ -244,9 +245,23 @@ def cmd_check(args: argparse.Namespace) -> int:
 
         if health.status.value == "ok":
             stats["ok"] += 1
-            new_postings, _ = store.sync_postings(conn, company.name, res.postings, today)
+            # Resolve the vendor's timestamp to a plain ISO day here, where both the
+            # adapter and the run date are in hand. Adapters stay pure — `today` is an
+            # argument, not a clock read — and everything downstream gets one sortable
+            # format instead of three.
+            source = get_source(company.ats)
+            postings = res.postings
+            if source is not None:
+                postings = [
+                    replace(p, posted_on=source.normalize_posted_at(p.posted_at, today))
+                    for p in postings
+                ]
+            new_postings, _ = store.sync_postings(conn, company.name, postings, today)
             stats["new_postings"] += len(new_postings)
-            for posting in res.postings:
+            # `postings`, not `res.postings`: new_postings holds the normalized copies,
+            # and Posting is a frozen dataclass compared by value, so the membership
+            # test below would silently never fire against the originals.
+            for posting in postings:
                 verdict = apply_override(match(posting, criteria), overrides)
                 store.record_verdict(conn, verdict, today)
                 # Ashby and Lever hand us the description for free in the bulk
@@ -264,6 +279,15 @@ def cmd_check(args: argparse.Namespace) -> int:
             log.warning("%s unhealthy: %s (%s)", company.name, health.status.value, res.error or "—")
             if is_degraded(health):
                 degraded.append(f"{company.name}={health.status.value}")
+
+    # Rows stored before `posted_on` existed. The raw vendor values were already there
+    # and already correct — just unsortable — so this is pure re-typing, no refetch.
+    # Self-draining: it only looks at posted_on IS NULL, so it is a no-op from run two.
+    filled = store.backfill_posted_on(
+        conn, {c.name: get_source(c.ats) for c in api + aggregators if get_source(c.ats)}, today
+    )
+    if filled:
+        log.info("normalized posted_at -> posted_on for %d stored posting(s)", filled)
 
     store.record_run(conn, started, _now(), stats)
     conn.commit()

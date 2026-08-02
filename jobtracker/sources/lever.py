@@ -9,11 +9,12 @@ hostedUrl path, which begins with the org slug.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
 from ..models import Posting
-from .base import Source, register
+from .base import Source, iso_day, register
 
 BASE = "https://api.lever.co/v0/postings"
 
@@ -51,6 +52,23 @@ class Lever(Source):
                 )
             )
         return postings
+
+    def normalize_posted_at(self, raw: object, today: str) -> Optional[str]:
+        """Lever dates in epoch milliseconds, delivered as a string.
+
+        This is the value that makes a single raw column unsortable: `1785533737281`
+        collates before every ISO timestamp, so a mixed `ORDER BY posted_at` silently
+        buries every Lever posting at one end.
+        """
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text.isdigit():
+            return iso_day(text)  # a board that switched formats should not vanish
+        try:
+            return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc).date().isoformat()
+        except (ValueError, OverflowError, OSError):
+            return None
 
     def identity_from_jobs(self, raw: object) -> Optional[str]:
         if isinstance(raw, list):

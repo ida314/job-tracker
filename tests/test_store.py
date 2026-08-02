@@ -41,6 +41,56 @@ def test_repost_reopens_closed():
     assert row["first_seen"] == "2026-07-01"  # original observation preserved
 
 
+def test_a_later_fetch_without_a_date_does_not_erase_the_one_we_have():
+    """posted_on is written with COALESCE, and that is load-bearing.
+
+    Greenhouse's true posted date (`first_published`) only exists on the per-posting
+    detail payload, so the nightly bulk pass supplies posted_on=None for every one of
+    the 47 Greenhouse boards. A plain assignment would blank the date every night and
+    the recency term would go permanently neutral without anything looking broken.
+    """
+    conn = _conn()
+    dated = Posting("Acme", "1", "SWE", "u", posted_on="2026-07-31")
+    store.sync_postings(conn, "Acme", [dated], "2026-08-01")
+    assert conn.execute("SELECT posted_on FROM postings").fetchone()[0] == "2026-07-31"
+
+    undated = Posting("Acme", "1", "SWE", "u", posted_on=None)
+    store.sync_postings(conn, "Acme", [undated], "2026-08-02")
+    assert conn.execute("SELECT posted_on FROM postings").fetchone()[0] == "2026-07-31"
+
+    # A better date later — first_published arriving with the description — does win.
+    better = Posting("Acme", "1", "SWE", "u", posted_on="2026-03-14")
+    store.sync_postings(conn, "Acme", [better], "2026-08-03")
+    assert conn.execute("SELECT posted_on FROM postings").fetchone()[0] == "2026-03-14"
+
+
+def test_backfill_normalizes_stored_rows_and_then_stops():
+    conn = _conn()
+    from jobtracker.sources import get_source
+
+    store.sync_postings(
+        conn, "Acme", [Posting("Acme", "1", "SWE", "u", posted_at="1785533737281")],
+        "2026-08-01",
+    )
+    sources = {"Acme": get_source("lever")}
+    assert store.backfill_posted_on(conn, sources, "2026-08-02") == 1
+    assert conn.execute("SELECT posted_on FROM postings").fetchone()[0] == "2026-07-31"
+    # Self-draining: it only looks at posted_on IS NULL.
+    assert store.backfill_posted_on(conn, sources, "2026-08-02") == 0
+
+
+def test_backfill_leaves_unknown_companies_alone():
+    """A company dropped from companies.yaml has no adapter — guessing its format is
+    how you get a Lever epoch string parsed as an ISO year."""
+    conn = _conn()
+    store.sync_postings(
+        conn, "Gone", [Posting("Gone", "1", "SWE", "u", posted_at="1785533737281")],
+        "2026-08-01",
+    )
+    assert store.backfill_posted_on(conn, {}, "2026-08-02") == 0
+    assert conn.execute("SELECT posted_on FROM postings").fetchone()[0] is None
+
+
 def test_ever_nonempty():
     conn = _conn()
     assert store.ever_nonempty(conn, "Acme") is False

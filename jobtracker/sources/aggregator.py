@@ -30,6 +30,8 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+from datetime import date, timedelta
+from typing import Optional
 
 from ..models import Posting
 from .base import Source, register
@@ -45,6 +47,9 @@ _MARKERS = ("🔒", "🎓", "🛂", "🔥", "🆕", "⭐")
 
 # The continuation glyph: a row whose Company cell is just "↳" repeats the employer above.
 _CONTINUATION = "↳"
+
+# The Age column: "2d", "3mo", "1yr", sometimes with a trailing "+" on a bucketed value.
+_AGE = re.compile(r"^(\d+)\s*(h|d|w|mo|y)")
 
 
 def _text(fragment: str) -> str:
@@ -71,6 +76,10 @@ class Aggregator(Source):
             if len(cells) < 4:  # header rows use <th>; malformed rows lack columns
                 continue
             company_cell, role_cell, location_cell, application_cell = cells[:4]
+            # A 5th column holds the posting's age ("2d", "1mo"). It is optional —
+            # these repos restyle their tables every cycle — so a row without it is
+            # still a valid row, just one with no date.
+            age_cell = _text(cells[4]) if len(cells) > 4 else ""
 
             name = _text(company_cell)
             if name and name != _CONTINUATION:
@@ -103,9 +112,34 @@ class Aggregator(Source):
                     title=f"{employer} — {role}",
                     url=apply_url,
                     location=_text(location_cell),
+                    posted_at=age_cell or None,
                 )
             )
         return postings
+
+    def normalize_posted_at(self, raw: object, today: str) -> Optional[str]:
+        """A relative age ("2d", "3mo") counted back from the run date.
+
+        This is the one source that dates relatively, which is why `today` is threaded
+        through the interface at all. The value is only as fresh as the run that read
+        it, so it is resolved once at parse time and stored absolutely — re-reading a
+        stored "2d" a month later would otherwise silently mean something new.
+        """
+        if not raw:
+            return None
+        m = _AGE.match(str(raw).strip().lower())
+        if not m:
+            return None
+        try:
+            anchor = date.fromisoformat(today)
+        except ValueError:
+            return None
+        n = int(m.group(1))
+        unit = m.group(2)
+        days = n * {"h": 0, "d": 1, "w": 7, "mo": 30, "y": 365}[unit]
+        if unit == "h":
+            days = 0  # anything under a day is today
+        return (anchor - timedelta(days=days)).isoformat()
 
 
 register(Aggregator())

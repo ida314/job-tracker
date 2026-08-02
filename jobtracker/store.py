@@ -125,6 +125,11 @@ _ADDED_COLUMNS = [
     # Who set an override. Defaults to 'human' because every row that existed before
     # this column did was a human decision.
     ("overrides", "decided_by", "TEXT NOT NULL DEFAULT 'human'"),
+    # The vendor's posted date, normalized to a plain ISO day. `posted_at` next door
+    # holds the raw value and is three mutually incomparable formats across sources,
+    # so this is the only one anything may sort on. NULL means "not normalized yet",
+    # and must never be read as "posted today".
+    ("postings", "posted_on", "TEXT"),
 ]
 
 
@@ -221,17 +226,24 @@ def sync_postings(
     for p in postings:
         current_ids.add(p.ats_job_id)
         if p.ats_job_id in existing:
+            # COALESCE on posted_on: a normalizer that returns None must not erase a
+            # date we already have. Greenhouse in particular only yields its true
+            # `first_published` from the detail payload, so the bulk pass would
+            # otherwise blank it every night.
             conn.execute(
                 "UPDATE postings SET last_seen=?, closed_at=NULL, title=?, "
-                "location=?, url=?, posted_at=? WHERE company=? AND ats_job_id=?",
-                (now, p.title, p.location, p.url, p.posted_at, company, p.ats_job_id),
+                "location=?, url=?, posted_at=?, posted_on=COALESCE(?, posted_on) "
+                "WHERE company=? AND ats_job_id=?",
+                (now, p.title, p.location, p.url, p.posted_at, p.posted_on,
+                 company, p.ats_job_id),
             )
         else:
             conn.execute(
                 "INSERT INTO postings (company, ats_job_id, title, location, url, "
-                "posted_at, first_seen, last_seen, closed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
-                (company, p.ats_job_id, p.title, p.location, p.url, p.posted_at, now, now),
+                "posted_at, posted_on, first_seen, last_seen, closed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                (company, p.ats_job_id, p.title, p.location, p.url, p.posted_at,
+                 p.posted_on, now, now),
             )
             new_postings.append(p)
 
@@ -266,6 +278,36 @@ def record_verdict(conn: sqlite3.Connection, verdict: Verdict, now: str) -> None
             now,
         ),
     )
+
+
+def backfill_posted_on(conn: sqlite3.Connection, sources: dict, today: str) -> int:
+    """Normalize `posted_at` into `posted_on` for rows that predate the column.
+
+    `sources` maps company name -> Source. Rows whose company is unknown (a company
+    dropped from companies.yaml) are left alone rather than guessed at.
+
+    No refetch is involved: the raw vendor values are already stored and already
+    correct, they were merely unsortable. Idempotent and self-draining — it only ever
+    looks at rows where posted_on IS NULL, so a second run is a no-op.
+    """
+    rows = conn.execute(
+        "SELECT company, ats_job_id, posted_at FROM postings "
+        "WHERE posted_on IS NULL AND posted_at IS NOT NULL"
+    ).fetchall()
+    filled = 0
+    for row in rows:
+        source = sources.get(row["company"])
+        if source is None:
+            continue
+        day = source.normalize_posted_at(row["posted_at"], today)
+        if not day:
+            continue
+        conn.execute(
+            "UPDATE postings SET posted_on=? WHERE company=? AND ats_job_id=?",
+            (day, row["company"], row["ats_job_id"]),
+        )
+        filled += 1
+    return filled
 
 
 # -- runs --------------------------------------------------------------------------

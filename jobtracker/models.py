@@ -60,8 +60,18 @@ class Posting:
     """A normalized job posting. Every source adapter emits exactly this shape.
 
     ats_job_id is the stable identifier from the vendor; (company, ats_job_id) is the
-    primary key everywhere downstream. posted_at is the vendor's timestamp (often the
-    last-edited time, so untrustworthy) — our own first_seen lives in the DB, not here.
+    primary key everywhere downstream. Our own first_seen lives in the DB, not here.
+
+    Two date fields, and the distinction matters. `posted_at` is whatever the vendor
+    sent, verbatim and in the vendor's own format — kept as provenance, never compared.
+    `posted_on` is that value normalized to a plain ISO date, and is the only one
+    anything is allowed to sort or do arithmetic on.
+
+    Keeping both is not redundancy. The raw values are mutually incomparable across
+    sources — Greenhouse sends `2026-08-01T01:46:42-04:00`, Ashby
+    `2026-08-01T01:57:58.337+00:00`, Lever the epoch-millis string `1785533737281`, and
+    the aggregator a relative age like `2d`. In one TEXT column an epoch string sorts
+    before every ISO string, so `ORDER BY posted_at` is silently, plausibly wrong.
     """
 
     company: str
@@ -71,6 +81,7 @@ class Posting:
     location: str = ""
     posted_at: Optional[str] = None
     description: str = ""
+    posted_on: Optional[str] = None
 
 
 @dataclass(frozen=True)
