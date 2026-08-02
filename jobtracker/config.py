@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 COMPANIES_YAML = Path(os.environ.get("JOBTRACKER_COMPANIES", ROOT / "companies.yaml"))
 CRITERIA_YAML = Path(os.environ.get("JOBTRACKER_CRITERIA", ROOT / "criteria.yaml"))
+PROFILE_YAML = Path(os.environ.get("JOBTRACKER_PROFILE", ROOT / "profile.yaml"))
 
 _DEFAULT_DB = ROOT / "data" / "state.db"
 DB_PATH = Path(os.environ.get("JOBTRACKER_DB", _DEFAULT_DB))

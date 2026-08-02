@@ -1,0 +1,70 @@
+# Who you are and what you are optimizing for. Read by `jobtracker rank`.
+#
+# Curation, not observation: human-authored, git-tracked, never written by a run —
+# the same contract as companies.yaml and criteria.yaml (DESIGN.md §3.3). Edit it
+# freely; a change here is a visible commit that explains why the ranking moved.
+#
+# Two halves, and the split is load-bearing:
+#
+#   prose    goes into the local model's context verbatim. Career goals do not reduce
+#            to tokens, which is the whole reason a model is involved.
+#   weights  never reach the model. They are arithmetic, applied in Python.
+#
+# Only the prose is hashed. So changing a weight re-sorts the entire queue instantly
+# with ZERO model calls, while changing the prose re-asks the question and re-judges.
+# Tune the numbers freely; edit the prose when your priorities actually change.
+#
+# Seeded from CLAUDE.md §Goals. Note that role *matching* still lives in
+# criteria.yaml — this file decides urgency among roles that already matched.
+
+target_roles: |
+  Backend engineering, for a 2027 new grad. The target is real backend work:
+  distributed systems, infrastructure, platform, data engineering, SRE.
+
+  Strongly on-target: services at scale, storage and database internals, streaming
+  and messaging, developer platform and build systems, observability infrastructure,
+  compilers and runtimes, orchestration.
+
+  Off-target: frontend and UI work, mobile, ML modelling and research (ML *infra*
+  is on-target — building the training or serving platform, not training the model),
+  IT and support, sales engineering, QA.
+
+career_goals: |
+  In priority order:
+
+  1. Real distributed-systems work early. A first role that puts me on hard backend
+     problems in year one beats a bigger name with a narrower scope.
+  2. Mentorship and engineering culture. Senior engineers who review my code and a
+     team that invests in new grads.
+  3. Reputation and brand, as a tiebreaker rather than a goal.
+  4. Pay, last. It matters least at this stage and correlates with the others anyway.
+
+  Growth over prestige is the through-line: prefer the role that teaches more, even
+  at a smaller or less famous company.
+
+profile: |
+  Graduating 2027, seeking a new-grad backend role in the United States.
+
+  NYC is preferred above everywhere else, then anywhere else in the US, then
+  unspecified locations, then outside the US. Location RANKS but never disqualifies —
+  nothing is rejected for where it is.
+
+  Interested in companies where backend infrastructure is the product, because that
+  is where a new grad gets handed real systems work rather than glue code.
+
+# --- arithmetic, applied in Python; never sent to the model ------------------------
+# Relative magnitudes are what matter, not the absolute scale. `entry_risk` is
+# negative because it is a penalty: it discounts a role the model reads as likely to
+# be above new-grad level despite having passed the title rules.
+weights:
+  fit: 30          # how well the description matches target_roles
+  growth: 25       # learning and mentorship signal in the description
+  recency: 20      # freshness, decaying from the posted date
+  tier: 15         # the 3-band split from companies.yaml (anchor/applied/research)
+  location: 10     # NYC > elsewhere US > unspecified > non-US
+  entry_risk: -15  # penalty for "probably not actually entry level"
+
+# Half-life in days for the recency term: a posting this old scores half what a
+# same-day posting does. 14 is roughly the window in which applying early still
+# meaningfully improves the odds on a new-grad req.
+recency_half_life_days: 14
