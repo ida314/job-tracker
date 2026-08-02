@@ -47,8 +47,9 @@ is a fact about the company.
 | `JOBTRACKER_COMPANIES` | No | Defaults to the copy baked into the image |
 | `JOBTRACKER_TELEMETRY` | No | `off` (default), `console`, or `otlp` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | With `otlp` | Where the collector is |
-| `JOBTRACKER_LLM_PROVIDER` | For `resolve` | e.g. `vllm`. Absent → `resolve` is a no-op that reports and changes nothing |
-| `JOBTRACKER_LLM_URL` | For `resolve` | `http://HOST:PORT` of the local model. The model name is discovered from `/v1/models` |
+| `JOBTRACKER_LLM_PROVIDER` | For `resolve`/`rank` | e.g. `vllm`. Absent → `resolve` is a no-op; `rank` still re-scores from stored judgments |
+| `JOBTRACKER_LLM_URL` | For `resolve`/`rank` | `http://HOST:PORT` of the local model. The model name is discovered from `/v1/models` |
+| `JOBTRACKER_PROFILE` | No | Defaults to the copy baked into the image. Mount it to tune the ranking without rebuilding |
 
 Every run logs the resolved `companies=`/`criteria=`/`db=` paths as its first line. When
 something behaves as though your config changed nothing, read that line first.
@@ -58,29 +59,41 @@ something behaves as though your config changed nothing, read that line first.
 - `/data` — **required.** Holds `state.db`. The image is disposable; this is not.
 - `/app/criteria.yaml` — optional, but mount it once you start tuning. See the schema-skew
   trap below.
+- `/app/profile.yaml` — optional. Mount it to change what the ranking optimizes for
+  without rebuilding the image.
 
 ## The nightly sequence
 
-`check` is the one command that has to run; the other two turn on the parts of the
-pipeline that drain and display what `check` finds. A complete nightly run is three
+`check` is the one command that has to run; the rest turn on the parts of the pipeline
+that drain, order, and display what `check` finds. A complete nightly run is four
 one-shot commands against the same `$JOBTRACKER_DB`, in order:
 
 ```sh
-jobtracker check              # fetch → health → store → match → report
+jobtracker check              # fetch → health → store → match → cache descriptions → report
 jobtracker resolve            # read descriptions, settle the UNCERTAIN residual (needs a model)
+jobtracker rank               # judge open matches against profile.yaml, score the queue
 jobtracker dashboard          # render state.db → a static HTML file
 ```
 
+- **`check` is the only step that touches an ATS.** It caches a description for every
+  match/uncertain posting, which is what lets everything after it read `state.db` and talk
+  to nothing but the local model. `--max-descriptions` (default 400) bounds that work; the
+  remainder is picked up the next night, so a first run after a criteria change drains
+  over a few days rather than in one long job.
 - **`resolve` is the automated drain for the review pile.** `check` leaves every
   no-level-token title `uncertain`; `resolve` reads the description with the local model
   and settles what it can (→ match/reject), leaving only the genuinely ambiguous. Without
   `JOBTRACKER_LLM_PROVIDER`/`_URL` it is a safe no-op, so it is always fine to include in
   the sequence — it simply does nothing until a model is reachable. Every failure path
   leaves a posting `uncertain`, so a down model never corrupts a verdict.
-- **Order matters only in that `resolve` reads what `check` wrote** and `dashboard` shows
-  the result of both. Each is independently idempotent and re-runnable.
-- **Sequencing is the caller's job, not the app's.** Three `Exec=` lines, three cron
-  entries, or three steps in one wrapper — the container does not care. Keep each a
+- **`rank` orders what survived, and degrades further than `resolve` does.** With no model
+  it still re-scores from the judgments it already holds, so yesterday's ordering stands
+  rather than the queue emptying. It exits 0 either way. `--limit` bounds the model calls
+  (~8s each); scoring always covers everything and needs no model at all.
+- **Order matters only in that each step reads what the previous one wrote.** Each is
+  independently idempotent and re-runnable.
+- **Sequencing is the caller's job, not the app's.** Four `Exec=` lines, four cron
+  entries, or four steps in one wrapper — the container does not care. Keep each a
   separate invocation so one failing does not abort the others (a model being down should
   not stop the dashboard from rendering).
 
@@ -106,6 +119,7 @@ Image=localhost/jobtracker:latest
 Exec=check
 Volume=%h/jobtracker/data:/data:Z
 Volume=%h/jobtracker/criteria.yaml:/app/criteria.yaml:Z,ro
+Volume=%h/jobtracker/profile.yaml:/app/profile.yaml:Z,ro
 Environment=JOBTRACKER_INSTANCE_ID=%H
 Environment=TZ=America/New_York
 LogDriver=none

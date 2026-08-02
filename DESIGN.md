@@ -288,8 +288,8 @@ postings today."
 
 ## 8. Where the model still earns its place
 
-The rewrite does not eliminate the language model. It relocates it from the runtime to two
-bounded roles:
+The rewrite does not eliminate the language model. It relocates it from the runtime to
+bounded roles — two when this was written, three now:
 
 1. **Ambiguity resolution** (§6) — schema-constrained, on the residual only.
    **Implemented** as `jobtracker resolve`; see `docs/llm.md`. It came out narrower than
@@ -315,11 +315,37 @@ bounded roles:
    identifier — a Greenhouse `job_board?for=X` embed, or a link to `jobs.lever.co/X` — and
    open a pull request against `companies.yaml`.
 
-The second role is the interesting one. Recovering a slug from an arbitrary careers page is
-genuinely unstructured work that resists a scraper, and it is where an LLM has a real
-advantage. But it runs as an **exception handler, invoked by a deterministic detector**,
-against a human-reviewed diff — not as the main loop. The system decides *that* something
-broke; the model helps decide *what to do about it*.
+   Recovering a slug from an arbitrary careers page is genuinely unstructured work that
+   resists a scraper, and it is where an LLM has a real advantage. But it would run as an
+   **exception handler, invoked by a deterministic detector**, against a human-reviewed
+   diff — not as the main loop. The system decides *that* something broke; the model helps
+   decide *what to do about it*. Still deferred.
+
+3. **Ranking** (added 2026-08-02) — **implemented** as `jobtracker rank`; see
+   `docs/ranking.md`. Matching answers "is this on-target"; this answers "which of the
+   on-target ones should I do something about tomorrow", which is a question about the
+   *candidate*, not the posting, and so has no rule form. Career goals do not reduce to
+   tokens.
+
+   It stays bounded the same three ways role 1 does, and one more:
+
+   - **Local only**, same client, same providers, no key handling.
+   - **One posting at a time.** The model returns three labelled ordinals and a sentence
+     about a single posting. It never sees another, never returns a score, and never
+     returns an order — deterministic Python composes the score from weights in
+     `profile.yaml`. The model supplies facts; the arithmetic stays where it can be
+     diffed and tested.
+   - **Failure is absence.** Any failure leaves the posting *unjudged*, which means
+     excluded from the picks and counted in a visible "N unranked" line — never scored
+     wrongly, and never silently dropped (§7.3 again, and §3.4).
+   - **Off the main loop entirely.** Ranking cannot change a verdict. It orders postings
+     that matching already accepted, in a separate table, so a bad judgment costs you one
+     misplaced row and never a wrong match.
+
+   The general principle across all three: the model is allowed to *read*, never to
+   *decide*. Level extraction reads a description for a fact the title omitted; ranking
+   reads it for a fit judgment no rule could encode. In both cases deterministic code
+   holds the verdict, the ordering, and the reason.
 
 ---
 

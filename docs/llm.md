@@ -18,7 +18,7 @@ it, and test it against the corpus.
 
 ```
 UNCERTAIN + engineering-looking title
-   └─▶ description  (free from Ashby/Lever · fetched for Greenhouse)
+   └─▶ description  (already cached by `check` — this pass opens no ATS connection)
         └─▶ local model: entry | not_entry | unclear
              ├─ entry     → re-apply the RULES' engineering gate → match or reject
              ├─ not_entry → reject
@@ -85,30 +85,48 @@ The queue is scoped to postings whose title carries some engineering signal. The
 863 are `Field Marketer`, `Talent Strategist`, `Data Analyst` — reading their
 descriptions spends a rate-limited ATS request to learn what the title already said.
 
-The cost is real and worth stating: a title like **"Member of Technical Staff"** is
-genuinely engineering with no matching token, and it is never read. It stays `uncertain`
-and visible in the queue for a human rather than being silently rejected. That is the
-same tradeoff this project makes everywhere — surface the blind spot, do not hide it.
-There is a test asserting it stays out of scope rather than regressing into a reject.
+The cost is real and worth stating: a title with no matching token is genuinely
+engineering and never read. It stays `uncertain` and visible in the queue for a human
+rather than being silently rejected — the same tradeoff this project makes everywhere:
+surface the blind spot, do not hide it. There is a test asserting the scope stays lossy
+rather than regressing into a reject.
+
+> **Correction (2026-08-02).** The example this section used for years —
+> **"Member of Technical Staff"** — does not actually behave this way. `staff` is in
+> `exclude_titles`, so `match()` rejects the title outright and `resolve` never sees it.
+> The test only asserts `looks_engineering()` is False, which is true and a different
+> claim. The blind spot itself is real; the illustration was wrong. Fixing it means
+> deciding whether that title should be reachable, which is a `criteria.yaml` change and
+> so belongs in the tuning loop behind `jobtracker eval` — not a bare YAML edit.
 
 ## Where descriptions come from
 
-| ATS | Cost |
+**Not from this pass.** Since 2026-08-02 `check` caches a description for every posting
+whose verdict is `match` or `uncertain`, so `resolve` is a pure read of `state.db` and
+the only socket it opens is to the local model. It lost its `fetcher`, `store_mod`, and
+`conn` parameters along with the lazy fetch path.
+
+That matters beyond tidiness: a throttled board can no longer shrink the queue this pass
+considers, and what is available to read no longer depends on which postings some earlier
+run happened to visit.
+
+| ATS | Cost to `check` |
 |---|---|
 | Ashby (13 boards) | **Free** — `descriptionPlain` is in the bulk payload |
 | Lever (2 boards) | **Free** — `descriptionPlain` plus the requirement `lists` |
-| Greenhouse (47 boards) | One request per posting |
+| Greenhouse (47 boards) | One request per posting, bounded by `--max-descriptions` |
 
 Greenhouse is the exception because the bulk call deliberately drops `?content=true` —
 full-content payloads blow the 20-second timeout on large boards (Databricks carries
-~790 reqs). So its descriptions are fetched one at a time, only for postings this pass
-will actually read, and cached in `postings.description` so a posting is fetched once
-ever. `NULL` means never fetched; `''` means fetched and genuinely empty.
+~790 reqs). Its descriptions are fetched one at a time and cached in
+`postings.description`, so a posting is fetched once ever. `NULL` means never fetched;
+`''` means fetched and genuinely empty, and only `NULL` is retried.
 
-Description fetches go through `Fetcher._request_json`, so they inherit the per-host
-rate limiter, the retry policy, and the trace shape. **The ATS is the scarce resource
-here, not the model** — a local GPU is not rate-limited, `boards-api.greenhouse.io` very
-much is.
+Those fetches go through `Fetcher._request_json`, so they inherit the per-host rate
+limiter, the retry policy, and the trace shape. **The ATS is the scarce resource here,
+not the model** — a local GPU is not rate-limited, `boards-api.greenhouse.io` very much
+is. Measured at ~0.6s per fetch, so the default 400-per-run budget is ~4 minutes and the
+steady state is ~30-40 fetches a night.
 
 One Greenhouse quirk worth knowing: `content` is HTML-escaped *inside* a JSON string, so
 it arrives as `&lt;h2&gt;Who we are&lt;/h2&gt;`. Unescaping has to happen before

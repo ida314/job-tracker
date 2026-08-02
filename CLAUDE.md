@@ -184,8 +184,19 @@ in `state.db` by who decided them:
 run (2026-07-25) considered 670 engineering-signal uncertains and settled 665 (99 → match,
 566 → reject), leaving 5. The uncertain backlog fell 1,538 → 867 — and the remainder is
 the non-engineering tail `looks_engineering()` deliberately leaves alone, not a review pile.
-Re-run order is **`check` then `resolve`**: `check` re-records the rules verdict for every
-posting and would clobber an llm verdict that isn't pinned.
+
+**Then `check` erased all of it (discovered 2026-08-02, fixed the same day).** By the time
+anyone looked, 0 of those 99 `llm/match` verdicts survived and 570 of the 572 `llm/reject`
+were gone; the uncertain backlog was back to 1,742. `cmd_check` re-derives a rules verdict
+from the *title* for every posting it fetches, and the title is exactly what the rules
+already found insufficient — so an unpinned llm verdict lasted one night. Human verdicts
+were never affected because `overrides` pins them.
+
+The fix is that `resolve` now pins too, with `overrides.decided_by` keeping the two apart.
+A model pass may never displace a human ruling (`set_override` returns False and declines);
+the reverse is allowed. **Re-run `resolve` to restore the queue.** The old advice — "run
+`check` then `resolve`, in that order" — is no longer load-bearing, but it is still the
+right order: `resolve` should see the night's new postings.
 
 The first check run reported 129 matches, mostly noise; adding the engineering-gate
 requirement (a level token alone is not enough — see `match.py`) cut it. That fix is the
@@ -210,6 +221,14 @@ it with the tuning loop and a regression check, not with a bare YAML edit.
 - The Ouckah/CVrve aggregator is still unwired — its 2026/2027 new-grad repo URL is
   unconfirmed (2025 archived, 2026 404s), so its `companies.yaml` entry has no `board_url`
   and is skipped. Simplify **is** wired and fetched (2026-07-25) — see "Aggregator sources".
+
+**Doc bug, unfixed (found 2026-08-02).** Three places — this file, `docs/llm.md`, and
+`resolve.py`'s docstring — claim *"Member of Technical Staff"* stays UNCERTAIN as a known
+blind spot. It does not: `staff` is in `exclude_titles`, so `match()` rejects it outright
+long before `resolve` could look at it. The existing test only asserts
+`looks_engineering()` is False, which is true and a different claim. Either the title
+should be reachable or the docs should stop saying it is — decide with `jobtracker eval`,
+not a bare YAML edit.
 
 ---
 
@@ -328,6 +347,20 @@ the reasoning changes.
 *pipeline*, this watches the *job search* — open matches, the uncertain backlog, flagged
 boards, and the manual companies that are never scraped.
 
+**Three tabs, and Today is the landing screen** (2026-08-02). The page opens on the three
+jobs to apply to, each with the model's one-line reasoning and an Apply link; the old
+front page moved to "All postings" and board health to "Boards". The point is to shorten
+the distance between opening the page and applying to something.
+
+- **Panels are server-rendered; the script only toggles `[hidden]`.** `.tabs` is
+  `display:none` until JS confirms it is running, so with JS off every panel shows
+  stacked — exactly the pre-tabs page. Same rule as the row filters.
+- **The picks must never be a `table[data-filterable]`.** The filter JS selects those, so
+  a tier or location filter left set on another tab would silently empty a curated list
+  the user never asked to filter. There is a test.
+- **Disposition buttons only exist under `serve`** (`build_dashboard(interactive=True)`).
+  They POST, and the static file has to stay offline and read-only — a dead button in a
+  mailed file is worse than no button.
 - **It is a pure read.** Unlike `report`, it never marks manual companies as surfaced.
   Opening a view of your data must not mutate it; there is a test asserting this.
 - **No network at view time, ever.** No CDN, no chart library — the one chart is CSS.
@@ -392,15 +425,91 @@ hosted provider.
   means the wire format, not the model. Verify against the server you actually run —
   `test_request_constrains_output_and_is_deterministic` pins the request shape, but only
   a live call proves the server honours it.
-- Ashby and Lever ship `descriptionPlain` in the **bulk** payload; only Greenhouse needs
-  a per-posting fetch, and its `content` is HTML-escaped *inside* the JSON string, so
-  unescape before stripping tags. Description fetches must go through
-  `Fetcher._request_json` so they inherit the per-host limiter — the ATS is the scarce
-  resource, not the local model.
+- **`resolve` is a pure read** (2026-08-02). `check` caches the description for every
+  match/uncertain posting, so this pass opens no ATS connection at all — it lost its
+  `fetcher`/`store_mod`/`conn` parameters and its lazy fetch-and-cache block. A throttled
+  board can no longer shrink the queue it considers.
 - The queue is scoped to titles with an engineering signal (674 of 1,537). Known blind
   spot: "Member of Technical Staff" is never read. It stays UNCERTAIN rather than being
   rejected, and there is a test asserting that. Do not "fix" it by rejecting no-signal
-  titles.
+  titles. (**But see the doc bug under "Not yet done"** — `staff` is in `exclude_titles`,
+  so `match()` actually rejects that title outright and `resolve` never sees it.)
+
+## Descriptions are cached by `check`
+
+Since 2026-08-02, `cmd_check` stores a description for every posting whose verdict is
+`match` or `uncertain`. This is what makes `resolve` and `rank` offline with respect to
+the ATSes: they read `state.db` and talk to nothing but the local model.
+
+- **Scoped, deliberately.** The ~7,100 open rejects are excluded — fetching them would
+  cost ~40 minutes and ~48MB to serve nothing that reads them. Self-healing: retune
+  criteria so a former reject becomes a match, and the next `check` fills it in.
+- **Write-once.** `NULL` = never fetched, `''` = fetched and genuinely empty. Only NULL
+  is retried.
+- **`--max-descriptions` (default 400)** caps requests per run so a bad night cannot turn
+  a 30-second job into a 40-minute one. Measured: ~0.6s per Greenhouse fetch behind the
+  existing limiter, ~30–40 fetches/night in steady state.
+- **A description failure is invisible to board health** and must never produce
+  `EXIT_DEGRADED`. A 500 on one job detail is not a broken board.
+- Ashby and Lever ship `descriptionPlain` in the **bulk** payload for free; only
+  Greenhouse needs a per-posting fetch, and its `content` is HTML-escaped *inside* the
+  JSON string, so unescape before stripping tags. Fetches go through
+  `Fetcher._request_json` so they inherit the per-host limiter — the ATS is the scarce
+  resource, not the local model.
+
+## Posted dates
+
+`postings.posted_at` is the vendor's raw value and is **three mutually incomparable
+formats** — Greenhouse ISO-with-offset, Ashby ISO-UTC-with-millis, Lever epoch-millis as
+a string, aggregator a relative age like `2d`. As text an epoch string collates before
+every ISO timestamp, so `ORDER BY posted_at` is silently wrong. Nothing may sort on it.
+
+`postings.posted_on` is that value normalized to a plain ISO day, and is the only date
+anything is allowed to compare. Conversion lives in the adapter behind
+`Source.normalize_posted_at(raw, today)`; `today` is a parameter, not a clock read,
+because adapters are pure and one source dates relatively.
+
+- **Greenhouse's bulk field is `updated_at`, which is not a posted date.** It moves
+  whenever anyone edits the req. Observed: a Stripe posting first published 2023-11-01
+  reporting `updated_at` of 2026-07-27 — ranked on the old field it would have looked
+  like the freshest thing on the board. The real value is `first_published`, which only
+  exists on the detail payload, so it arrives with the description fetch.
+- **`sync_postings` writes posted_on with COALESCE.** A bulk pass with no date must not
+  erase one already stored, or the 47 Greenhouse boards would blank their own dates
+  nightly.
+- **Unparseable input is NULL, never today.** A missing date reading as "posted now"
+  would invert the ranking it exists to inform.
+- `first_seen` is not a substitute: 8,634 of 9,765 rows share the 2026-07-23 backfill date.
+
+## The ranking pass
+
+`jobtracker rank` and `jobtracker today`, documented in `docs/ranking.md`. Where `resolve`
+decides whether a posting is *on-target*, this decides which of those is *urgent*. It is
+the model's second bounded role, and the smaller one.
+
+- **The model judges one posting; Python does the ordering.** It returns three labelled
+  ordinals (`backend_fit`, `growth`, `entry_risk`) plus a sentence, never a score and
+  never a comparison, and it never sees another posting. Widening that would put a
+  nondeterministic component back into the ordering itself.
+- **Ordinals, not 0–100.** LLM numeric scores cluster in a narrow band and shift with any
+  prompt or model change, which would silently re-rank everything on an unrelated edit.
+- **`profile.yaml` splits prose from weights, and `prose_hash` covers only the prose.**
+  That is the mechanism, not a detail: change a weight and every cached judgment stands,
+  so re-sorting the queue costs zero model calls. Change the prose and judgments are
+  re-taken, because they were answers to a question you have now changed.
+- **Scores are absolute.** A new posting is judged once and lands in its slot without
+  disturbing anything else. Do not replace this with pairwise insertion: it costs
+  ~log₂(n) calls per posting, is path-dependent, and cannot recover from non-transitive
+  comparisons.
+- **Two absences that must not be "simplified":** an unjudged posting scores `None`, not
+  `0.0` (zero buries a model failure at the bottom of the list); an undated one scores
+  mid-scale, not "today" (that floats stale reqs to the top). Both have tests.
+- **Rankings live in their own table, never in `verdicts`.** `check` rewrites `verdicts`
+  every night — that is what erased the LLM's work before.
+- **`rank` never fails for want of a model.** With none configured or reachable it skips
+  judging and still scores from stored judgments; yesterday's order beats nothing.
+- **`rank` can only judge what `check` cached.** A large "still unranked" count while the
+  model is up usually means the description backfill is still draining, not a model fault.
 
 ## Aggregator sources
 

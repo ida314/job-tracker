@@ -16,7 +16,8 @@ about the pipeline changes.
 ```
 companies.yaml   curated targets — human-authored, git-tracked, NEVER machine-written
 criteria.yaml    match rules — validated on load (the v1 bug was invalid, unparsed YAML)
-jobtracker/      the package (models, sources, fetch, match, health, store, report, cli)
+profile.yaml     what you are optimizing for — prose for the model, weights for the sort
+jobtracker/      the package (models, sources, fetch, match, health, store, rank, cli)
 jobtracker/llm/  optional local inference providers — same registry shape as sources/
 data/state.db    run state — SQLite, gitignored, lives on a mounted volume in the container
 tests/           unit + integration suite
@@ -29,6 +30,7 @@ docs/            reference notes — see the table below
 | [`docs/deployment.md`](docs/deployment.md) | Running it unattended: the container contract, exit codes, and five silent failure modes |
 | [`docs/tuning.md`](docs/tuning.md) | Fixing bad matches so they stay fixed — decisions, `eval`, suggestions |
 | [`docs/llm.md`](docs/llm.md) | The optional local ambiguity pass and how to add a provider |
+| [`docs/ranking.md`](docs/ranking.md) | Picking the three to apply to tomorrow, and tuning it without a GPU |
 | [`docs/observability.md`](docs/observability.md) | Traces, metrics, and the query idioms that are not obvious |
 
 State (`postings`, `verdicts`, `board_health`, `runs`) is separate from curation, so
@@ -53,7 +55,17 @@ python -m jobtracker.cli serve           # live tuning UI on http://127.0.0.1:87
 
 # optional local ambiguity pass — see docs/llm.md
 python -m jobtracker.cli resolve --llm-provider vllm --llm-url http://HOST:PORT
+
+# ranking — see docs/ranking.md
+python -m jobtracker.cli rank --llm-provider vllm --llm-url http://HOST:PORT
+python -m jobtracker.cli today                        # the three to apply to
+python -m jobtracker.cli today --applied Stripe 7966029
+python -m jobtracker.cli today --snooze  Stripe 7966029 --days 14
 ```
+
+**The nightly sequence is `check` → `resolve` → `rank` → `dashboard`,** and only `check`
+touches an ATS. It caches a description for every match/uncertain posting, which is what
+lets the rest read `state.db` and talk to nothing but a local model.
 
 `check` writes the report to **stdout**; progress goes to **stderr**, so `check > report.md`
 stays clean. `--output report.md` writes the file directly.
@@ -70,7 +82,7 @@ They answer different questions and are independent — each works without the o
 
 | | `jobtracker dashboard` | `jobtracker serve` | Grafana (`otel/grafana-dashboard.json`) |
 |---|---|---|---|
-| Question | *What should I apply to?* | *Why did this match, and how do I fix it?* | *Did last night's run work?* |
+| Question | *What should I apply to today?* | *Why did this match, and how do I fix it?* | *Did last night's run work?* |
 | Source | `state.db` | `state.db` + `criteria.yaml` | Prometheus metrics |
 | Needs | nothing — one HTML file | a local process | the tier-3 stack up |
 | Writes | never | only on POST | — |
@@ -83,10 +95,17 @@ a second surface for the one thing a static file cannot do — write back.
 python -m jobtracker.cli dashboard      # -> data/dashboard.html, open it with file://
 ```
 
-Open matches and the uncertain backlog, filterable by tier / ATS / location / text, plus
-flagged boards and the manual companies that are never scraped. Self-contained: no server,
-no network at view time, works offline, and readable with JavaScript disabled. It is a pure
-read — unlike `report`, it never writes to the database.
+Three tabs. **Today** is the landing screen: the three jobs to apply to, each with the
+model's one-line reasoning, its fit/growth/risk breakdown, and an Apply link. **All
+postings** holds the full open-match and uncertain lists, filterable by tier / ATS /
+location / text. **Boards** holds flagged boards and the manual companies that are never
+scraped.
+
+Self-contained: no server, no network at view time, works offline, and readable with
+JavaScript disabled — every panel is rendered server-side and the script only hides the
+inactive ones. It is a pure read; unlike `report`, it never writes to the database. The
+applied/skip/snooze buttons appear only under `serve`, which is the surface that can
+write.
 
 **Location ranks, it never disqualifies.** Results come out NYC first, then the rest of the
 US, then unspecified, then abroad — but nothing is dropped for where it is, and the location
@@ -127,8 +146,9 @@ Daily via cron (host):
 `--output` keeps the report out of the log; only progress lines land in `cron.log`. (Cron
 needs `%` escaped as `\%`.)
 
-To change targets or rules, edit `companies.yaml` / `criteria.yaml` and rebuild (they are
-baked into the image), or bind-mount them for iteration:
+To change targets, rules, or what the ranking optimizes for, edit `companies.yaml` /
+`criteria.yaml` / `profile.yaml` and rebuild (they are baked into the image), or
+bind-mount them for iteration:
 `-v "$PWD/companies.yaml:/app/companies.yaml:ro"`.
 
 ## Observability
