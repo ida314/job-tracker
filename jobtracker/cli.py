@@ -218,13 +218,25 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
         return
 
     log.info("caching descriptions for %d posting(s) (budget %d)", len(pending), budget)
-    stored = fetched = failed = 0
+    stored = fetched = failed = no_detail = 0
     for company, posting in pending:
         if posting.description:  # Ashby/Lever: free, already in hand
             store.set_description(conn, posting.company, posting.ats_job_id,
                                   posting.description)
             stored += 1
             continue
+
+        source = get_source(company.ats)
+        if source is None or source.job_detail_url(company.slug, posting.ats_job_id) is None:
+            # This source has no per-posting endpoint — the aggregator feeds have no
+            # detail page at all, and Ashby/Lever answer from the bulk payload or not
+            # at all. Record '' ("fetched and genuinely empty") rather than leaving
+            # NULL, or every run re-attempts a fetch that cannot exist: 249 aggregator
+            # postings were being counted as failures nightly, with no request made.
+            store.set_description(conn, posting.company, posting.ats_job_id, "")
+            no_detail += 1
+            continue
+
         if fetched >= budget:
             continue
         text, posted_at = fetcher.fetch_job_detail(company, posting.ats_job_id)
@@ -241,10 +253,11 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
             if day:
                 store.set_posted_on(conn, posting.company, posting.ats_job_id, day)
 
-    remaining = len(pending) - stored - fetched - failed
+    remaining = len(pending) - stored - fetched - failed - no_detail
     log.info(
-        "descriptions: %d free from bulk, %d fetched, %d failed, %d deferred to tomorrow",
-        stored, fetched, failed, remaining,
+        "descriptions: %d free from bulk, %d fetched, %d failed, "
+        "%d have no detail endpoint, %d deferred to tomorrow",
+        stored, fetched, failed, no_detail, remaining,
     )
 
 
