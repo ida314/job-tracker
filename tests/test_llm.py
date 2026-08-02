@@ -169,3 +169,84 @@ def test_scope_is_documented_as_lossy(criteria):
     UNCERTAIN and visible in the queue for a human.
     """
     assert not looks_engineering("Member of Technical Staff", criteria)
+
+
+# -- ranking judgments -------------------------------------------------------------
+# The second task on this interface. Same guarantees as level extraction: the model
+# supplies labelled facts, Python turns them into a number, and every failure path
+# leaves the posting unjudged rather than mis-scored.
+def test_rank_request_names_its_schema_and_carries_the_profile(vllm):
+    """Two tasks now share build_request, so the schema label must say which is which."""
+    from jobtracker.llm.client import RANK_SCHEMA
+
+    body = vllm.build_request("m", "sys", "user", RANK_SCHEMA, schema_name="ranking")
+    assert body["response_format"]["json_schema"]["name"] == "ranking"
+    assert body["response_format"]["json_schema"]["schema"] == RANK_SCHEMA
+    assert "guided_json" not in body
+    assert body["temperature"] == 0  # same posting + same profile -> same judgment
+
+
+def test_parse_judgment_from_a_recorded_payload():
+    from jobtracker.llm.client import _parse_judgment
+
+    raw = json.dumps({
+        "backend_fit": "strong",
+        "growth": "moderate",
+        "entry_risk": "low",
+        "why": "Owns the Kafka ingestion pipeline; explicitly open to new graduates.",
+    })
+    j = _parse_judgment(raw)
+    assert j.backend_fit == "strong"
+    assert j.growth == "moderate"
+    assert j.entry_risk == "low"
+    assert "Kafka" in j.why
+
+
+@pytest.mark.parametrize("bad", [
+    None,
+    "",
+    "The role looks like a strong fit for a backend new grad.",  # prose, not JSON
+    "[]",
+    "null",
+    json.dumps({"backend_fit": "excellent", "growth": "strong",       # off-enum
+                "entry_risk": "low", "why": "x"}),
+    json.dumps({"backend_fit": "strong", "growth": "strong",
+                "entry_risk": "unknown", "why": "x"}),               # off-enum
+    json.dumps({"growth": "strong", "entry_risk": "low", "why": "x"}),  # missing field
+])
+def test_a_malformed_judgment_is_no_judgment(bad):
+    """A server ignoring response_format must produce NO ranking, not a fabricated one.
+
+    This is the `guided_json` regression's shape: the request looks accepted, the
+    answer comes back as prose, and without this check it would be scored anyway.
+    """
+    from jobtracker.llm.client import _parse_judgment
+
+    assert _parse_judgment(bad) is None
+
+
+def test_judge_against_an_unreachable_server_returns_none(vllm):
+    client = LlmClient(vllm, "http://127.0.0.1:1", model="m", timeout=0.25)
+    assert client.judge_posting("Software Engineer", "A description", "profile") is None
+    client.close()
+
+
+def test_judge_does_not_call_out_for_an_empty_description(vllm):
+    client = LlmClient(vllm, "http://127.0.0.1:1", model="m", timeout=0.25)
+    assert client.judge_posting("Software Engineer", "", "profile") is None
+    assert client.judge_posting("Software Engineer", "   ", "profile") is None
+    client.close()
+
+
+def test_the_rank_prompt_forbids_ordering():
+    """Scope boundary: the model judges one posting and never sees another.
+
+    Widening this to "pick the best" would put a nondeterministic component back in
+    the ordering itself, which is what DESIGN.md was written to undo.
+    """
+    from jobtracker.llm.client import RANK_SCHEMA, RANK_SYSTEM_PROMPT
+
+    assert "not ranking, comparing, or choosing" in RANK_SYSTEM_PROMPT
+    # No score, no rank, no comparison anywhere in what it may return.
+    assert set(RANK_SCHEMA["properties"]) == {"backend_fit", "growth", "entry_risk", "why"}
+    assert RANK_SCHEMA["additionalProperties"] is False

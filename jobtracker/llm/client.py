@@ -63,6 +63,76 @@ Rules:
 """
 
 
+ORDINAL = ["none", "weak", "moderate", "strong"]
+RISK = ["low", "medium", "high"]
+
+RANK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "backend_fit": {"type": "string", "enum": ORDINAL},
+        "growth": {"type": "string", "enum": ORDINAL},
+        "entry_risk": {"type": "string", "enum": RISK},
+        "why": {"type": "string"},
+    },
+    "required": ["backend_fit", "growth", "entry_risk", "why"],
+    "additionalProperties": False,
+}
+
+# Note what this asks for and what it does not. Three labelled ordinals and a sentence
+# — never a score, never a rank, never a comparison. The model judges one posting in
+# isolation and has no idea another exists; Python turns these into a number and an
+# order, from weights you can read and diff (DESIGN.md §3.2).
+#
+# Ordinals rather than 0-100 because absolute numeric scores from an LLM cluster in a
+# narrow band and shift whenever the prompt or model changes, which would silently
+# re-rank the whole queue. A four-point labelled scale is stable across both.
+RANK_SYSTEM_PROMPT = """\
+You judge how well ONE job posting fits ONE candidate's stated goals.
+
+You are given the candidate's profile and a single job description. Answer four
+questions about THIS posting only. You are not ranking, comparing, or choosing —
+another system does that with your answers.
+
+  backend_fit — how well the ACTUAL WORK described matches the candidate's target
+                roles. Judge the day-to-day engineering described in the body, not
+                the job title and not the company's reputation.
+                  strong   — the core work is squarely what they are looking for
+                  moderate — adjacent or partially on-target
+                  weak     — mostly off-target with some overlap
+                  none     — a different discipline entirely
+
+  growth      — evidence in the description of learning and mentorship: named senior
+                engineers or mentors, structured onboarding, a new-grad or early-career
+                program, explicit teaching, breadth of systems they would touch.
+                  strong   — the posting concretely describes these
+                  moderate — implied but not stated
+                  weak     — little sign either way
+                  none     — the posting reads as "deliver alone, no support"
+
+  entry_risk  — the risk that this is NOT actually open to a new graduate, despite
+                its title. Look for required years of experience, "proven track
+                record", ownership of a whole system, or on-call leadership.
+                  low      — clearly open to new grads
+                  medium   — ambiguous
+                  high     — reads as needing real prior experience
+
+  why         — ONE sentence, under 200 characters, citing something specific from
+                the description. Not a summary of the role; the reason for your
+                judgment. This is shown to the candidate, so make it useful.
+
+Judge only what the description says. If it is vague, say so through the labels —
+"moderate" and "medium" are honest answers and are preferred over guessing.
+"""
+
+
+@dataclass(frozen=True)
+class RankJudgment:
+    backend_fit: str
+    growth: str
+    entry_risk: str
+    why: str = ""
+
+
 @dataclass(frozen=True)
 class LevelVerdict:
     level: str  # 'entry' | 'not_entry' | 'unclear'
@@ -177,6 +247,7 @@ class LlmClient:
             system=SYSTEM_PROMPT,
             user=f"Job title: {title}\n\nJob description:\n{description[:MAX_DESCRIPTION_CHARS]}",
             schema=LEVEL_SCHEMA,
+            schema_name="level",
         )
 
         with tracer.start_as_current_span("llm.classify") as span:
@@ -197,6 +268,83 @@ class LlmClient:
             verdict = _parse_verdict(text)
             span.set_attribute("llm.outcome", verdict.level if verdict else "unparseable")
             return verdict
+
+
+    # -- ranking -------------------------------------------------------------------
+    def judge_posting(
+        self, title: str, description: str, profile_prose: str
+    ) -> Optional["RankJudgment"]:
+        """Judge one posting against the candidate profile. None on any failure.
+
+        Same contract as `classify_level`: None means "no new information", and the
+        posting simply stays unranked and out of the top 3 rather than being scored
+        wrongly. A model that is down, slow, or nonsensical costs you the ranking you
+        did not have before; it can never invent an order.
+        """
+        if not description or not description.strip():
+            return None
+        model = self.resolve_model()
+        if not model:
+            return None
+
+        body = self.provider.build_request(
+            model=model,
+            system=RANK_SYSTEM_PROMPT,
+            user=(
+                f"CANDIDATE PROFILE\n{profile_prose}\n\n"
+                f"---\n\nJob title: {title}\n\n"
+                f"Job description:\n{description[:MAX_DESCRIPTION_CHARS]}"
+            ),
+            schema=RANK_SCHEMA,
+            schema_name="ranking",
+        )
+
+        with tracer.start_as_current_span("llm.judge") as span:
+            span.set_attribute("llm.provider", self.provider.name)
+            span.set_attribute("llm.model", model)
+            try:
+                resp = self._session.post(
+                    self.provider.chat_url(self.base_url), json=body, timeout=self.timeout
+                )
+                resp.raise_for_status()
+                text = self.provider.parse_response(resp.json())
+            except Exception as exc:  # noqa: BLE001
+                log.debug("llm judge failed for %r: %s", title[:40], exc)
+                span.set_attribute("llm.outcome", "error")
+                return None
+
+            judgment = _parse_judgment(text)
+            span.set_attribute("llm.outcome", "ok" if judgment else "unparseable")
+            return judgment
+
+
+def _parse_judgment(text: Optional[str]) -> Optional["RankJudgment"]:
+    """Validate the model's JSON. Anything off-enum is treated as no answer.
+
+    Same reasoning as `_parse_verdict`: constrained decoding should make this total,
+    but a server that silently ignores `response_format` would otherwise let prose
+    through as a judgment — the exact regression that made `resolve` a no-op for a
+    month. Rejecting here means such a server produces no ranking rather than a
+    fabricated one.
+    """
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    fit, growth = data.get("backend_fit"), data.get("growth")
+    risk = data.get("entry_risk")
+    if fit not in ORDINAL or growth not in ORDINAL or risk not in RISK:
+        return None
+    return RankJudgment(
+        backend_fit=fit,
+        growth=growth,
+        entry_risk=risk,
+        why=str(data.get("why") or "")[:300],
+    )
 
 
 def _parse_verdict(text: Optional[str]) -> Optional[LevelVerdict]:

@@ -7,7 +7,7 @@ line in the import below — the same two steps as adding an ATS to `sources/`.
 
 from .base import Provider, get_provider, provider_names, register  # noqa: F401
 from . import vllm  # noqa: F401  (side effect: register())
-from .client import LevelVerdict, LlmClient  # noqa: F401
+from .client import LevelVerdict, LlmClient, RankJudgment  # noqa: F401
 
 __all__ = [
     "Provider",
@@ -16,4 +16,5 @@ __all__ = [
     "register",
     "LlmClient",
     "LevelVerdict",
+    "RankJudgment",
 ]

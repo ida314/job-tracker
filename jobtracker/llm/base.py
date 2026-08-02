@@ -45,8 +45,14 @@ class Provider:
         user: str,
         schema: dict,
         max_tokens: int = 512,
+        schema_name: str = "verdict",
     ) -> dict:
-        """Build the JSON body. `schema` constrains the output to that JSON Schema."""
+        """Build the JSON body. `schema` constrains the output to that JSON Schema.
+
+        `schema_name` labels it. There is more than one task on this interface now —
+        level extraction and ranking — and the label travels into the traced request,
+        so it should say which one this is.
+        """
         raise NotImplementedError
 
     # -- response parsing ----------------------------------------------------------

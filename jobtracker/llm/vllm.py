@@ -57,6 +57,7 @@ class VLLM(Provider):
         user: str,
         schema: dict,
         max_tokens: int = 512,
+        schema_name: str = "verdict",
     ) -> dict:
         return {
             "model": model,
@@ -82,9 +83,13 @@ class VLLM(Provider):
             # `response_format` is the portable spelling — OpenAI's own, supported by
             # vLLM since 0.6 and by llama.cpp and Ollama's compat servers — so a
             # second provider is unlikely to need a third variant of this.
+            #
+            # `schema_name` is passed rather than hardcoded because there is now more
+            # than one task: 'level' for the ambiguity pass, 'ranking' for the nightly
+            # rank. A stale name is cosmetic on vLLM but misleading in a traced request.
             "response_format": {
                 "type": "json_schema",
-                "json_schema": {"name": "level", "schema": schema},
+                "json_schema": {"name": schema_name, "schema": schema},
             },
         }
 
