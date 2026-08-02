@@ -113,6 +113,47 @@ CREATE TABLE IF NOT EXISTS applications (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (company, ats_job_id)
 );
+
+-- What the local model made of one posting, read against profile.yaml. NOT a score:
+-- three labelled ordinals and a sentence. `score` next to them is computed in Python
+-- from profile weights, and is recomputed on every rank run without a model call.
+--
+-- `prose_hash` is the identity of the question that was asked. Weights are excluded
+-- from it on purpose, which is what makes retuning free — change a weight and these
+-- rows still stand, so re-sorting the queue costs nothing. Change the prose and the
+-- hash moves, invalidating them, because they were answers to a different question.
+--
+-- Deliberately NOT stored in `verdicts`: that table is PK'd one row per posting and
+-- is rewritten by `check` every night, which is what erased the LLM's work before.
+CREATE TABLE IF NOT EXISTS rankings (
+    company      TEXT NOT NULL,
+    ats_job_id   TEXT NOT NULL,
+    backend_fit  TEXT NOT NULL,   -- none | weak | moderate | strong
+    growth       TEXT NOT NULL,   -- none | weak | moderate | strong
+    entry_risk   TEXT NOT NULL,   -- low | medium | high
+    why          TEXT NOT NULL DEFAULT '',
+    prose_hash   TEXT NOT NULL,
+    judged_at    TEXT NOT NULL,
+    score        REAL,
+    scored_at    TEXT,
+    PRIMARY KEY (company, ats_job_id)
+);
+
+-- "Not this one" and "not yet". A job holds its slot in the daily top 3 until you say
+-- what happened to it, so that nothing you meant to apply to falls off unseen.
+--
+-- 'applied' is deliberately NOT a kind here — it goes to `applications`, which already
+-- tracks the outcome past the click. This table is only for the two dispositions that
+-- have no outcome to track.
+CREATE TABLE IF NOT EXISTS deferrals (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,   -- skipped | snoozed
+    note        TEXT,
+    until       TEXT,            -- ISO date; NULL for 'skipped', which does not expire
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
 """
 
 # Columns added after the initial schema shipped. CREATE TABLE IF NOT EXISTS cannot
@@ -507,6 +548,124 @@ def all_applications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 def application_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) n FROM applications").fetchone()["n"]
+
+
+# -- rankings and dispositions ------------------------------------------------------
+DEFERRAL_KINDS = ("skipped", "snoozed")
+
+
+def record_judgment(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    judgment,
+    prose_hash: str,
+    now: str,
+) -> None:
+    """Store what the model made of one posting. Score is filled in separately."""
+    conn.execute(
+        """
+        INSERT INTO rankings (company, ats_job_id, backend_fit, growth, entry_risk,
+                              why, prose_hash, judged_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            backend_fit=excluded.backend_fit, growth=excluded.growth,
+            entry_risk=excluded.entry_risk, why=excluded.why,
+            prose_hash=excluded.prose_hash, judged_at=excluded.judged_at
+        """,
+        (company, ats_job_id, judgment.backend_fit, judgment.growth,
+         judgment.entry_risk, judgment.why, prose_hash, now),
+    )
+
+
+def set_score(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, score: float, now: str
+) -> None:
+    conn.execute(
+        "UPDATE rankings SET score=?, scored_at=? WHERE company=? AND ats_job_id=?",
+        (score, now, company, ats_job_id),
+    )
+
+
+def matches_needing_judgment(
+    conn: sqlite3.Connection, prose_hash: str, limit: Optional[int] = None
+) -> list[sqlite3.Row]:
+    """Open matches with no judgment at the *current* prose_hash.
+
+    A row judged under older prose is treated as unjudged rather than deleted: if the
+    model is unreachable tonight, the stale judgment still orders the queue, which
+    beats an empty list. Newest first, so a --limit run spends its budget on the
+    postings most likely to still be open tomorrow.
+    """
+    sql = """
+        SELECT p.company, p.ats_job_id, p.title, p.description
+        FROM postings p
+        JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        LEFT JOIN rankings r ON p.company=r.company AND p.ats_job_id=r.ats_job_id
+        WHERE v.verdict='match' AND p.closed_at IS NULL
+          AND p.description IS NOT NULL AND p.description != ''
+          AND (r.prose_hash IS NULL OR r.prose_hash != ?)
+        ORDER BY COALESCE(p.posted_on, p.first_seen) DESC, p.company
+    """
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return list(conn.execute(sql, (prose_hash,)))
+
+
+def ranked_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every open match with its judgment and score, best first.
+
+    Includes unjudged ones (score NULL, sorted last) on purpose. A match the model
+    could not read must stay visible as a countable gap, not vanish from the totals —
+    silently dropping it is indistinguishable from never having found it.
+    """
+    return list(conn.execute(
+        """
+        SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
+               p.posted_on, p.first_seen,
+               r.backend_fit, r.growth, r.entry_risk, r.why, r.score, r.prose_hash,
+               a.status AS applied_status,
+               d.kind AS deferral_kind, d.until AS deferral_until
+        FROM postings p
+        JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        LEFT JOIN rankings r ON p.company=r.company AND p.ats_job_id=r.ats_job_id
+        LEFT JOIN applications a ON p.company=a.company AND p.ats_job_id=a.ats_job_id
+        LEFT JOIN deferrals d ON p.company=d.company AND p.ats_job_id=d.ats_job_id
+        WHERE v.verdict='match' AND p.closed_at IS NULL
+        ORDER BY r.score IS NULL, r.score DESC, p.company, p.title
+        """
+    ))
+
+
+def set_deferral(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    kind: str,
+    now: str,
+    until: Optional[str] = None,
+    note: str = "",
+) -> None:
+    if kind not in DEFERRAL_KINDS:
+        raise ValueError(f"kind must be one of {DEFERRAL_KINDS}, got {kind!r}")
+    if kind == "snoozed" and not until:
+        raise ValueError("a snooze needs an 'until' date, or it is a skip")
+    conn.execute(
+        """
+        INSERT INTO deferrals (company, ats_job_id, kind, note, until, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            kind=excluded.kind, note=excluded.note,
+            until=excluded.until, updated_at=excluded.updated_at
+        """,
+        (company, ats_job_id, kind, note, until, now),
+    )
+
+
+def clear_deferral(conn: sqlite3.Connection, company: str, ats_job_id: str) -> None:
+    conn.execute(
+        "DELETE FROM deferrals WHERE company=? AND ats_job_id=?", (company, ats_job_id)
+    )
 
 
 # -- overrides: per-posting, survives rematch ---------------------------------------
