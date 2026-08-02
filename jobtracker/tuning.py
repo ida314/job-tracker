@@ -25,21 +25,31 @@ from .models import Decision, Posting, Verdict
 
 # -- overrides ---------------------------------------------------------------------
 def apply_override(verdict: Verdict, overrides: dict) -> Verdict:
-    """Let a recorded human judgment win over the rules for one specific posting.
+    """Let a recorded judgment win over the rules for one specific posting.
 
     Applied in the caller path (`check`, `rematch`) rather than inside `match()`, so
     the matcher stays pure and the override is visible in the verdict's reason.
+
+    Two kinds of judgment pin here, and the distinction has to survive: a human ruling,
+    and a verdict the LLM pass reached by reading a description. Both need protection
+    from `check`, which re-derives a rules verdict from the title every night and would
+    otherwise overwrite them. Neither may masquerade as the other, so `decided_by` is
+    read off the row rather than assumed — DESIGN.md §3.5, every verdict carries its
+    provenance.
     """
     ov = overrides.get((verdict.company, verdict.ats_job_id))
     if ov is None:
         return verdict
     reason = ov["reason"] or "manual"
+    # sqlite3.Row and dict both answer keys(); a row predating the decided_by column,
+    # or a hand-built dict in a test, is a human override by definition.
+    decided_by = ov["decided_by"] if "decided_by" in ov.keys() else "human"
     return Verdict(
         verdict.company,
         verdict.ats_job_id,
         Decision(ov["decision"]),
         f"override:{reason}",
-        "human",
+        decided_by,
     )
 
 

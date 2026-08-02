@@ -62,6 +62,55 @@ def test_overrides_survive_rematch(tmp_path):
     assert store.load_overrides(conn) == {}
 
 
+def test_llm_override_survives_a_check_cycle():
+    """The bug this column exists for.
+
+    `check` re-derives a rules verdict from the *title* for every posting it fetches.
+    A verdict the LLM reached by reading the description is, by construction, one the
+    title could not support — so without a pin it lasts exactly one night. All 99
+    llm/match verdicts from the 2026-07-25 resolve run were erased this way.
+    """
+    from jobtracker.match import match
+    from jobtracker.models import Posting
+
+    conn = store.connect(":memory:")
+    crit = load_criteria(config.CRITERIA_YAML)
+    # No level token in the title, so the rules can only ever say "uncertain".
+    p = Posting("Acme", "1", "Software Engineer, Distributed Systems", "u")
+    assert match(p, crit).decision is Decision.UNCERTAIN
+
+    store.set_override(conn, "Acme", "1", "match", "2026-08-02",
+                       reason="llm:entry+eng:generic", decided_by="llm")
+
+    overrides = store.load_overrides(conn)
+    out = tuning.apply_override(match(p, crit), overrides)
+    assert out.decision is Decision.MATCH
+    assert out.decided_by == "llm"      # not laundered into 'human'
+
+
+def test_a_model_pass_cannot_displace_your_ruling():
+    """You overrule the model; the model never overrules you."""
+    conn = store.connect(":memory:")
+    store.set_override(conn, "Acme", "1", "reject", "2026-08-01",
+                       reason="not backend", decided_by="human")
+
+    assert store.set_override(conn, "Acme", "1", "match", "2026-08-02",
+                              reason="llm:entry", decided_by="llm") is False
+    row = store.load_overrides(conn)[("Acme", "1")]
+    assert row["decision"] == "reject" and row["decided_by"] == "human"
+
+    # The reverse direction is allowed — that is what the escape hatch is for.
+    assert store.set_override(conn, "Acme", "1", "match", "2026-08-03",
+                              reason="changed my mind", decided_by="human") is True
+    assert store.load_overrides(conn)[("Acme", "1")]["decision"] == "match"
+
+
+def test_override_author_is_validated():
+    conn = store.connect(":memory:")
+    with pytest.raises(ValueError):
+        store.set_override(conn, "Acme", "1", "match", "2026-08-02", decided_by="rules")
+
+
 # -- evaluation --------------------------------------------------------------------
 def test_agreement(criteria):
     rows = [_dec("Software Engineer, New Grad", "match"),

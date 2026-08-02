@@ -85,6 +85,11 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 -- Per-posting escape hatch. Survives rematch: once you have ruled on something
 -- specific, no rule change should quietly re-open it.
+--
+-- Also the pin for the LLM pass. `check` re-records a rules verdict for *every*
+-- posting it fetches, so anything decided by reading a description — which the rules
+-- cannot see — is erased the next night unless it is pinned here. `decided_by` keeps
+-- the two apart so a model pass can never displace a human judgment.
 CREATE TABLE IF NOT EXISTS overrides (
     company     TEXT NOT NULL,
     ats_job_id  TEXT NOT NULL,
@@ -117,6 +122,9 @@ _ADDED_COLUMNS = [
     # Job descriptions, fetched lazily by the LLM pass for UNCERTAIN postings only.
     # NULL means "never fetched", which is distinct from "fetched and empty".
     ("postings", "description", "TEXT"),
+    # Who set an override. Defaults to 'human' because every row that existed before
+    # this column did was a human decision.
+    ("overrides", "decided_by", "TEXT NOT NULL DEFAULT 'human'"),
 ]
 
 
@@ -460,6 +468,9 @@ def application_count(conn: sqlite3.Connection) -> int:
 
 
 # -- overrides: per-posting, survives rematch ---------------------------------------
+OVERRIDE_AUTHORS = ("human", "llm")
+
+
 def set_override(
     conn: sqlite3.Connection,
     company: str,
@@ -467,19 +478,38 @@ def set_override(
     decision: str,
     now: str,
     reason: str = "",
-) -> None:
+    decided_by: str = "human",
+) -> bool:
+    """Pin a verdict for one posting. Returns False if an existing pin was kept.
+
+    A machine pass must never displace a human judgment, so a non-human write over an
+    existing `human` row is refused rather than merged. The reverse is allowed: you
+    overruling the model is the whole point of the escape hatch.
+    """
     if decision not in ("match", "reject", "uncertain"):
         raise ValueError(f"bad override decision {decision!r}")
+    if decided_by not in OVERRIDE_AUTHORS:
+        raise ValueError(f"bad override author {decided_by!r}")
+
+    if decided_by != "human":
+        row = conn.execute(
+            "SELECT decided_by FROM overrides WHERE company=? AND ats_job_id=?",
+            (company, ats_job_id),
+        ).fetchone()
+        if row is not None and row["decided_by"] == "human":
+            return False
+
     conn.execute(
         """
-        INSERT INTO overrides (company, ats_job_id, decision, reason, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO overrides (company, ats_job_id, decision, reason, created_at, decided_by)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(company, ats_job_id) DO UPDATE SET
             decision=excluded.decision, reason=excluded.reason,
-            created_at=excluded.created_at
+            created_at=excluded.created_at, decided_by=excluded.decided_by
         """,
-        (company, ats_job_id, decision, reason, now),
+        (company, ats_job_id, decision, reason, now, decided_by),
     )
+    return True
 
 
 def clear_override(conn: sqlite3.Connection, company: str, ats_job_id: str) -> None:
@@ -497,7 +527,7 @@ def load_overrides(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Ro
     return {
         (r["company"], r["ats_job_id"]): r
         for r in conn.execute(
-            "SELECT company, ats_job_id, decision, reason FROM overrides"
+            "SELECT company, ats_job_id, decision, reason, decided_by FROM overrides"
         )
     }
 

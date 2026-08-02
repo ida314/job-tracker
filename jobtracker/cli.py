@@ -431,12 +431,24 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
     fetcher = Fetcher()
     today = args.since or _today()
+    kept = 0
     try:
         verdicts, stats = resolve_mod.resolve_postings(
             rows, companies, criteria, client,
             fetcher=fetcher, store_mod=store, conn=conn, now=today,
         )
         for v in verdicts:
+            # Pin before recording. `check` re-derives a rules verdict from the title
+            # for every posting it fetches, and the title is exactly what the rules
+            # already found insufficient — so an unpinned llm verdict lasts one night.
+            # A posting you have already ruled on keeps your ruling; set_override says
+            # so by returning False, and then the verdict is not ours to write either.
+            if not store.set_override(
+                conn, v.company, v.ats_job_id, v.decision.value, today,
+                reason=v.reason, decided_by="llm",
+            ):
+                kept += 1
+                continue
             store.record_verdict(conn, v, today)
         conn.commit()
     finally:
@@ -444,6 +456,8 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         client.close()
 
     conn.close()
+    if kept:
+        log.info("%d verdict(s) left alone — you had already ruled on them", kept)
     log.info("resolve complete: %s", stats.summary())
     print(stats.summary())
     return 0
