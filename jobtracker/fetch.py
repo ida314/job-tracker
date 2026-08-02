@@ -230,33 +230,37 @@ class Fetcher:
             log.warning("%s -> %s; giving up after %d attempts", url, reason, MAX_RETRIES)
 
     # -- one company -----------------------------------------------------------------
-    def fetch_job_description(self, company: Company, ats_job_id: str):
-        """One posting's description, or None if this ATS bundles it already.
+    def fetch_job_detail(self, company: Company, ats_job_id: str):
+        """One posting's (description, posted_at) — `(None, None)` if unavailable.
+
+        Both come from the same payload, so they are fetched together: asking twice
+        would double the request count against the one host that is actually scarce.
 
         Goes through _request_json so it inherits the per-host limiter, the retry
-        policy, and the trace shape. The ATS is the scarce resource in the LLM pass —
-        the local model is not rate-limited, boards-api.greenhouse.io very much is —
-        so description fetching must be paced by exactly the same governor as the
-        nightly sweep rather than opening a second, unpaced path to the same host.
+        policy, and the trace shape. The ATS is the scarce resource here — the local
+        model is not rate-limited, boards-api.greenhouse.io very much is — so this
+        must be paced by exactly the same governor as the nightly sweep rather than
+        opening a second, unpaced path to the same host.
 
-        Returns None for Ashby and Lever, whose bulk payloads already carry the text.
+        Returns `(None, None)` for Ashby and Lever, whose bulk payloads already carry
+        the text and a usable date.
         """
         source = get_source(company.ats)
         if source is None or not company.slug:
-            return None
+            return None, None
         url = source.job_detail_url(company.slug, ats_job_id)
         if url is None:
-            return None
+            return None, None
         with tracer.start_as_current_span("fetch.description") as span:
             span.set_attribute("company.name", company.name)
             span.set_attribute("company.ats", company.ats)
             _status, data, error = self._request_json(url)
             if error or data is None:
                 span.set_attribute("fetch.outcome", "error")
-                return None
+                return None, None
             text = source.parse_job_detail(data)
             span.set_attribute("fetch.outcome", "ok" if text else "empty")
-            return text
+            return text, source.parse_job_detail_posted_at(data)
 
     def fetch_company(self, company: Company) -> FetchResult:
         # Span names should be low-cardinality — "fetch.company", never

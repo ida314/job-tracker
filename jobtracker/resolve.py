@@ -13,7 +13,7 @@ it already was.
 Flow per posting:
 
     UNCERTAIN + engineering-looking title
-        -> description (free from Ashby/Lever, fetched for Greenhouse)
+        -> description (already cached by `check`; this pass opens no ATS connection)
         -> local model: entry | not_entry | unclear
         -> entry     : re-apply the *rules'* engineering gate -> MATCH or REJECT
            not_entry : REJECT
@@ -28,7 +28,7 @@ from typing import Optional
 
 from .criteria import Criteria
 from .llm import LlmClient
-from .models import Company, Decision, Verdict
+from .models import Decision, Verdict
 
 log = logging.getLogger("jobtracker.resolve")
 
@@ -37,7 +37,6 @@ log = logging.getLogger("jobtracker.resolve")
 class ResolveStats:
     considered: int = 0
     skipped_no_eng: int = 0
-    fetched: int = 0
     no_description: int = 0
     matched: int = 0
     rejected: int = 0
@@ -108,19 +107,16 @@ def verdict_from_level(
 
 def resolve_postings(
     rows,
-    companies: dict[str, Company],
     criteria: Criteria,
     client: LlmClient,
-    fetcher=None,
-    store_mod=None,
-    conn=None,
-    now: str = "",
 ) -> tuple[list[Verdict], ResolveStats]:
     """Read descriptions for `rows` and return the verdicts that changed.
 
-    `fetcher`/`store_mod`/`conn` are optional so this is testable without either a
-    network or a database: pass none of them and it classifies whatever descriptions
-    the rows already carry.
+    A pure read. `check` caches the description for every match/uncertain posting, so
+    by the time this runs the text is already in `state.db` and the only socket opened
+    is to the local model. That is what makes the pass offline with respect to the
+    ATSes: a throttled board can no longer shrink the queue this pass considers, and
+    the function needs neither a network nor a database to test.
     """
     stats = ResolveStats()
     verdicts: list[Verdict] = []
@@ -135,17 +131,6 @@ def resolve_postings(
 
         stats.considered += 1
         description = row["description"] if "description" in row.keys() else None
-
-        if not description and fetcher is not None:
-            company = companies.get(company_name)
-            if company is not None:
-                description = fetcher.fetch_job_description(company, row["ats_job_id"])
-                if description:
-                    stats.fetched += 1
-                    if store_mod is not None and conn is not None:
-                        store_mod.set_description(
-                            conn, company_name, row["ats_job_id"], description
-                        )
 
         if not description:
             stats.no_description += 1

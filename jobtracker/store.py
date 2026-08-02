@@ -624,6 +624,20 @@ def set_description(
     )
 
 
+def set_posted_on(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, day: str
+) -> None:
+    """Record a better posted date than the bulk payload could supply.
+
+    Only Greenhouse needs this: `first_published` lives on the detail payload, which
+    is fetched for the description, so the date arrives later than the posting does.
+    """
+    conn.execute(
+        "UPDATE postings SET posted_on=? WHERE company=? AND ats_job_id=?",
+        (day, company, ats_job_id),
+    )
+
+
 def get_description(
     conn: sqlite3.Connection, company: str, ats_job_id: str
 ) -> Optional[str]:

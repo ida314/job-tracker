@@ -169,6 +169,68 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 # -- check -------------------------------------------------------------------------
+def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
+    """Fill in descriptions for the match/uncertain buckets, once per posting ever.
+
+    Ashby and Lever ship `descriptionPlain` in the bulk payload, so those cost nothing
+    and are simply stored. Greenhouse is the exception — we drop `?content=true` from
+    the bulk call because it blows the timeout on large boards — so its descriptions
+    are fetched one at a time, paced by the same per-host limiter as the sweep.
+
+    Doing this in `check` rather than on demand later is what makes every downstream
+    pass offline: `resolve` and `rank` read `state.db` and never touch an ATS. It is
+    affordable because it is scoped and write-once — ~829 postings of backfill, then
+    ~30-40 a night.
+
+    Three rules hold this together:
+
+      * NULL means never fetched, '' means fetched and empty. Only NULL is retried, so
+        a description that genuinely does not exist is not re-requested every night.
+      * `budget` caps requests per run so a bad night cannot turn a 30-second job into
+        a 40-minute one. The remainder is simply picked up tomorrow.
+      * A failure here is invisible to board health and can never produce EXIT_DEGRADED.
+        A 500 on one job detail is not a broken board; the row stays NULL and retries.
+    """
+    if not wanted:
+        return
+    pending = [
+        (company, p) for company, p in wanted
+        if store.get_description(conn, p.company, p.ats_job_id) is None
+    ]
+    if not pending:
+        return
+
+    log.info("caching descriptions for %d posting(s) (budget %d)", len(pending), budget)
+    stored = fetched = failed = 0
+    for company, posting in pending:
+        if posting.description:  # Ashby/Lever: free, already in hand
+            store.set_description(conn, posting.company, posting.ats_job_id,
+                                  posting.description)
+            stored += 1
+            continue
+        if fetched >= budget:
+            continue
+        text, posted_at = fetcher.fetch_job_detail(company, posting.ats_job_id)
+        if text is None:
+            failed += 1
+            continue
+        fetched += 1
+        store.set_description(conn, posting.company, posting.ats_job_id, text)
+        # The detail payload is also the only place Greenhouse exposes a true posted
+        # date, so take it while we are here rather than paying for the request twice.
+        source = get_source(company.ats)
+        if posted_at and source is not None:
+            day = source.normalize_posted_at(posted_at, today)
+            if day:
+                store.set_posted_on(conn, posting.company, posting.ats_job_id, day)
+
+    remaining = len(pending) - stored - fetched - failed
+    log.info(
+        "descriptions: %d free from bulk, %d fetched, %d failed, %d deferred to tomorrow",
+        stored, fetched, failed, remaining,
+    )
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     companies = config.load_companies(args.companies)
     criteria = load_criteria(args.criteria)
@@ -209,20 +271,20 @@ def cmd_check(args: argparse.Namespace) -> int:
         len(companies) - len(api) - len(skipped) - len(aggregators),
     )
 
+    # Held open past matching: descriptions are fetched for the match/uncertain
+    # buckets once the verdict is known, and the verdict is not known until the DB is
+    # open. Closed in the `finally` below, after that pass.
     fetcher = Fetcher()
-    try:
-        results = fetcher.fetch_all(api)
-        for c in aggregators:
-            log.info("fetching aggregator %s", c.name)
-            res = fetcher.fetch_aggregator(c)
-            log.info(
-                "aggregator %s: %s",
-                c.name,
-                f"FAIL {res.error}" if res.error else f"{len(res.postings)} postings",
-            )
-            results.append(res)
-    finally:
-        fetcher.close()
+    results = fetcher.fetch_all(api)
+    for c in aggregators:
+        log.info("fetching aggregator %s", c.name)
+        res = fetcher.fetch_aggregator(c)
+        log.info(
+            "aggregator %s: %s",
+            c.name,
+            f"FAIL {res.error}" if res.error else f"{len(res.postings)} postings",
+        )
+        results.append(res)
 
     config.ensure_data_dir()
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
@@ -232,6 +294,10 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     stats = {"companies": len(api), "ok": 0, "failed": 0, "new_postings": 0, "matches": 0}
     degraded: list[str] = []  # boards worth failing the run over — see EXIT_DEGRADED
+    # Postings whose description is worth having: the match and uncertain buckets.
+    # Rejects are excluded deliberately — there are ~7,100 open ones, and fetching
+    # them would cost ~40 minutes and ~48MB to serve nothing that reads them.
+    wanted: list[tuple] = []
     log.info("evaluating health, storing postings, and matching against criteria")
     for res in results:
         company = by_name[res.company]
@@ -264,14 +330,8 @@ def cmd_check(args: argparse.Namespace) -> int:
             for posting in postings:
                 verdict = apply_override(match(posting, criteria), overrides)
                 store.record_verdict(conn, verdict, today)
-                # Ashby and Lever hand us the description for free in the bulk
-                # payload. Keep it only for the uncertain residual — that is the
-                # only bucket anything reads it for, and storing 9k full job
-                # descriptions to serve 674 of them is pure waste.
-                if verdict.decision.value == "uncertain" and posting.description:
-                    store.set_description(
-                        conn, posting.company, posting.ats_job_id, posting.description
-                    )
+                if verdict.decision.value in ("match", "uncertain"):
+                    wanted.append((company, posting))
                 if verdict.decision.value == "match" and posting in new_postings:
                     stats["matches"] += 1
         else:
@@ -279,6 +339,11 @@ def cmd_check(args: argparse.Namespace) -> int:
             log.warning("%s unhealthy: %s (%s)", company.name, health.status.value, res.error or "—")
             if is_degraded(health):
                 degraded.append(f"{company.name}={health.status.value}")
+
+    try:
+        _cache_descriptions(conn, fetcher, wanted, args.max_descriptions, today)
+    finally:
+        fetcher.close()
 
     # Rows stored before `posted_on` existed. The raw vendor values were already there
     # and already correct — just unsortable — so this is pure re-typing, no refetch.
@@ -386,7 +451,7 @@ def cmd_rematch(args: argparse.Namespace) -> int:
     overrides = store.load_overrides(conn)
     before = store.counts_by_verdict(conn)
     rows = conn.execute(
-        "SELECT company, ats_job_id, title, location, url, posted_at "
+        "SELECT company, ats_job_id, title, location, url, posted_at, posted_on "
         "FROM postings WHERE closed_at IS NULL"
     ).fetchall()
     for r in rows:
@@ -397,6 +462,7 @@ def cmd_rematch(args: argparse.Namespace) -> int:
             url=r["url"],
             location=r["location"] or "",
             posted_at=r["posted_at"],
+            posted_on=r["posted_on"],
         )
         store.record_verdict(conn, apply_override(match(posting, criteria), overrides), today)
     conn.commit()
@@ -426,7 +492,6 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     base_url = args.llm_url or os.environ.get("JOBTRACKER_LLM_URL", "")
 
     criteria = load_criteria(args.criteria)
-    companies = {c.name: c for c in config.load_companies(args.companies)}
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     rows = store.uncertain_for_resolution(conn, limit=args.limit)
 
@@ -453,14 +518,10 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         conn.close()
         return 0
 
-    fetcher = Fetcher()
     today = args.since or _today()
     kept = 0
     try:
-        verdicts, stats = resolve_mod.resolve_postings(
-            rows, companies, criteria, client,
-            fetcher=fetcher, store_mod=store, conn=conn, now=today,
-        )
+        verdicts, stats = resolve_mod.resolve_postings(rows, criteria, client)
         for v in verdicts:
             # Pin before recording. `check` re-derives a rules verdict from the title
             # for every posting it fetches, and the title is exactly what the rules
@@ -476,7 +537,6 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             store.record_verdict(conn, v, today)
         conn.commit()
     finally:
-        fetcher.close()
         client.close()
 
     conn.close()
@@ -712,6 +772,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--db", default=None)
     c.add_argument("--since", default=None, help="override today's date (YYYY-MM-DD)")
     c.add_argument("--output", default=None, help="write report to a file instead of stdout")
+    c.add_argument(
+        "--max-descriptions", type=int, default=400,
+        help="cap per-posting description fetches this run (default: 400). The "
+             "remainder is picked up tomorrow; only Greenhouse costs a request.",
+    )
     c.set_defaults(func=cmd_check)
 
     v = sub.add_parser("verify-slugs", help="fetch board identities; --write seeds them")
