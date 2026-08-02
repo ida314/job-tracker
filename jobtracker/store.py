@@ -759,15 +759,22 @@ def uncertain_for_resolution(
 ) -> list[sqlite3.Row]:
     """Open UNCERTAIN postings, with whatever description we already hold.
 
-    Includes rows whose description is NULL — the caller fetches those. Ordered
-    newest-first so a --limit run spends its budget on the freshest postings.
+    Rows whose description is NULL sort **last**, and that ordering is load-bearing for
+    `--limit`. `check` caches descriptions on a per-run budget, so on any night there
+    are uncertain postings it has not reached yet — and since this pass no longer
+    fetches, such a row is a guaranteed no-op. Ordering newest-first alone would hand a
+    limited run a budget's worth of postings it cannot read: observed on live data,
+    `--limit 40` considering 40 and resolving 0.
+
+    Within that, newest first, so the budget goes to the freshest readable postings.
     """
     sql = """
         SELECT p.company, p.ats_job_id, p.title, p.location, p.description
         FROM postings p JOIN verdicts v
           ON p.company=v.company AND p.ats_job_id=v.ats_job_id
         WHERE v.verdict='uncertain' AND p.closed_at IS NULL
-        ORDER BY p.first_seen DESC, p.company
+        ORDER BY (p.description IS NULL OR p.description = ''),
+                 p.first_seen DESC, p.company
     """
     if limit is not None:
         sql += f" LIMIT {int(limit)}"

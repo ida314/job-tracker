@@ -301,3 +301,32 @@ def test_rank_with_no_model_still_scores_what_it_has(tmp_path):
     conn = store.connect(db)
     assert store.ranked_matches(conn)[0]["score"] > 0  # rescored without a model
     conn.close()
+
+
+def test_the_resolve_queue_puts_readable_postings_first():
+    """`--limit` is worthless if the budget goes to postings with no description.
+
+    `check` caches descriptions on a per-run budget, so there are always uncertain
+    postings it has not reached. Since `resolve` no longer fetches, those are
+    guaranteed no-ops. Observed on live data before this ordering: `--limit 40`
+    considered 40 and resolved 0.
+    """
+    conn = store.connect(":memory:")
+    # One fetch carrying both — syncing them separately would close whichever was
+    # absent from the second call.
+    store.sync_postings(
+        conn, "Acme",
+        [Posting("Acme", "old", "SWE", "u"), Posting("Acme", "new", "SWE", "u")],
+        "2026-07-01",
+    )
+    conn.execute("UPDATE postings SET first_seen='2026-08-02' WHERE ats_job_id='new'")
+    for jid in ("old", "new"):
+        store.record_verdict(
+            conn, Verdict("Acme", jid, Decision.UNCERTAIN, "r", "rules"), "2026-07-01")
+    store.set_description(conn, "Acme", "old", "a description")
+
+    rows = store.uncertain_for_resolution(conn, limit=1)
+    assert [r["ats_job_id"] for r in rows] == ["old"]  # readable beats newer
+
+    # And without the limit, both are present — nothing is dropped from the queue.
+    assert len(store.uncertain_for_resolution(conn)) == 2
