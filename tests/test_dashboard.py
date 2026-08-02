@@ -116,3 +116,113 @@ def test_closed_postings_are_excluded():
     store.sync_postings(conn, "Acme", [], "2026-07-02")  # posting disappears -> closed
     doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22")
     assert "Backend Engineer" not in doc
+
+
+# -- Today's picks -----------------------------------------------------------------
+# The page's whole purpose is to shorten the distance between opening it and applying
+# to something, so these guard the picks against the ways they could silently vanish.
+def _ranked(conn, company, jid, score, why="because", loc="New York, NY"):
+    from jobtracker.llm.client import RankJudgment
+
+    store.record_judgment(conn, company, jid, RankJudgment("strong", "strong", "low", why),
+                          "h", "2026-07-22")
+    store.set_score(conn, company, jid, score, "2026-07-22")
+
+
+def _one_match(jid="1", title="Backend Engineer, New Grad", loc="New York, NY"):
+    return Posting("Acme", jid, title, f"https://x/{jid}", loc)
+
+
+def test_picks_render_above_the_tables_with_their_reasoning():
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5, why="owns the ingestion pipeline")
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+
+    assert doc.index('data-panel-body="today"') < doc.index('data-panel-body="all"')
+    assert "owns the ingestion pipeline" in doc
+    assert "88.5" in doc
+    assert "fit strong" in doc
+
+
+def test_picks_are_not_filterable():
+    """A tier or location filter set on another tab must not empty a curated list.
+
+    The filter JS selects `table[data-filterable]`; the picks are articles, not a
+    filterable table, which is what keeps them out of its reach.
+    """
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+
+    picks = doc[doc.index('data-panel-body="today"'):doc.index('data-panel-body="all"')]
+    assert "data-filterable" not in picks
+
+
+def test_unranked_matches_are_reported_not_hidden():
+    """A silently short list is indistinguishable from having found nothing."""
+    conn, companies = _setup(
+        [("Acme", _one_match("1"), Decision.MATCH),
+         ("Acme", _one_match("2"), Decision.MATCH)],
+        [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)          # only one of the two is judged
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "1 open match(es) are unranked" in doc
+
+
+def test_applied_and_skipped_postings_leave_the_picks():
+    conn, companies = _setup(
+        [("Acme", _one_match("1"), Decision.MATCH),
+         ("Acme", _one_match("2"), Decision.MATCH),
+         ("Acme", _one_match("3"), Decision.MATCH)],
+        [_company("Acme", 1)])
+    for jid, score in (("1", 90.0), ("2", 80.0), ("3", 70.0)):
+        _ranked(conn, "Acme", jid, score)
+    store.record_application(conn, "Acme", "1", "t", "applied", "2026-07-22")
+    store.set_deferral(conn, "Acme", "2", "skipped", "2026-07-22")
+
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    picks = doc[doc.index('data-panel-body="today"'):doc.index('data-panel-body="all"')]
+    assert "https://x/3" in picks
+    assert "https://x/1" not in picks and "https://x/2" not in picks
+
+
+def test_the_static_file_has_no_buttons_and_the_served_page_does():
+    """Buttons POST. The file written by `jobtracker dashboard` must stay offline and
+    read-only, so a dead button in it would be worse than no button."""
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+
+    static = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    served = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
+    assert 'data-act="applied"' not in static
+    assert 'data-act="applied"' in served
+    assert 'data-act="snoozed"' in served
+
+
+def test_tabs_carry_every_panel_server_side():
+    """JS only hides panels; with it off the whole page is still there."""
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    for panel in ("today", "all", "boards"):
+        assert f'data-panel-body="{panel}"' in doc
+        assert f'data-panel="{panel}"' in doc
+    assert doc.count("<script>") == 1  # tab JS lives in the one existing block
+
+
+def test_a_hostile_company_name_cannot_break_out_of_a_button_attribute():
+    """Button attributes carry company and job id straight back to the POST handler."""
+    evil = Posting('Ac"me', "1", "SWE", "https://x/1", "NYC")
+    conn = store.connect(":memory:")
+    store.sync_postings(conn, 'Ac"me', [evil], "2026-07-01")
+    store.record_verdict(
+        conn, Verdict('Ac"me', "1", Decision.MATCH, "w", "rules"), "2026-07-01")
+    _ranked(conn, 'Ac"me', "1", 90.0)
+
+    doc = dashboard.build_dashboard(
+        conn, [_company('Ac"me', 1)], "2026-07-22", interactive=True)
+    assert 'data-company="Ac"me"' not in doc
+    assert "Ac&quot;me" in doc

@@ -33,7 +33,7 @@ from collections import Counter
 from datetime import date
 from typing import Optional
 
-from . import store
+from . import rank as rank_mod, store
 from .criteria import Criteria
 from .match import location_label, location_rank
 from .models import Company
@@ -205,11 +205,75 @@ summary { cursor: pointer; font-size: 13.5px; color: var(--ink-2); padding: 4px 
 .cols div { font-size: 13px; padding: 2px 0; }
 footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
          color: var(--muted); font-size: 12px; }
+
+/* -- tabs ------------------------------------------------------------------------
+   Every panel is rendered server-side and present in the document; the script only
+   toggles [hidden]. With JS off, `.tabs` is hidden and all panels show stacked, so
+   the page degrades to exactly what it was before tabs existed. */
+.tabs { display: none; gap: 4px; margin: 22px 0 6px; border-bottom: 1px solid var(--grid); }
+.tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
+       color: var(--muted); font: inherit; font-size: 14px; padding: 8px 14px;
+       cursor: pointer; margin-bottom: -1px; }
+.tab:hover { color: var(--ink-2); }
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent);
+                             font-weight: 600; }
+.tab .n { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 5px; }
+
+/* -- today's picks ---------------------------------------------------------------- */
+.picks { display: grid; gap: 14px; margin: 6px 0 26px; }
+.pick { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+        padding: 16px 18px; display: grid; grid-template-columns: 34px 1fr; gap: 0 14px; }
+.pick .rank { font-size: 26px; font-weight: 700; color: var(--rule); line-height: 1;
+              grid-row: 1 / span 4; }
+.pick h3 { margin: 0 0 3px; font-size: 17px; line-height: 1.3; }
+.pick h3 a { color: var(--ink); text-decoration: none; }
+.pick h3 a:hover { text-decoration: underline; }
+.pick .meta { color: var(--muted); font-size: 12.5px; margin-bottom: 8px;
+              display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pick .why { font-size: 13.5px; color: var(--ink-2); line-height: 1.5;
+             border-left: 2px solid var(--grid); padding-left: 11px; margin-bottom: 10px; }
+.pick .terms { font-size: 11.5px; color: var(--muted); font-family: ui-monospace,
+               SFMono-Regular, Menlo, monospace; margin-bottom: 10px; }
+.pick .act { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.pick .act a.apply { background: var(--accent); color: #fcfcfb; text-decoration: none;
+                     padding: 6px 14px; border-radius: 6px; font-size: 13px;
+                     font-weight: 600; }
+.pick .act button { appearance: none; background: var(--page); color: var(--ink-2);
+                    border: 1px solid var(--rule); border-radius: 6px; font: inherit;
+                    font-size: 12.5px; padding: 6px 11px; cursor: pointer; }
+.pick .act button:hover { color: var(--ink); border-color: var(--ink-2); }
+.pick .act button[disabled] { opacity: .5; cursor: default; }
+.pick .score { font-variant-numeric: tabular-nums; }
+.gap { color: var(--serious); font-size: 12.5px; margin: -14px 0 24px; }
 """
 
 _JS = """
+// Tabs. Panels are server-rendered and all present; this only toggles [hidden].
+// Runs first and independently of the filter block below, so a page with no filter
+// bar (no criteria passed) still tabs correctly.
+(function () {
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  if (!tabs.length) return;
+  var bar = document.querySelector('.tabs');
+  if (bar) bar.style.display = 'flex';   // only shown once JS is confirmed running
+
+  function show(name) {
+    tabs.forEach(function (t) {
+      t.setAttribute('aria-selected', t.dataset.panel === name ? 'true' : 'false');
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-panel-body]'), function (p) {
+      p.hidden = p.dataset.panelBody !== name;
+    });
+  }
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () { show(t.dataset.panel); });
+  });
+  show(tabs[0].dataset.panel);
+})();
+
 (function () {
   var q = document.getElementById('q');
+  if (!q) return;
   var atsSel = document.getElementById('ats');
   var locSel = document.getElementById('loc');   // absent when no criteria were passed
   var chips = Array.prototype.slice.call(document.querySelectorAll('.chip[data-tier]'));
@@ -263,12 +327,18 @@ def build_dashboard(
     companies: list[Company],
     today: str,
     criteria: Criteria | None = None,
+    interactive: bool = False,
 ) -> str:
     """Return a complete HTML document. Pure read — never writes to `conn`.
 
     With `criteria`, postings are ordered by location preference (NYC, then the rest of
     the US, then unknown, then abroad) and the location filter appears. Location never
     removes a row from the page — it only decides reading order.
+
+    `interactive` adds the applied/skip/snooze buttons to Today's picks. It is only
+    ever True when rendered by `serve`, because those buttons POST — the file written
+    by `jobtracker dashboard` must stay a self-contained, offline, read-only artifact,
+    and dead buttons in it would be worse than no buttons.
     """
     by_name = {c.name: c for c in companies}
     matches = _by_location(store.open_postings_by_verdict(conn, "match"), criteria)
@@ -276,6 +346,10 @@ def build_dashboard(
     counts = store.counts_by_verdict(conn)
     run = store.last_run(conn)
     unhealthy = store.unhealthy_boards(conn)
+
+    ranked = store.ranked_matches(conn)
+    picks = rank_mod.top_n(ranked, 3, today)
+    unranked = sum(1 for r in ranked if r["score"] is None)
 
     parts: list[str] = []
     parts.append("<!doctype html>")
@@ -286,13 +360,26 @@ def build_dashboard(
     parts.append('</head><body><div class="wrap">')
 
     _header(parts, today, run, companies)
+    _tabs(parts, picks, matches, uncertain, unhealthy)
+
+    # Today first, and by itself: the point of the page is to shorten the distance
+    # between opening it and applying to something.
+    parts.append('<section data-panel-body="today">')
+    _picks(parts, picks, by_name, unranked, today, interactive, criteria)
+    parts.append("</section>")
+
+    parts.append('<section data-panel-body="all" hidden>')
     _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria)
     _tier_chart(parts, matches, by_name)
     _filters(parts, matches + uncertain, by_name, criteria)
     _table(parts, "Open matches", matches, by_name, "matches", False, criteria)
     _table(parts, "Uncertain — needs a human", uncertain, by_name, "uncertain", True, criteria)
+    parts.append("</section>")
+
+    parts.append('<section data-panel-body="boards" hidden>')
     _boards(parts, unhealthy, by_name)
     _manual(parts, companies)
+    parts.append("</section>")
 
     parts.append(
         '<footer>Generated by <code>jobtracker dashboard</code> from state.db. '
@@ -306,6 +393,104 @@ def build_dashboard(
 
 
 # -- sections ----------------------------------------------------------------------
+def _tabs(parts, picks, matches, uncertain, unhealthy) -> None:
+    """Three tabs. Hidden until JS confirms it is running — see the CSS note.
+
+    Order is the priority order: what to do now, then everything, then plumbing.
+    """
+    parts.append('<nav class="tabs" role="tablist">')
+    for name, label, count in (
+        ("today", "Today", len(picks)),
+        ("all", "All postings", len(matches) + len(uncertain)),
+        ("boards", "Boards", len(unhealthy)),
+    ):
+        badge = f'<span class="n">{count}</span>' if count else ""
+        parts.append(
+            f'<button class="tab" role="tab" data-panel="{name}" '
+            f'aria-selected="false">{html.escape(label)}{badge}</button>'
+        )
+    parts.append("</nav>")
+
+
+def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None) -> None:
+    """The three to apply to today.
+
+    Deliberately not a `data-filterable` table. The filter JS selects
+    `table[data-filterable]`, so a tier or location filter set on the All postings tab
+    would otherwise silently empty a curated list the user did not ask to filter.
+    """
+    parts.append("<h2>Apply to these today</h2>")
+    if not picks:
+        parts.append(
+            '<div class="empty">Nothing queued. Run <code>jobtracker rank</code> '
+            "after <code>check</code>, or you have dispositioned everything.</div>"
+        )
+    else:
+        parts.append('<div class="picks">')
+        for i, row in enumerate(picks, 1):
+            _pick(parts, i, row, by_name, today, interactive, criteria)
+        parts.append("</div>")
+
+    if unranked:
+        # The blind spot, stated. These are open matches the model has not read, and
+        # they are excluded from the picks above — a silently short list would be
+        # indistinguishable from having found nothing.
+        parts.append(
+            f'<p class="gap">{unranked} open match(es) are unranked and not shown — '
+            "the model has not read them yet. Run <code>jobtracker rank</code>.</p>"
+        )
+
+
+def _pick(parts, i, row, by_name, today, interactive, criteria=None) -> None:
+    tier = _tier_of(row["company"], by_name)
+    var = _band_var(tier)
+    days = rank_mod.days_since(row["posted_on"], today)
+    age = f"posted {days}d ago" if days is not None else "posted date unknown"
+    loc = row["location"] or "location unspecified"
+    # Same rule the tables use — one definition of "NYC", from criteria.yaml.
+    is_nyc = criteria is not None and location_rank(row["location"], criteria) == 0
+    pin = '<span class="pin">NYC</span> ' if is_nyc else ""
+
+    parts.append('<article class="pick">')
+    parts.append(f'<div class="rank">{i}</div>')
+    parts.append(
+        f'<h3><a href="{_safe_url(row["url"])}" target="_blank" rel="noopener">'
+        f'{html.escape(row["title"])}</a></h3>'
+    )
+    parts.append(
+        f'<div class="meta">{pin}<span class="tier" style="background:var({var});'
+        f'color:var({var}-ink)">T{tier if tier is not None else "?"}</span>'
+        f'<span>{html.escape(row["company"])}</span><span>·</span>'
+        f'<span>{html.escape(loc)}</span><span>·</span><span>{html.escape(age)}</span>'
+        f'<span>·</span><span class="score">score {row["score"]:.1f}</span></div>'
+    )
+    if row["why"]:
+        parts.append(f'<div class="why">{html.escape(row["why"])}</div>')
+    parts.append(
+        f'<div class="terms">fit {html.escape(row["backend_fit"])} · '
+        f'growth {html.escape(row["growth"])} · '
+        f'entry risk {html.escape(row["entry_risk"])}</div>'
+    )
+
+    parts.append('<div class="act">')
+    parts.append(
+        f'<a class="apply" href="{_safe_url(row["url"])}" target="_blank" '
+        f'rel="noopener">Apply</a>'
+    )
+    if interactive:
+        c = html.escape(row["company"], quote=True)
+        j = html.escape(row["ats_job_id"], quote=True)
+        for action, label in (
+            ("applied", "I applied"), ("skipped", "Skip"), ("snoozed", "Snooze 7d"),
+        ):
+            parts.append(
+                f'<button data-act="{action}" data-company="{c}" data-job="{j}">'
+                f"{label}</button>"
+            )
+    parts.append("</div>")
+    parts.append("</article>")
+
+
 def _header(parts, today, run, companies) -> None:
     parts.append(f"<h1>Job tracker — {html.escape(today)}</h1>")
     if run is None:
