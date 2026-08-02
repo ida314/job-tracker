@@ -107,3 +107,14 @@ def test_prose_hash_is_stable_across_loads(tmp_path):
     path = _write(tmp_path, _MINIMAL)
     assert load_profile(path).prose_hash == load_profile(path).prose_hash
     assert len(Profile().prose_hash) == 16
+
+
+def test_broken_yaml_is_a_clean_error_not_a_traceback(tmp_path):
+    """The likeliest edit mistake: a dedented line inside a `|` block.
+
+    A yaml.ScannerError is not a ValueError, so without translation it escapes
+    `cmd_rank`'s handler as a raw traceback on the one file meant to be hand-edited.
+    """
+    bad = "target_roles: |\n  Backend.\nAlso platform work.\n" + _MINIMAL
+    with pytest.raises(ValueError, match="not valid YAML"):
+        load_profile(_write(tmp_path, bad))

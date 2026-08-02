@@ -77,7 +77,14 @@ def load_profile(path: str | Path) -> Profile:
         raise FileNotFoundError(f"profile file not found: {path}")
 
     with path.open() as fh:
-        data = yaml.safe_load(fh)
+        try:
+            data = yaml.safe_load(fh)
+        except yaml.YAMLError as exc:
+            # This file is prose inside YAML block scalars and is edited by hand more
+            # often than anything else in the repo, so the likely error is a dedented
+            # continuation line. A ScannerError is not a ValueError, so without this it
+            # escapes the caller's handler as a raw traceback.
+            raise ValueError(f"{path}: not valid YAML — {exc}") from exc
 
     if not isinstance(data, dict):
         raise ValueError(f"{path}: expected a top-level mapping, got {type(data).__name__}")
