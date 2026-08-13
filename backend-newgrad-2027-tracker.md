@@ -494,6 +494,18 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_posting_seen:
 - notes: API gateway. 2026-07-09 — resolved: migrated Greenhouse → Ashby, slug is `kong`, not `konginc`.
 
+### Red Hat
+- ats: workday
+- slug: redhat / wd5 / jobs
+- board_url:
+- careers_page: https://redhat.wd5.myworkdayjobs.com/jobs
+- category: infra-opensource
+- check_method: manual
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-08-13 — added. Workday tenant `redhat.wd5`, site `jobs`, confirmed off redhat.com/en/jobs; greenhouse/lever/ashby `redhat` all 404, so there is no keyless JSON board — manual by rule. IBM-owned since 2019 but, unlike HashiCorp, has NOT migrated to IBM Careers; it still runs its own Workday. Tier 2 on the work, not the logo: RHEL, OpenShift, Ansible and Ceph are the product, so backend/distributed-systems is the core engineering. Caveat to check by hand: much of that engineering sits in Brno and Pune, and the US footprint is Raleigh and Boston — no NYC.
+
 ### Coralogix
 - ats: bespoke
 - slug:

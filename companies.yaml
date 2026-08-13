@@ -330,6 +330,22 @@
   careers_page: https://konghq.com/company/careers
   notes: 'API gateway. 2026-07-09 — resolved: migrated Greenhouse → Ashby, slug is `kong`, not `konginc`.'
   expected_board_name: kong
+- name: Red Hat
+  ats: workday
+  slug: redhat / wd5 / jobs
+  tier: 2
+  category: infra-opensource
+  check_method: manual
+  careers_page: https://redhat.wd5.myworkdayjobs.com/jobs
+  notes: 2026-08-13 — added. Workday tenant `redhat.wd5`, site `jobs`, read off redhat.com/en/jobs;
+    greenhouse/lever/ashby `redhat` all 404, so there is no keyless JSON board — manual by rule.
+    IBM-owned since 2019 but, unlike HashiCorp, has NOT moved to IBM Careers; it still runs its
+    own Workday, so re-read the careers page before assuming a migration. Tier 2 on the work
+    rather than the logo — RHEL, OpenShift, Ansible and Ceph are the product, so backend and
+    distributed systems are the core engineering, not a supporting function. Check locations by
+    hand — much of that engineering is in Brno and Pune, and the US footprint is Raleigh and
+    Boston, with no NYC presence.
+  expected_board_name: null
 - name: Coralogix
   ats: bespoke
   tier: 2

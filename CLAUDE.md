@@ -103,13 +103,20 @@ pretending to have checked it is not. Never let a `manual` entry silently report
 ## Validation state
 
 **Audited 2026-07-09.** Every `check_method: api` entry was fetched and its board identity
-confirmed against the company name. Current composition of the 98 entries:
+confirmed against the company name. Current composition of the 99 entries:
 
 | | Count | Status |
 |---|---|---|
 | `api` | 62 | All return valid JSON. 47 Greenhouse, 13 Ashby, 2 Lever. |
-| `manual` | 34 | Never scraped, by rule. Flagged weekly. |
+| `manual` | 35 | Never scraped, by rule. Flagged weekly. |
 | `aggregator` | 2 | GitHub new-grad lists, diffed daily. |
+
+**Red Hat added 2026-08-13** at tier 2, `manual`. Workday tenant `redhat.wd5` / site `jobs`,
+read off `redhat.com/en/jobs`; `greenhouse|lever|ashby/redhat` all 404, so there is no keyless
+JSON board and it may not be promoted to `api`. It is IBM-owned but, unlike HashiCorp, has not
+migrated to IBM Careers. Filed at tier 2 on the growth axis, not product category — RHEL,
+OpenShift, Ansible and Ceph mean backend *is* the engineering — with the caveat that much of
+that engineering is in Brno and Pune and the US footprint is Raleigh and Boston, no NYC.
 
 **Tier 6 added 2026-07-20** — seven Chinese frontier AI labs, all `manual`. None has a
 keyless JSON board; MiniMax, Zhipu, and Moonshot run Feishu/Lark boards that 405 on
@@ -215,7 +222,7 @@ it with the tuning loop and a regression check, not with a bare YAML edit.
 **Not yet done:**
 
 - **The tracker markdown is a stale mirror.** `status`, `last_checked`, and
-  `last_posting_seen` are still untouched across all 98 entries — not because nothing has
+  `last_posting_seen` are still untouched across all 99 entries — not because nothing has
   run, but because v2 keeps run state in `state.db` and never writes back to the markdown.
   Don't read the markdown to learn what happened; query `state.db` or open the dashboard.
 - The Ouckah/CVrve aggregator is still unwired — its 2026/2027 new-grad repo URL is
