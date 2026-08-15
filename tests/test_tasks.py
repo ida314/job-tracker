@@ -413,3 +413,47 @@ def test_an_explicit_unit_list_overrides_the_queue(criteria):
     assert conn.execute(
         "SELECT verdict FROM verdicts WHERE ats_job_id='1'").fetchone()[0] == "uncertain"
     conn.close()
+
+
+# -- what "no report" means ----------------------------------------------------------
+def _work_args(db_path, **over):
+    import argparse
+    base = dict(task=None, db=str(db_path), since=TODAY, criteria=str(config.CRITERIA_YAML),
+                profile=str(config.PROFILE_YAML), companies=str(config.COMPANIES_YAML),
+                answers=None, budget=None, concurrency=None, dry_run=False,
+                llm_url="http://router.invalid:8000", llm_model=None)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+@pytest.mark.parametrize("outcome,expected,forbidden", [
+    ("unreachable", "Router unreachable", "Nothing to do"),
+    ("drained", "Nothing to do", "Router unreachable"),
+])
+def test_a_down_router_and_an_empty_queue_do_not_read_the_same(
+        tmp_path, monkeypatch, capsys, outcome, expected, forbidden):
+    """Both end the run with no report, and they call for opposite responses.
+
+    Folded together — as they were — a drained queue printed "Router unreachable" at a
+    box whose router was fine, which is the same absence-misread-as-a-cause shape the
+    rest of this pipeline is built to avoid.
+    """
+    from jobtracker import cli
+
+    import jobtracker.llm as llm_pkg
+
+    db = tmp_path / "s.db"
+    store.connect(db).close()
+
+    async def _fake(*a, **k):
+        return cli.UNREACHABLE if outcome == "unreachable" else None
+
+    monkeypatch.setattr(cli, "_work", _fake)
+    # is_configured has to say yes, or cmd_work reports "no router" and never calls
+    # _work at all — a third state, and the one that is already distinct.
+    monkeypatch.setattr(llm_pkg, "is_configured", lambda *_a, **_k: True)
+
+    assert cli.cmd_work(_work_args(db)) == 0
+    out = capsys.readouterr().out
+    assert expected in out
+    assert forbidden not in out

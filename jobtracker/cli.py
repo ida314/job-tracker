@@ -879,6 +879,13 @@ def _refresh_gap_stubs(conn, ctx) -> int:
     return len(gaps)
 
 
+# `_work` has three outcomes, and two of them are "no report": the router could not be
+# reached, or every task was drained. They read identically in the database and call for
+# opposite responses from whoever is looking — go fix the GPU, versus nothing at all — so
+# they are kept apart here rather than both surfacing as None.
+UNREACHABLE = object()
+
+
 async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None):
     """Build a client, run one task, tear the client down. Async because the SDK is."""
     from . import llm as llm_pkg
@@ -888,8 +895,11 @@ async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None):
     client = llm_pkg.LlmClient(model=getattr(args, "llm_model", None), base_url=base_url)
     try:
         if not await client.probe():
-            # Unreachable is not an error: the queue is simply left as it was.
-            return None
+            # Unreachable is not an error: the queue is simply left as it was. It is
+            # reported as its own state rather than folded into `run_next`'s None,
+            # because "the router is down" and "there was nothing to do" ask for
+            # opposite responses and used to print the same sentence.
+            return UNREACHABLE
         from .tasks import DEFAULT_CONCURRENCY
 
         return await run_next(
@@ -954,9 +964,14 @@ def cmd_work(args: argparse.Namespace) -> int:
             return 0
 
         report = asyncio.run(_work(args, conn, ctx, args.task))
-        if report is None:
+        if report is UNREACHABLE:
             _print_survey(candidates)
             print("\nRouter unreachable — the queue was left as it was.")
+            return 0
+        if report is None:
+            _print_survey(candidates)
+            print("\nNothing to do — every task is drained or waiting on something "
+                  "else. The survey above says which.")
             return 0
 
         log.info("work complete: %s", report.summary())
@@ -1077,7 +1092,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
         ctx = _build_context(args, today)
         log.info("judging %d match(es) against profile %s", len(pending), profile.prose_hash)
         report = asyncio.run(_work(args, conn, ctx, "judge"))
-        if report is not None:
+        if report is not None and report is not UNREACHABLE:
             # `judged` and `unreadable` come off the task report rather than being
             # recounted here — the runner is what actually knows, and it already
             # committed each judgment as it landed.
