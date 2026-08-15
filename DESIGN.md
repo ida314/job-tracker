@@ -322,12 +322,15 @@ change; what changed is that they are now stated once instead of three times.
    agent is dispatched to read the company's careers page, locate the current board
    identifier — a Greenhouse `job_board?for=X` embed, or a link to `jobs.lever.co/X` — and
    open a pull request against `companies.yaml`.
-   Constrained decoding (`guided_json`) turned out to matter more than model choice:
-   malformed output stops being a failure mode you parse around. The client validates
-   anyway, since a server ignoring the field would otherwise let prose through as a
-   verdict.
-2. **Repair** — **implemented** as `jobtracker repair`; see `docs/repair.md`. When the
-   stored board health says `IDENTITY_DRIFT`, persistent `FETCH_FAILED`, or an alerting
+
+   Recovering a slug from an arbitrary careers page is genuinely unstructured work that
+   resists a scraper, and it is where an LLM has a real advantage. But it would run as an
+   **exception handler, invoked by a deterministic detector**, against a human-reviewed
+   diff — not as the main loop. The system decides *that* something broke; the model helps
+   decide *what to do about it*.
+
+   **Implemented** as `jobtracker repair`; see `docs/repair.md`. When the stored board
+   health says `IDENTITY_DRIFT`, persistent `FETCH_FAILED`, or an alerting
    `SUSPECT_EMPTY`, the company's careers page is read for the current board identifier
    and the candidate is verified against the live API before anyone sees it.
    The structure this section asked for held: an **exception handler, invoked by a

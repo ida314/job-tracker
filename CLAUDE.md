@@ -652,9 +652,10 @@ Three things learned from live forms; all are handled and none is obvious:
   DESIGN.md §3.4 exists to prevent.
 ## Slug repair
 
-`jobtracker repair`, documented in `docs/repair.md`. The third and last of the model's
-bounded roles (DESIGN.md §8), and the only one where the model is a *fallback* rather
-than the mechanism. Deterministic regexes read the careers page first; the model is asked
+`jobtracker repair`, documented in `docs/repair.md`. The **second** of the model's four
+bounded roles as DESIGN.md §8 numbers them — the last to be built, though not the last in
+the list; `prefill` is the fourth and narrowest. It is the only one where the model is a
+*fallback* rather than the mechanism. Deterministic regexes read the careers page first; the model is asked
 only about pages they could not parse.
 
 - **The trigger set is narrower than `is_degraded()` on one axis and wider on another,
