@@ -21,6 +21,7 @@ Subcommands:
   decide        record a judgment on one posting; --pin makes it an override
   apply         record an application and its outcome
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
+  repair        read careers pages for broken boards' new slugs; --write applies
   add-company   append a curated entry to companies.yaml
   migrate       backend-newgrad-2027-tracker.md -> companies.yaml (one-time)
 
@@ -45,7 +46,7 @@ from typing import Optional
 import yaml
 from opentelemetry import metrics
 
-from . import config, report as report_mod, store, telemetry, tuning
+from . import config, health as health_mod, report as report_mod, store, telemetry, tuning
 from .criteria import load_criteria
 from .tuning import apply_override
 from .fetch import Fetcher
@@ -455,16 +456,268 @@ def cmd_verify_slugs(args: argparse.Namespace) -> int:
 
 
 def _write_expected_board_names(path: str | Path, observed: dict[str, str]) -> None:
-    path = Path(path)
-    data = yaml.safe_load(path.read_text())
-    for entry in data:
-        name = entry.get("name")
-        if name in observed:
-            entry["expected_board_name"] = observed[name]
-    from .migrate import _HEADER
+    _rewrite_companies(
+        path, {name: {"expected_board_name": value} for name, value in observed.items()}
+    )
 
-    body = yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100)
-    path.write_text(_HEADER + body)
+
+def _rendered_companies(path: str | Path, updates: dict[str, dict]) -> str:
+    """companies.yaml with `updates` applied, as text. Does not touch the file.
+
+    Edits the lines it changes rather than round-tripping the document through
+    `safe_load`/`safe_dump`, and that is the whole point rather than a nicety. PyYAML
+    re-folds every long string to its own width, so a round-trip to change one `slug:`
+    also re-wraps the hand-written `notes:` prose on a dozen unrelated entries. Measured
+    on the real file: a one-line repair produced a diff touching ten other companies.
+
+    That noise is fatal specifically here. The deliverable of `repair` is a diff a human
+    reads before believing it, and a diff you have to search for the change in is one
+    nobody reads. So the editor is line-oriented: find the entry, replace the scalar,
+    leave every other byte — including comments — exactly where it was.
+
+    Only single-line scalar fields are supported, which is all a repair changes
+    (`ats`, `slug`, `expected_board_name`). Rendering and writing are split so the diff
+    a human reviews and the bytes that land come from the same function.
+    """
+    text = Path(path).read_text()
+    for name, fields in updates.items():
+        text = _edit_entry(text, name, fields)
+    return text
+
+
+def _edit_entry(text: str, name: str, fields: dict) -> str:
+    """Replace scalar fields on one `- name: X` block, in place."""
+    lines = text.splitlines(keepends=True)
+    start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            # Parse the scalar rather than string-comparing it: a name needing quotes
+            # in YAML would otherwise never match itself.
+            if line.startswith("- name:")
+            and yaml.safe_load(line.split(":", 1)[1].strip()) == name
+        ),
+        None,
+    )
+    if start is None:
+        raise KeyError(f"{name!r} not found in companies.yaml")
+    end = next(
+        (j for j in range(start + 1, len(lines)) if lines[j].startswith("- ")), len(lines)
+    )
+
+    for key, value in fields.items():
+        rendered = "  " + yaml.safe_dump(
+            {key: value}, default_flow_style=False, allow_unicode=True, width=10**6
+        ).rstrip("\n") + "\n"
+        at = next(
+            (j for j in range(start, end) if lines[j].startswith(f"  {key}:")), None
+        )
+        if at is None:
+            lines.insert(start + 1, rendered)
+            end += 1
+            continue
+        # A scalar can still be folded across continuation lines; they are indented
+        # deeper than the key and belong to it, so they go with it.
+        stop = at + 1
+        while stop < end and lines[stop].startswith("    "):
+            stop += 1
+        lines[at:stop] = [rendered]
+        end -= stop - at - 1
+
+    return "".join(lines)
+
+
+def _rewrite_companies(path: str | Path, updates: dict[str, dict]) -> None:
+    """Apply field updates to companies.yaml in place.
+
+    The one writer the foreground commands share (`verify-slugs --write`, `repair
+    --write`). No *scheduled* run may call this: companies.yaml is curated data, and
+    keeping machine state out of it is DESIGN.md §2.3.
+    """
+    Path(path).write_text(_rendered_companies(path, updates))
+
+
+def _has_inline_comments(path: str | Path) -> bool:
+    """Does this file carry `#` comments below its header block?
+
+    `migrate` and `add-company` still round-trip the document through PyYAML, which
+    preserves values and discards comments. Today that is harmless — companies.yaml
+    carries only its header, and the per-entry prose lives in `notes:`, which is a value
+    — so this is the guard that keeps it harmless if someone later writes a `#` note
+    next to an entry.
+
+    Skips the *leading comment block* rather than matching `_HEADER` verbatim. Matching
+    the constant would mean any future edit to the header text turns the real file's own
+    header into "inline comments" and blocks every write, which is a trap disguised as a
+    safety check.
+    """
+    lines = Path(path).read_text().splitlines()
+    i = 0
+    while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith("#")):
+        i += 1
+    return any(line.lstrip().startswith("#") for line in lines[i:])
+
+
+# -- repair ------------------------------------------------------------------------
+def cmd_repair(args: argparse.Namespace) -> int:
+    """Find and verify new slugs for boards that have been broken long enough.
+
+    Propose-only unless `--write`. The whole point of the separation is that this can
+    run unattended — after a degraded night, from a timer — without any path by which a
+    scheduled process rewrites hand-verified curation data (DESIGN.md §2.3).
+    """
+    from . import repair as repair_mod
+    from .models import BoardHealth, HealthStatus
+
+    companies = config.load_companies(args.companies)
+    companies_path = Path(args.companies or config.COMPANIES_YAML)
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = args.since or _today()
+    by_name = {c.name: c for c in companies}
+
+    outcomes: list = []
+    if args.company:
+        # Named boards bypass the detector entirely. This is how you exercise the pass
+        # on a board you already know moved, and how you test it.
+        targets = []
+        for name in args.company:
+            company = by_name.get(name)
+            if company is None:
+                print(f"error: unknown company {name!r}", file=sys.stderr)
+                conn.close()
+                return 1
+            health = store.get_health(conn, name)
+            trigger = health.status.value if health else "forced"
+            if not company.careers_page:
+                outcomes.append(
+                    repair_mod.Outcome(name, trigger, "no_careers_page",
+                                       "no careers_page in companies.yaml to read")
+                )
+                continue
+            targets.append(
+                repair_mod.RepairTarget(
+                    company, health or BoardHealth(name, HealthStatus.OK), trigger
+                )
+            )
+    else:
+        targets, outcomes = repair_mod.detect(
+            companies, store.unhealthy_health(conn), args.min_failures
+        )
+
+    if args.limit:
+        targets = targets[: args.limit]
+
+    if not targets and not outcomes:
+        print("No boards need repair.")
+        conn.close()
+        return EXIT_OK
+
+    # Regex-only, since the model transport moved to sir-client (2026-08-13). The old
+    # `find_board` call lived on the provider-based client that rewrite replaced, and it
+    # was never the primary path — nine ordered regexes resolve most careers pages
+    # outright, and the model only ever produced a *candidate* that faced the identical
+    # verification a regex hit does. So losing it costs coverage on JavaScript-shell
+    # pages and nothing else; those already reported `no_candidates` and still do.
+    #
+    # To restore it: port `find_board` onto `LlmClient.complete(system, user, schema)`,
+    # which is async, and keep the grounding check in `repair._ask_model` where it is —
+    # a model slug must still appear on the page it was shown.
+    client = None
+
+    fetcher = Fetcher()
+
+    def verify(company, candidate):
+        # Probe the candidate board through the real adapter for its ATS. Reusing
+        # fetch_company means identity resolution, retries and the per-host limiter all
+        # apply — a candidate is checked exactly the way a nightly board is.
+        return fetcher.fetch_company(
+            replace(company, ats=candidate.ats, slug=candidate.slug)
+        )
+
+    try:
+        proposals, more_outcomes, stats = repair_mod.repair_boards(
+            targets, fetcher.fetch_page, verify, client=client
+        )
+    finally:
+        fetcher.close()
+        if client is not None:
+            client.close()
+
+    outcomes = outcomes + more_outcomes
+    for proposal in proposals:
+        store.record_proposal(conn, proposal, today)
+    conn.commit()
+
+    text = repair_mod.render(proposals, outcomes, stats)
+    if stats.no_candidate:
+        text += (
+            f"\n{stats.no_candidate} board(s) produced no verified candidate. Their "
+            "careers pages carry no board identifier the regexes can read —\n"
+            "  typically a JavaScript shell (HubSpot's is 519 KB with neither "
+            "`greenhouse` nor `hubspotjobs` in it). Read the slug off the\n"
+            "  rendered page by hand, then `add-company`/edit companies.yaml.\n"
+        )
+
+    updates = {
+        p.company: {
+            "ats": p.to_ats,
+            "slug": p.to_slug,
+            # Must move with the slug. Leaving the dead board's name behind would make
+            # the *repaired* board fail identity on the very next run, turning a fix
+            # into a new IDENTITY_DRIFT.
+            "expected_board_name": p.board_name or None,
+        }
+        for p in proposals
+    }
+
+    if proposals:
+        text += "\n## Proposed companies.yaml change\n\n```diff\n"
+        text += _companies_diff(companies_path, updates)
+        text += "```\n"
+        if not args.write:
+            text += (
+                "\nNothing was written. Re-run with --write to apply, "
+                "or edit companies.yaml by hand.\n"
+            )
+
+    print(text)
+
+    if args.write and proposals:
+        if _has_inline_comments(companies_path):
+            log.error(
+                "%s contains `#` comments outside the header; refusing to write "
+                "because the YAML round-trip would delete them. Apply by hand.",
+                companies_path,
+            )
+            conn.close()
+            return 1
+        _rewrite_companies(companies_path, updates)
+        try:
+            config.load_companies(companies_path)
+        except Exception as exc:  # noqa: BLE001 — a bad write must be loud, not silent
+            log.error("%s no longer parses after the write: %s", companies_path, exc)
+            conn.close()
+            return 1
+        for proposal in proposals:
+            store.mark_proposal_applied(conn, proposal.company, today)
+        conn.commit()
+        log.info("applied %d repair(s) to %s", len(proposals), companies_path)
+
+    conn.close()
+    # Boards that are still broken with no verified fix are exactly what a human needs
+    # to look at, so the exit status says so rather than reporting a clean run.
+    return EXIT_DEGRADED if outcomes else EXIT_OK
+
+
+def _companies_diff(path: Path, updates: dict[str, dict]) -> str:
+    """A unified diff of the proposed change, from the same renderer that writes it."""
+    import difflib
+
+    before = path.read_text().splitlines(keepends=True)
+    after = _rendered_companies(path, updates).splitlines(keepends=True)
+    return "".join(
+        difflib.unified_diff(before, after, fromfile=str(path), tofile=str(path), n=3)
+    )
 
 
 # -- rematch -----------------------------------------------------------------------
@@ -1333,6 +1586,30 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("verify-slugs", help="fetch board identities; --write seeds them")
     v.add_argument("--write", action="store_true")
     v.set_defaults(func=cmd_verify_slugs)
+
+    rp = sub.add_parser(
+        "repair", help="read careers pages for broken boards' new slugs; --write applies"
+    )
+    rp.add_argument("--db", default=None)
+    rp.add_argument("--since", default=None, help="override today's date (YYYY-MM-DD)")
+    rp.add_argument(
+        "--company", action="append", default=None,
+        help="repair this company regardless of health (repeatable)",
+    )
+    rp.add_argument(
+        "--min-failures", type=int, default=health_mod.REPAIR_FAILURE_THRESHOLD,
+        help="consecutive failed nights before a FETCH_FAILED board qualifies "
+             f"(default: {health_mod.REPAIR_FAILURE_THRESHOLD})",
+    )
+    rp.add_argument("--limit", type=int, default=None, help="cap boards worked this run")
+    rp.add_argument(
+        "--write", action="store_true",
+        help="apply verified proposals to companies.yaml (default: propose only)",
+    )
+    # No --llm-* flags: this pass is regex-only since the transport moved to sir-client.
+    # Accepting them would advertise a fallback that no longer exists, and a flag that
+    # silently does nothing is worse than an absent one.
+    rp.set_defaults(func=cmd_repair)
 
     rm = sub.add_parser("rematch", help="re-apply criteria to stored postings (no network)")
     rm.add_argument("--criteria", default=str(config.CRITERIA_YAML))

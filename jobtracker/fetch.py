@@ -229,6 +229,26 @@ class Fetcher:
             # No sleep on the final attempt — there is nothing left to wait for.
             log.warning("%s -> %s; giving up after %d attempts", url, reason, MAX_RETRIES)
 
+    def fetch_page(self, url: str) -> tuple[str | None, str | None]:
+        """One HTML page — a company's careers page — as `(text, error)`.
+
+        Goes through `_request_text` so a careers host gets the same per-host governor,
+        retry policy and trace shape as any board. Slug repair must not open a second,
+        unpaced path to the network for exactly the reason `fetch_job_detail` does not:
+        the remote host is the scarce resource, and there is only one governor.
+
+        Returns the error rather than raising. A careers page that 404s is a fact about
+        the curated data, and the repair pass reports it as one.
+        """
+        with tracer.start_as_current_span("fetch.page") as span:
+            span.set_attribute("url.full", url)
+            span.set_attribute("server.address", urlparse(url).netloc)
+            _status, text, error = self._request_text(url)
+            if error:
+                span.set_status(trace.Status(trace.StatusCode.ERROR, error))
+                return None, error
+            return text, None
+
     # -- one company -----------------------------------------------------------------
     def fetch_job_detail(self, company: Company, ats_job_id: str):
         """One posting's (description, posted_at) — `(None, None)` if unavailable.

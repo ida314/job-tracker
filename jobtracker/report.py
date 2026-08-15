@@ -105,6 +105,10 @@ def _uncertain(lines, conn, since) -> None:
 
 def _failures(lines, conn, by_name) -> None:
     rows = store.unhealthy_boards(conn)
+    # A verified repair belongs under the board it repairs, in the artifact a human
+    # already reads every morning. That is the difference between "human-reviewable"
+    # and "reviewable in principle if you remember another command exists".
+    proposals = {p["company"]: p for p in store.open_proposals(conn)}
     lines.append(f"## Board failures ({len(rows)})")
     lines.append("")
     if not rows:
@@ -118,6 +122,16 @@ def _failures(lines, conn, by_name) -> None:
         lines.append(
             f"- **{r['company']}**{slug} — `{r['last_status']}`{flag}: {r['detail']}"
         )
+        p = proposals.get(r["company"])
+        if p:
+            weak = " ⚠ provenance only" if p["evidence_kind"] == "provenance" else ""
+            board = p["board_name"] or "—"
+            lines.append(
+                f"  ↳ repair proposed: `{p['to_ats']}/{p['to_slug']}` — "
+                f"{p['job_count']} jobs, board \"{board}\"{weak} "
+                f"(verified {p['verified_at']}). "
+                f"Apply: `jobtracker repair --company \"{r['company']}\" --write`"
+            )
     lines.append("")
 
 

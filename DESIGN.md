@@ -100,7 +100,7 @@ judgment?**
 
 ```
 ┌───────────────────┐
-│  companies.yaml   │  curated · human-authored · git-tracked · never machine-written
+│  companies.yaml   │  curated · human-authored · git-tracked · no scheduled run writes it
 └─────────┬─────────┘
           │
           ▼
@@ -322,12 +322,50 @@ change; what changed is that they are now stated once instead of three times.
    agent is dispatched to read the company's careers page, locate the current board
    identifier — a Greenhouse `job_board?for=X` embed, or a link to `jobs.lever.co/X` — and
    open a pull request against `companies.yaml`.
+   Constrained decoding (`guided_json`) turned out to matter more than model choice:
+   malformed output stops being a failure mode you parse around. The client validates
+   anyway, since a server ignoring the field would otherwise let prose through as a
+   verdict.
+2. **Repair** — **implemented** as `jobtracker repair`; see `docs/repair.md`. When the
+   stored board health says `IDENTITY_DRIFT`, persistent `FETCH_FAILED`, or an alerting
+   `SUSPECT_EMPTY`, the company's careers page is read for the current board identifier
+   and the candidate is verified against the live API before anyone sees it.
+   The structure this section asked for held: an **exception handler, invoked by a
+   deterministic detector**, producing a human-reviewed diff, never the main loop. Three
+   things came out differently, and all three are worth recording.
 
-   Recovering a slug from an arbitrary careers page is genuinely unstructured work that
-   resists a scraper, and it is where an LLM has a real advantage. But it would run as an
-   **exception handler, invoked by a deterministic detector**, against a human-reviewed
-   diff — not as the main loop. The system decides *that* something broke; the model helps
-   decide *what to do about it*. Still deferred.
+   - **The scraper was not the hard part.** This section called slug recovery "genuinely
+     unstructured work that resists a scraper", and mostly it is not — a page that embeds
+     a hosted board contains the board URL literally, because that is how embedding works.
+     Nine ordered regexes resolve three of eight live careers pages outright. So the model
+     is the *fallback*, invoked only on pages the regexes could not parse, and its answer
+     is a candidate rather than an answer: it must appear on the page it was shown, and it
+     then faces the identical verification a regex hit does. The model cannot propose
+     anything a regex could not have proposed. Where the section was right is the residual
+     — but the residual is smaller than it assumed, and the honest limit is lower too. Some
+     careers pages are JavaScript shells containing no identifier at all (HubSpot's is 519
+     KB with neither `greenhouse` nor `hubspotjobs` anywhere in it), and nothing reading
+     the served HTML can recover those.
+
+   - **No pull request.** It writes a proposal row and prints a diff; `--write` applies it.
+     A PR needs a git identity and push credentials the container does not have and should
+     not have, and §4's boundary keeps orchestration out of this repo entirely. The
+     reviewable-diff property survives, one `git diff` later.
+
+   - **A third trigger.** The section named drift and persistent fetch failure. Alerting
+     `SUSPECT_EMPTY` had to be added, because the failure mode this document cites most
+     never presents as either: `greenhouse/hubspot` is a real, reachable board that answers
+     200 with an empty array forever, and Mercury and Vercel each left one behind on
+     migrating. Non-alerting `SUSPECT_EMPTY` is excluded, which is what keeps dbt Labs and
+     Root Insurance — permanently and correctly empty — from being "repaired" nightly.
+
+   Verification is where the value actually is, and it is deterministic. A candidate is
+   rejected if the board is empty (§7.1 again: a real-but-dead board is not a repair) or if
+   its identity does not match (§7.2). One asymmetry is worth naming: only Greenhouse has
+   an identity endpoint separate from the slug, so Ashby and Lever candidates rest on
+   *provenance* — the link came off the company's own careers page — which is a genuine
+   claim and a weaker one. It is labelled as such in every proposal rather than dressed up
+   as an identity match.
 
 3. **Ranking** (added 2026-08-02) — **implemented** as `jobtracker rank`; see
    `docs/ranking.md`. Matching answers "is this on-target"; this answers "which of the
@@ -415,7 +453,7 @@ Planned expansion, in descending value-per-hour:
 | Tuning loop (decisions, `eval`, suggestions, overrides) | **Complete** — `docs/tuning.md` |
 | Tuning UI (`jobtracker serve`) | **Complete** — stdlib only, localhost, writes back |
 | Ambiguity pass (§6) — local, provider-pluggable | **Complete** — `docs/llm.md`; vLLM first |
-| Slug-repair agent (§8) | Deferred |
+| Slug-repair agent (§8) | **Complete** — `docs/repair.md`; regex-first, model as fallback |
 | Aggregator sources (§9) | Deferred — still never fetched |
 
 The verified slug data is the asset worth preserving from version 1. The audit that
@@ -433,8 +471,8 @@ Associate), so a MATCH now additionally requires an engineering signal — this 
 from 129 (mostly noise) to 27 genuine SWE entry/new-grad roles, leaving 1,109 UNCERTAIN to
 read by hand.
 
-**Since that run.** The ambiguity pass (§6/§8) is implemented and local; the slug-repair
-agent (§8) is still deferred. Two things the first live run could not have shown:
+**Since that run.** All three model roles in §8 are implemented and local. Two things the
+first live run could not have shown:
 
 The engineering gate was necessary but not sufficient. Stripe's *"Seller Systems
 Operations Associate (Night Shift)"* matched on `level:associate+role:systems` — the

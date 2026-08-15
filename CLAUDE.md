@@ -82,6 +82,12 @@ When a slug fails, read the real one off the careers page — the Greenhouse emb
 (`job_board?for=X`), or a link to `job-boards.greenhouse.io/X`, `jobs.lever.co/X`,
 `jobs.ashbyhq.com/X`. Then update `ats`, `slug`, `board_url`, and `notes` together.
 
+**That procedure is now executable as `jobtracker repair`** (see "Slug repair" below and
+`docs/repair.md`). It does the same reading and the same verifying, and it stops where
+this rule says to stop: it proposes a diff, and a human applies it. Do it by hand when
+the page is a JavaScript shell — that is the documented blind spot, not a bug to fix in
+the regexes.
+
 Do **not** verify an Ashby slug by fetching `jobs.ashbyhq.com/{slug}` and checking the
 status code — that host returns a 200 SPA shell for any string. Use the posting-api, or
 the `ApiJobBoardWithTeams` GraphQL operation.
@@ -175,8 +181,13 @@ following the `pre-audit baseline` commit.
 **Valid but currently empty** — correct slugs, genuinely zero open reqs. Do not "fix"
 these; they are not broken:
 
-- `greenhouse/dbtlabsinc` (dbt Labs)
 - `greenhouse/root` (Root Insurance)
+- ~~`greenhouse/dbtlabsinc` (dbt Labs)~~ — **no longer true as of 2026-08-03.** The board
+  now returns HTTP 404, so this is `FETCH_FAILED`, not empty: the slug is gone, not idle.
+  `repair` detects it and finds nothing, because `getdbt.com/about-us/careers` is a 1.4 MB
+  JS shell that never mentions Greenhouse — the documented blind spot. Needs a slug read
+  off the rendered page by hand. Until then it is a legitimate `EXIT_DEGRADED` every night,
+  which is a real signal, not the permanent-empty exemption it used to have.
 
 **Matching has run, and `resolve` has now drained the queue (2026-07-25).** Verdicts
 in `state.db` by who decided them:
@@ -639,7 +650,50 @@ Three things learned from live forms; all are handled and none is obvious:
   are known, and **zero fields discovered is reported as "no application form found",
   never as "0/0 filled, nothing left to do"** — absence read as success is the failure
   DESIGN.md §3.4 exists to prevent.
+## Slug repair
 
+`jobtracker repair`, documented in `docs/repair.md`. The third and last of the model's
+bounded roles (DESIGN.md §8), and the only one where the model is a *fallback* rather
+than the mechanism. Deterministic regexes read the careers page first; the model is asked
+only about pages they could not parse.
+
+- **The trigger set is narrower than `is_degraded()` on one axis and wider on another,
+  and both differences matter.** `IDENTITY_DRIFT` fires immediately (the assertion is
+  deterministic over two stable strings). `FETCH_FAILED` needs `REPAIR_FAILURE_THRESHOLD`
+  = 2 consecutive *nights* — `fetch.py` already burned `MAX_RETRIES` inside the run, so
+  anything transient is absorbed a layer down, and rewriting a hand-verified slug because
+  a CDN hiccuped once is the expensive mistake. Alerting `SUSPECT_EMPTY` is included
+  because a dead board never presents as `FETCH_FAILED`.
+- **Non-alerting `SUSPECT_EMPTY` never triggers.** dbt Labs and Root Insurance would
+  otherwise be "repaired" every night. There is a test named after them.
+- **`manual` and `aggregator` companies are never targets.** A careers page is a scrape.
+- **Nothing is proposed on the strength of a string.** Every candidate — regex or model —
+  is fetched through the real `Source` adapter and rejected if the board is empty (the
+  `greenhouse/hubspot` rule) or its identity does not match (the `ashby/cedar` rule).
+  Both have named regression tests; do not weaken them.
+- **`no_identity` is checked before `wrong_company`.** `health.identity_matches` returns
+  True when either side is empty — right for the nightly loop, catastrophic here, where
+  it would read "the identity endpoint 500'd" as "verified".
+- **Ashby and Lever identity is tautological for a candidate slug**, because it is derived
+  from the job URL and therefore just restates the candidate. Those proposals are accepted
+  on *provenance* (the link came off the company's own careers page) and labelled
+  `evidence_kind: provenance` with sample titles attached. Never let that comparison read
+  as identity proof.
+- **A model slug must appear on the page it was shown**, after a `/` or `=`, case-
+  sensitively. A bare substring test is not enough: the company name is all over its own
+  careers page, so every invented slug would ground.
+- **`repair` never writes without `--write`,** and `--write` moves `expected_board_name`
+  along with the slug — leaving the dead board's name behind would make the repaired board
+  drift on the very next run.
+- **The companies.yaml writer is line-oriented, not a YAML round-trip.** PyYAML re-folds
+  long strings to its own width, so a round-trip to change one `slug:` re-wraps `notes:`
+  prose on unrelated entries — measured, ten of them. The deliverable here is a diff
+  somebody reads, and reflow noise destroys that. `verify-slugs --write` shares the writer
+  and got the same fix.
+- **Known blind spot, do not "fix" it in the regexes.** A careers page that renders its
+  board link in JavaScript often contains no identifier at all — HubSpot's is 519 KB with
+  neither `greenhouse` nor `hubspotjobs` in it. Those report `no_candidates` and stay
+  visible.
 ## Aggregator sources
 
 `jobtracker/sources/aggregator.py`. Community new-grad list repos (SimplifyJobs-style) are

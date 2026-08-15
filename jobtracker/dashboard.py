@@ -389,6 +389,7 @@ def build_dashboard(
     counts = store.counts_by_verdict(conn)
     run = store.last_run(conn)
     unhealthy = store.unhealthy_boards(conn)
+    proposals = {p["company"]: p for p in store.open_proposals(conn)}
 
     ranked = store.ranked_matches(conn)
     picks = rank_mod.top_n(ranked, 3, today)
@@ -421,7 +422,7 @@ def build_dashboard(
     parts.append("</section>")
 
     parts.append('<section data-panel-body="boards" hidden>')
-    _boards(parts, unhealthy, by_name)
+    _boards(parts, unhealthy, by_name, proposals)
     _manual(parts, companies)
     parts.append("</section>")
 
@@ -776,7 +777,7 @@ _STATUS_STYLE = {
 }
 
 
-def _boards(parts, unhealthy, by_name) -> None:
+def _boards(parts, unhealthy, by_name, proposals=None) -> None:
     parts.append(f"<h2>Flagged boards ({len(unhealthy)})</h2>")
     if not unhealthy:
         parts.append('<div class="empty">All boards healthy.</div>')
@@ -790,7 +791,8 @@ def _boards(parts, unhealthy, by_name) -> None:
         "belongs to the company we think it does, and its postings were discarded.</p>"
     )
     parts.append("<table><thead><tr><th>Company</th><th>Status</th><th>Board</th>"
-                 "<th>Detail</th></tr></thead><tbody>")
+                 "<th>Detail</th><th>Proposed fix</th></tr></thead><tbody>")
+    proposals = proposals or {}
     for r in unhealthy:
         status = r["last_status"]
         color, icon, word = _STATUS_STYLE.get(status, ("muted", "•", status))
@@ -803,9 +805,34 @@ def _boards(parts, unhealthy, by_name) -> None:
             f'style="background:var(--{color})"></span>{icon} {html.escape(word)}'
             f"{alert}</span></td>"
             f'<td class="loc"><code>{html.escape(slug)}</code></td>'
-            f'<td class="why">{html.escape(r["detail"] or "—")}</td></tr>'
+            f'<td class="why">{html.escape(r["detail"] or "—")}</td>'
+            f'<td class="why">{_proposal_cell(proposals.get(r["company"]))}</td></tr>'
         )
     parts.append("</tbody></table>")
+
+
+def _proposal_cell(proposal) -> str:
+    """A verified repair, shown but never actionable from here.
+
+    Deliberately no apply button, even under `serve`. Applying rewrites companies.yaml,
+    which is curated, git-tracked data — that belongs behind a command whose diff you
+    read, not behind a click. Every value is escaped: the board name comes from a
+    third-party ATS.
+    """
+    if proposal is None:
+        return "—"
+    target = html.escape(f"{proposal['to_ats']}/{proposal['to_slug']}")
+    board = html.escape(proposal["board_name"] or "no board name")
+    weak = (
+        ' <span class="badge">⚠ provenance only</span>'
+        if proposal["evidence_kind"] == "provenance"
+        else ""
+    )
+    return (
+        f"<code>{target}</code>{weak}<br>"
+        f'<span class="muted">{proposal["job_count"]} jobs · {board} · '
+        f'verified {html.escape(proposal["verified_at"])}</span>'
+    )
 
 
 def _manual(parts, companies) -> None:
