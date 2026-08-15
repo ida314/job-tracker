@@ -19,6 +19,7 @@ import pytest
 from jobtracker import config
 from jobtracker.criteria import load_criteria
 from jobtracker.llm import LlmClient, wire
+from jobtracker.llm import client as client_module
 from jobtracker.llm.client import is_configured, resolve_base_url
 from jobtracker.models import Decision
 from jobtracker.tasks.judge import (
@@ -106,7 +107,20 @@ def test_the_address_is_the_whole_configuration(monkeypatch):
     assert resolve_base_url("http://flag:9000") == "http://flag:9000"  # flag wins
 
 
-def test_the_sdks_own_env_var_is_honoured(monkeypatch):
+@pytest.fixture
+def sdk_installed(monkeypatch):
+    """Assert the address logic in the world where the SDK *is* present.
+
+    `is_configured()` answers two questions at once — is there an address, and is there
+    anything to dial it with — so a checkout without `sir-client` (it is not on PyPI, so
+    that includes CI and any clone made before the sibling repo) would fail these on the
+    second question while the first, the one under test here, is right. The SDK-absent
+    half is asserted on its own in `test_the_package_works_without_the_sdk_installed`.
+    """
+    monkeypatch.setattr(client_module, "SDK_AVAILABLE", True)
+
+
+def test_the_sdks_own_env_var_is_honoured(monkeypatch, sdk_installed):
     """A box already pointing other services at the router should not repeat itself."""
     monkeypatch.delenv("JOBTRACKER_LLM_URL", raising=False)
     monkeypatch.setenv("SIR_BASE_URL", "http://router:8000")
@@ -114,7 +128,7 @@ def test_the_sdks_own_env_var_is_honoured(monkeypatch):
     assert is_configured(None) is True
 
 
-def test_per_model_endpoints_alone_count_as_configured(monkeypatch):
+def test_per_model_endpoints_alone_count_as_configured(monkeypatch, sdk_installed):
     monkeypatch.delenv("JOBTRACKER_LLM_URL", raising=False)
     monkeypatch.delenv("SIR_BASE_URL", raising=False)
     monkeypatch.setenv("SIR_ENDPOINTS", "a=http://gpu:8000")
