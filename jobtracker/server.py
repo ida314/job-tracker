@@ -183,8 +183,8 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
             "below creates one.</p>"
         )
 
-    p.extend(_identity_card(answers, answers_path))
-    p.extend(_resume_card(answers, answers_path))
+    p.extend(_identity_card(answers))
+    p.extend(_resume_card(answers))
 
     p.append(f"<h2>Unanswered questions ({len(gaps)})</h2>")
     if not gaps:
@@ -230,7 +230,7 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     return "\n".join(p)
 
 
-def _identity_card(answers, answers_path: Path) -> list:
+def _identity_card(answers) -> list:
     """The fields every application asks for, as a form.
 
     This is what makes a fresh box usable: with no `answers.yaml` at all, filling in the
@@ -262,7 +262,7 @@ def _identity_card(answers, answers_path: Path) -> list:
     return p
 
 
-def _resume_card(answers, answers_path: Path) -> list:
+def _resume_card(answers) -> list:
     """Upload a resume, or see the one already attached.
 
     A resume is the one field no URL and no cookie can ever carry — it is attached by
