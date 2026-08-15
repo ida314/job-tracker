@@ -744,10 +744,17 @@ above intact: publishing an artifact names no orchestrator.
 - **The test job runs without `sir-client`,** because it is not on PyPI and pulling it
   from git would make the unit suite depend on another repo staying reachable. So no test
   may assume the SDK imports: `is_configured()` answers "is there an address" *and* "is
-  there anything to dial it with", and two address tests asserting the first were red on
-  every CI run from the day CI was added. Force the world you mean with the
-  `sdk_installed` fixture; the SDK-absent world has its own test, which builds an
-  SDK-less module rather than reading the environment.
+  there anything to dial it with", and two address tests asserting the first were red for
+  runs 7–9 — from the push that landed the sir-client migration until 2026-08-15. Force
+  the world you mean with the `sdk_installed` fixture; the SDK-absent world has its own
+  test, which builds an SDK-less module rather than reading the environment.
+
+  **`publish` was added during that red window and so had never once run**, which is the
+  part worth remembering: the pipeline was not slow to deploy, it was structurally
+  incapable of it, and nothing said so. `needs: [test, docker]` skips silently — the
+  run's own conclusion is `failure` for the test job, and the missing publish reads as
+  ordinary gating rather than as "no image has ever been pushed". Check the registry, not
+  the workflow file, when asking whether CD works.
 - **Two Dockerfile traps, both fixed 2026-08-15.** `python:*-slim` carries **no git**, so
   the `SIR_CLIENT="git+ssh://…"` invocation this file documented could never have worked;
   git is now installed and purged inside one `RUN` (+8MB net, not +50). And a credential
