@@ -389,11 +389,18 @@ the distance between opening the page and applying to something.
   and for a stronger reason: it drives a browser, which only a live process can do. The
   *counts* (`prefill 13/16 fields · 3 need you`) render in both, because they are useful
   offline — they say whether opening a job takes thirty seconds or ten minutes.
-- **`serve` has a third page, `/settings`** — the answer bank and every question prefill
-  could not answer. `render_settings` is connection-in/string-out like `render_tuning`,
-  and `POST /api/answer` writes through `safewrite`. `POST /api/apply-to` starts the
+- **`serve` has a third page, `/settings`** — who you are, your resume, the answer bank,
+  and every question prefill could not answer. `render_settings` is
+  connection-in/string-out like `render_tuning`, and `POST /api/answer`, `/api/identity`
+  and `/api/resume` all write through `safewrite`. `POST /api/apply-to` starts the
   browser **on a daemon thread**: `server.py` is `HTTPServer`, not `ThreadingHTTPServer`,
   so driving it inline would freeze the page for as long as the window stayed open.
+- **The resume upload is base64 inside JSON, not multipart.** It reuses the one POST path
+  this server has and keeps `form-action 'none'` in the CSP meaningful — the page never
+  submits a form, it fetches. `MAX_UPLOAD` is applied per-route, so a decision POST still
+  cannot buffer 6 MB. Hand-rolling a multipart parser to avoid a 33% wire overhead on a
+  file you upload once is the wrong trade, and the same rule that keeps a web framework
+  out of `server.py`.
 - **It is a pure read.** Unlike `report`, it never marks manual companies as surfaced.
   Opening a view of your data must not mutate it; there is a test asserting this.
 - **No network at view time, ever.** No CDN, no chart library — the one chart is CSS.
@@ -626,7 +633,20 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   `prefill_gaps` on every run. Writes go through `safewrite.py` (candidate → parse →
   `.bak` → atomic swap), extracted from `server._api_rule`, which had it inline.
 - **Adding an answer is text surgery, not a YAML round trip.** A round trip deletes every
-  comment in the file, including the stubs the user is working through.
+  comment in the file, including the stubs the user is working through. Same for the
+  identity fields and the resume path — `upsert_identity` and `set_resume` sit beside
+  `insert_answer` in `answers.py` for exactly that reason.
+- **The Settings tab creates the bank; there is no `cp` step** (added 2026-08-15). Saving
+  identity writes `answers.STARTER` and upserts into it, so a fresh box gets there from
+  the browser. STARTER deliberately carries the example's prose and **none of its values**
+  — `answers.example.yaml` documents the shape with Ada Lovelace's name and email in it,
+  and a bank that loads with a stranger's identity is the failure this file's strictness
+  exists to prevent. Three rules in the writers: a commented-out field is filled *in
+  place* (two lines that disagree is worse than one), clearing a field deletes the key
+  rather than blanking it (a blank loads as an answer and is typed as the empty string),
+  and the resume is validated by magic bytes with the client's filename used for its
+  suffix only. The upload writes the file **before** the `resume:` key, because
+  `load_answers` refuses a path that is not yet a real file.
 - **Only Greenhouse publishes its form** (`?questions=true`, keyless, complete — 47 of 62
   api boards). Ashby's per-job posting-api is 401 and its GraphQL introspection is off;
   Lever exposes no custom questions. Verified 2026-08-13. Their forms are learned from

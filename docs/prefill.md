@@ -40,6 +40,14 @@ ever make the 35 `manual` companies tractable. Not used for that yet.
 Curated, git-ignored, and the source of truth. `answers.example.yaml` is the tracked file
 that documents the shape.
 
+You do not have to write it by hand. **The Settings tab under `jobtracker serve` collects
+it**: filling in your name and email there creates the file, and the resume upload beside
+it stores the file and points `resume:` at it. That is the bootstrap — before it existed
+the only way in was `cp answers.example.yaml answers.yaml`, and the example ships Ada
+Lovelace's name and email as documentation, so the copy that never got edited would have
+typed a stranger's identity into a real application. The starter it writes instead carries
+the explanatory comments and **no placeholder values at all**.
+
 ```yaml
 identity:                 # canonical names; first_name, last_name, email are required
   first_name: Dylan
@@ -136,9 +144,28 @@ the block is a rendering of it.
 
 The Settings tab under `jobtracker serve` is the same loop with a text box, and it writes
 through the same safe path (candidate file → parse → `.bak` → atomic swap) that criteria
-edits use. Adding an answer there is text surgery rather than a YAML round trip, because
-a round trip would delete every comment in the file — including the stubs you are working
-through.
+edits use. Every write there — an answer, an identity field, the resume path — is text
+surgery rather than a YAML round trip, because a round trip would delete every comment in
+the file, including the stubs you are working through.
+
+Two details of the identity writer, both learned from real files:
+
+- **A commented-out field is filled in place.** The example ships the optional keys as
+  `# phone: …` documentation. Appending a live entry above one would leave two lines that
+  disagree, only one of which is what gets typed.
+- **Clearing a field removes the key rather than blanking it.** An empty value would load
+  as an answer and be typed as the empty string, which in a submitted form is
+  indistinguishable from a field nobody had an answer for.
+
+The resume upload is checked by **content**, not only by name: the extension has to be
+`.pdf` or `.docx` and the bytes have to start the way that format starts. The name the
+client sends is never used as the filename — only its suffix is read, and the file is
+always written as `resume<ext>` beside the bank. Whatever lands there is attached to a
+real application and read by a person.
+
+Order matters in that write, and it is the reverse of the obvious one: the file lands
+first, then the `resume:` key. `load_answers` refuses a resume path that is not a real
+file, so writing the key first would guarantee a refused write.
 
 A **file** upload gets a different stub. You cannot answer "Attach" with a sentence, so it
 names the `resume:` and `cover_letter:` keys instead of offering a `value:` to type into.

@@ -29,9 +29,12 @@ precisely so that config errors are loud rather than silent.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import html
 import json
 import logging
+import os
 import signal
 import sqlite3
 import threading
@@ -57,6 +60,18 @@ from .models import Decision, Posting, Verdict
 log = logging.getLogger("jobtracker.serve")
 
 MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
+
+# The resume upload, base64'd inside a JSON body — so the wire cost is ~4/3 of the file.
+# 6 MB of body is comfortably over any real resume and still bounded.
+MAX_UPLOAD = 6 * 1024 * 1024
+
+# What a resume may be. An allowlist rather than a blocklist, and checked before anything
+# reaches disk: this file is written into a directory the pipeline reads on every run.
+RESUME_TYPES = {
+    ".pdf": b"%PDF-",
+    # DOCX is a zip. `PK\x03\x04` is the local file header every one starts with.
+    ".docx": b"PK\x03\x04",
+}
 
 
 # -- rendering (pure reads, testable without a server) ------------------------------
@@ -164,9 +179,12 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
         p.append(f"<p class='banner bad'>{html.escape(error)}</p>")
     elif answers is None:
         p.append(
-            "<p class='banner bad'>No answer bank yet. "
-            "<code>cp answers.example.yaml answers.yaml</code> and fill it in.</p>"
+            "<p class='banner bad'>No answer bank yet — filling in your name and email "
+            "below creates one.</p>"
         )
+
+    p.extend(_identity_card(answers, answers_path))
+    p.extend(_resume_card(answers, answers_path))
 
     p.append(f"<h2>Unanswered questions ({len(gaps)})</h2>")
     if not gaps:
@@ -210,6 +228,71 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
 
     p.append(f"<script>{_JS}</script></div></body></html>")
     return "\n".join(p)
+
+
+def _identity_card(answers, answers_path: Path) -> list:
+    """The fields every application asks for, as a form.
+
+    This is what makes a fresh box usable: with no `answers.yaml` at all, filling in the
+    three required fields here is what creates one. The alternative was copying an
+    example file that ships someone else's name in it.
+
+    Every key is rendered, present or not, because the closed `IDENTITY_KEYS` tuple is
+    the whole vocabulary — a field that is not on this form can never be filled by
+    anything downstream, so hiding the empty ones would hide the actual options.
+    """
+    from .answers import IDENTITY_KEYS, REQUIRED_IDENTITY
+
+    held = answers.identity if answers is not None else {}
+    p = ["<h2>You</h2>",
+         "<p class=note>Typed into every application form. Required fields are marked; "
+         "the rest are filled when a form asks for them. Clearing a field removes it.</p>",
+         "<div class=card>"]
+    for key in IDENTITY_KEYS:
+        required = " <span class=req>required</span>" if key in REQUIRED_IDENTITY else ""
+        value = html.escape(str(held.get(key, "")), quote=True)
+        label = key.replace("_", " ")
+        p.append(
+            f"<label class=field><span>{html.escape(label)}{required}</span>"
+            f'<input class=identity data-key="{html.escape(key, quote=True)}" '
+            f'type=text value="{value}"></label>'
+        )
+    p.append("<div class=row><button class=save-identity>Save</button></div>")
+    p.append("</div>")
+    return p
+
+
+def _resume_card(answers, answers_path: Path) -> list:
+    """Upload a resume, or see the one already attached.
+
+    A resume is the one field no URL and no cookie can ever carry — it is attached by
+    `set_input_files()` on a real page — so the file has to exist on disk beside the
+    answer bank before an application can be prefilled at all.
+    """
+    p = ["<h2>Resume</h2>", "<div class=card>"]
+    resume = answers.resume if answers is not None else None
+    if resume is not None and resume.is_file():
+        size = resume.stat().st_size
+        p.append(
+            f"<p>Attached: <code>{html.escape(resume.name)}</code> "
+            f"<span class=note>({size // 1024} KB)</span></p>"
+        )
+    else:
+        p.append("<p class=note>No resume attached. Applications cannot be prefilled "
+                 "without one.</p>")
+
+    if answers is None:
+        p.append("<p class=note>Save your name and email above first — the upload needs "
+                 "an answer bank to record the path in.</p>")
+    else:
+        p.append(
+            "<div class=row><input type=file id=resume-file accept='.pdf,.docx'>"
+            "<button class=upload-resume>Upload</button></div>"
+            "<p class=note>PDF or DOCX, up to 6 MB. Replaces whatever is attached now."
+            "</p>"
+        )
+    p.append("</div>")
+    return p
 
 
 def _load_answers_quietly(path: Path):
@@ -271,9 +354,9 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload: dict, status: int = 200) -> None:
         self._send(json.dumps(payload), status, "application/json")
 
-    def _read_json(self) -> dict:
+    def _read_json(self, limit: int = MAX_BODY) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0 or length > MAX_BODY:
+        if length <= 0 or length > limit:
             return {}
         try:
             return json.loads(self.rfile.read(length))
@@ -318,7 +401,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        payload = self._read_json()
+        # The cap is per-route rather than global: only the upload carries a file, and
+        # leaving 6 MB open on every endpoint would let a decision POST buffer one.
+        payload = self._read_json(MAX_UPLOAD if path == "/api/resume" else MAX_BODY)
         try:
             if path == "/api/decision":
                 self._send_json(self._api_decision(payload))
@@ -330,6 +415,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_rematch())
             elif path == "/api/answer":
                 self._send_json(self._api_answer(payload))
+            elif path == "/api/identity":
+                self._send_json(self._api_identity(payload))
+            elif path == "/api/resume":
+                self._send_json(self._api_resume(payload))
             elif path == "/api/apply-to":
                 self._send_json(self._api_apply_to(payload))
             else:
@@ -565,6 +654,104 @@ class Handler(BaseHTTPRequestHandler):
         # They rebuild on the next prefill run, mostly without any model call.
         return {"ok": True, "question_key": key, "remaining": remaining}
 
+    def _api_identity(self, payload: dict) -> dict:
+        """Write the identity block, creating the answer bank if there is not one.
+
+        This is the bootstrap. Before it existed the only way onto a fresh box was
+        copying `answers.example.yaml`, which ships Ada Lovelace's name and email as
+        documentation — so the first prefill would have typed a stranger's identity into
+        a real application, or (more likely) the copy never happened and `prepare` stayed
+        red forever.
+
+        Same candidate-parse-backup-swap path as every other write here. The validator is
+        the strict loader the pipeline itself uses, so "it saved" and "the next run can
+        read it" are the same statement rather than two hopes.
+        """
+        from .answers import STARTER, load_answers, upsert_identity
+
+        fields = payload.get("identity")
+        if not isinstance(fields, dict):
+            return {"ok": False, "error": "no identity fields"}
+        fields = {str(k): str(v or "") for k, v in fields.items()}
+
+        path = Path(self.server.answers_path)
+        existed = path.exists()
+        try:
+            existing = path.read_text() if existed else STARTER
+            body = upsert_identity(existing, fields)
+        except ValueError as exc:  # an unknown identity key, before anything is written
+            return {"ok": False, "error": str(exc)}
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            safewrite.write_text(path, body, load_answers)
+        except safewrite.RefusedWrite as exc:
+            # The loader's own message names what is missing — "identity is missing
+            # email" beats anything this layer could invent about it.
+            return {"ok": False, "error": f"refused: {exc}"}
+
+        log.info("%s identity in %s", "created" if not existed else "updated", path)
+        return {"ok": True, "created": not existed}
+
+    def _api_resume(self, payload: dict) -> dict:
+        """Store a resume beside the answer bank and point the `resume:` key at it.
+
+        A resume is the one answer no URL and no cookie can carry — it is attached with
+        `set_input_files()` on a live page — so the bytes have to be on disk next to
+        `answers.yaml` before anything can be prefilled.
+
+        Order is load-bearing: the file lands first, then the key. `load_answers` refuses
+        a `resume:` that is not a real file, so writing the key first would guarantee a
+        refused write and leave the upload orphaned.
+        """
+        from .answers import load_answers, set_resume
+
+        path = Path(self.server.answers_path)
+        if not path.exists():
+            return {"ok": False, "error": "save your name and email first — the upload "
+                                          "needs an answer bank to record the path in"}
+
+        filename = str(payload.get("filename") or "").strip()
+        b64 = str(payload.get("content_b64") or "")
+        if not filename or not b64:
+            return {"ok": False, "error": "no file"}
+
+        # The extension decides the name we write, so it can never come from the client's
+        # string — a filename is attacker-shaped input even when the attacker is you with
+        # a badly named file. Only the suffix is read, and only from an allowlist.
+        suffix = Path(filename).suffix.lower()
+        if suffix not in RESUME_TYPES:
+            return {"ok": False,
+                    "error": f"{suffix or 'that'} is not a resume; expected "
+                             f"{' or '.join(sorted(RESUME_TYPES))}"}
+        try:
+            blob = base64.b64decode(b64, validate=True)
+        except (ValueError, binascii.Error):
+            return {"ok": False, "error": "could not decode the upload"}
+        if not blob:
+            return {"ok": False, "error": "the file is empty"}
+        if len(blob) > MAX_UPLOAD:
+            return {"ok": False, "error": f"{len(blob) // 1024} KB is over the "
+                                          f"{MAX_UPLOAD // (1024 * 1024)} MB limit"}
+        if not blob.startswith(RESUME_TYPES[suffix]):
+            # Content, not just the name. A .docx that is really something else would be
+            # attached to a job application and read by a person.
+            return {"ok": False, "error": f"that is not really a {suffix} file"}
+
+        target = path.parent / f"resume{suffix}"
+        tmp = target.with_suffix(target.suffix + ".part")
+        tmp.write_bytes(blob)
+        os.replace(tmp, target)
+
+        try:
+            safewrite.write_text(path, set_resume(path.read_text(), target.name),
+                                 load_answers)
+        except safewrite.RefusedWrite as exc:
+            return {"ok": False, "error": f"refused: {exc}"}
+
+        log.info("resume saved to %s (%d bytes)", target, len(blob))
+        return {"ok": True, "filename": target.name, "bytes": len(blob)}
+
     def _api_apply_to(self, payload: dict) -> dict:
         """Open one application in a browser, filled in. Returns before it finishes.
 
@@ -674,6 +861,13 @@ _SETTINGS_CSS = """
 .gap .row{display:flex;gap:.5rem;margin-top:.5rem}
 .gap input.answer{flex:1;padding:.3rem .5rem;border-radius:5px;
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
+.card{padding:.8rem .9rem;margin:.5rem 0;border:1px solid rgba(127,127,127,.35);border-radius:6px}
+.card .row{display:flex;gap:.5rem;margin-top:.8rem;align-items:center}
+.field{display:flex;align-items:center;gap:.6rem;margin:.25rem 0}
+.field>span{flex:0 0 11rem;font-size:.9rem;opacity:.85}
+.field input{flex:1;padding:.3rem .5rem;border-radius:5px;
+border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
+.req{color:#d97706;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
 """
 
 _EXTRA_CSS = """
@@ -724,6 +918,35 @@ document.addEventListener('click', async (e) => {
     const box = document.querySelector('input.answer[data-key="' + save.dataset.key + '"]');
     const res = await post('/api/answer', {question_key: save.dataset.key,
                                            value: box ? box.value : ''});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const ident = e.target.closest('button.save-identity');
+  if (ident) {
+    const identity = {};
+    document.querySelectorAll('input.identity').forEach(i => identity[i.dataset.key] = i.value);
+    const res = await post('/api/identity', {identity});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const up = e.target.closest('button.upload-resume');
+  if (up) {
+    const input = document.getElementById('resume-file');
+    const file = input && input.files[0];
+    if (!file) { alert('Choose a file first.'); return; }
+    up.disabled = true;
+    // Base64 inside the JSON body rather than multipart: it reuses the one POST path
+    // this server has, and keeps `form-action 'none'` in the CSP meaningful.
+    const b64 = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result.split(',')[1]);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+    const res = await post('/api/resume', {filename: file.name, content_b64: b64});
+    up.disabled = false;
     if (!res.ok) { alert(res.error); return; }
     location.reload();
     return;

@@ -289,6 +289,198 @@ def insert_answer(text: str, key: str, value: str, aliases=()) -> str:
     return new_head + sep + tail
 
 
+def upsert_identity(text: str, fields: dict) -> str:
+    """Return `text` with `identity:` updated to hold `fields`.
+
+    Text surgery for the same reason `insert_answer` is: a YAML round trip deletes every
+    comment in the file, including the gap stubs you are working through.
+
+    Three cases per key, and the middle one is the reason this is not a two-liner. The
+    example file — and therefore most real ones — carries the optional identity fields
+    *commented out* as documentation of what can go there. Answering one has to replace
+    that line in place rather than adding a second entry above it, or the file grows a
+    duplicate-looking key and the comment stops matching what is set.
+
+    An empty value deletes the key rather than writing a blank. A blank identity value
+    would load as an answer and get typed into a real application as the empty string,
+    which looks exactly like a field we had no answer for.
+    """
+    unknown = set(fields) - set(IDENTITY_KEYS)
+    if unknown:
+        raise ValueError(
+            f"unknown identity field(s) {', '.join(sorted(unknown))}; "
+            f"expected {', '.join(IDENTITY_KEYS)}"
+        )
+
+    lines = text.split("\n")
+    start, end = _block_bounds(lines, "identity:")
+    if start is None:
+        return _insert_identity_block(text, fields)
+
+    # In canonical order, so a first save comes out reading like the example file rather
+    # than in whatever order the form's fields happened to arrive.
+    for key in IDENTITY_KEYS:
+        if key not in fields:
+            continue
+        value = str(fields[key] or "").strip()
+        entry = f"  {key}: {_quote(value)}"
+        live = _find_key_line(lines, start, end, key, commented=False)
+        stub = _find_key_line(lines, start, end, key, commented=True)
+
+        if live is not None:
+            if value:
+                lines[live] = entry
+            else:
+                del lines[live]
+                end -= 1
+        elif value:
+            # A commented stub is replaced where it stands, so the field keeps the
+            # position and ordering the file's author gave it.
+            if stub is not None:
+                lines[stub] = entry
+            else:
+                at = _last_entry_line(lines, start, end) + 1
+                lines.insert(at, entry)
+                end += 1
+
+    return "\n".join(lines)
+
+
+def set_resume(text: str, filename: str) -> str:
+    """Return `text` with the top-level `resume:` key pointing at `filename`.
+
+    The path is written relative to answers.yaml, matching `_resolve_file`'s contract —
+    the two files travel together, and an absolute path baked into the bank would break
+    the moment it is read from inside a container.
+    """
+    entry = f"resume: {_quote('./' + filename.lstrip('./'))}"
+    lines = text.split("\n")
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("resume:"):
+            lines[i] = entry
+            return "\n".join(lines)
+        if stripped.startswith("# resume:"):
+            lines[i] = entry
+            return "\n".join(lines)
+
+    # No key yet. Above the managed tail, and above `answers:` if there is one, so the
+    # file keeps reading identity → resume → answers like the example does.
+    head, sep, tail = text.partition(GAP_MARKER)
+    anchor = head.find("\nanswers:")
+    if anchor != -1:
+        return head[:anchor] + f"\n{entry}\n" + head[anchor:] + sep + tail
+    return f"{head.rstrip()}\n\n{entry}\n\n" + sep + tail
+
+
+# The file written when there is no answer bank yet, so that saving your identity in the
+# Settings tab is what creates one. It is deliberately NOT a copy of
+# `answers.example.yaml`: that file carries Ada Lovelace's name, email and phone as
+# documentation, and a bank that loads with someone else's identity in it is exactly the
+# failure this module's strictness exists to prevent. What survives from the example is
+# the prose — the part that tells you what the file is for.
+STARTER = f'''# What you would type into an application form.
+#
+# GITIGNORED — it holds your name, email, phone, and whatever else an employer has
+# asked for. `answers.example.yaml` is the tracked file that documents the shape.
+#
+# Created from the Settings tab, and safe to edit by hand. Two narrow machine writes
+# exist and neither touches a line you wrote:
+#
+#   * `jobtracker work --task prefill` regenerates the block of unanswered questions at
+#     the very end of the file.
+#   * the Settings tab sets identity fields, the resume path, and answers you type there.
+#
+# Loaded strictly. An unknown key, an unknown identity field, a missing name or email,
+# or a resume path that is not a real file all raise — a silently-defaulted answer would
+# be typed into a real job application.
+
+# The fields every application asks for, under their canonical names. first_name,
+# last_name and email are required; the rest are filled when a form asks for them.
+identity:
+
+# A path, relative to this file. The browser attaches it with set_input_files() — the
+# one thing no URL and no cookie can ever do. Checked at load, not at fill time.
+# resume: ./resume.pdf
+
+# Everything else, keyed by a slug. A plain string is the answer; the long form adds
+# `aliases`, which are the exact question texts this answer covers. Aliases are what let
+# an answer you wrote once be recognized at every company that phrases it the same way,
+# with no model call at all.
+answers:
+
+{GAP_MARKER}
+#
+# (nothing outstanding)
+'''
+
+
+def _block_bounds(lines: list, header: str):
+    """(index of `header`, index one past its block). (None, None) if absent.
+
+    The block ends at the next line that starts in column zero and is not blank or a
+    comment — i.e. the next top-level key. Comments inside the block belong to it.
+    """
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip() == header:
+            start = i
+            break
+    if start is None:
+        return None, None
+
+    for j in range(start + 1, len(lines)):
+        line = lines[j]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line[:1] not in (" ", "\t"):
+            return start, j
+    return start, len(lines)
+
+
+def _find_key_line(lines: list, start: int, end: int, key: str, commented: bool):
+    """Index of `key`'s line inside a block, or None."""
+    prefix = f"# {key}:" if commented else f"{key}:"
+    alt = f"#{key}:" if commented else None
+    for i in range(start + 1, end):
+        stripped = lines[i].strip()
+        if stripped.startswith(prefix) or (alt and stripped.startswith(alt)):
+            return i
+    return None
+
+
+def _last_entry_line(lines: list, start: int, end: int) -> int:
+    """Index of the last live entry in a block, or the header itself if it is empty.
+
+    New keys go after it rather than at the top, which keeps them in canonical order —
+    and, more importantly, keeps them from landing above a trailing comment that belongs
+    to the *next* section. A freshly created `identity:` is followed by exactly that.
+    """
+    last = start
+    for i in range(start + 1, end):
+        stripped = lines[i].strip()
+        if stripped and not stripped.startswith("#"):
+            last = i
+    return last
+
+
+def _insert_identity_block(text: str, fields: dict) -> str:
+    """Add an `identity:` block to a file that has none, above `answers:`."""
+    entries = [
+        f"  {k}: {_quote(str(v).strip())}"
+        for k, v in fields.items()
+        if str(v or "").strip()
+    ]
+    block = "identity:\n" + "\n".join(entries)
+
+    head, sep, tail = text.partition(GAP_MARKER)
+    anchor = head.find("\nanswers:")
+    if anchor != -1:
+        return head[:anchor] + f"\n{block}\n" + head[anchor:] + sep + tail
+    return f"{head.rstrip()}\n\n{block}\n\n" + sep + tail
+
+
 def _quote(value: str) -> str:
     """A YAML double-quoted scalar. Safe for colons, hashes, and newlines alike."""
     escaped = str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")

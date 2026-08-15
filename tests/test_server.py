@@ -434,3 +434,120 @@ def test_apply_to_refuses_without_an_answer_bank(tmp_path):
     res = _handler_for(db, config.CRITERIA_YAML, tmp_path / "nope.yaml")._api_apply_to(
         {"company": "Acme", "ats_job_id": "1"})
     assert res["ok"] is False
+
+
+# -- the answer bank, collected from the page ---------------------------------------
+#
+# The bootstrap that did not exist before: with no `answers.yaml` at all, saving your
+# identity here is what creates one. The alternative was copying `answers.example.yaml`,
+# which ships Ada Lovelace's name and email as documentation.
+
+def _settings_handler(tmp_path, answers_path=None):
+    return _handler_for(tmp_path / "s.db", config.CRITERIA_YAML,
+                        answers_path or tmp_path / "answers.yaml")
+
+
+def test_saving_your_identity_creates_the_answer_bank(tmp_path):
+    h = _settings_handler(tmp_path)
+    res = h._api_identity({"identity": {"first_name": "Dylan", "last_name": "D",
+                                        "email": "d@nyu.edu"}})
+    assert res["ok"], res
+    from jobtracker.answers import load_answers
+    assert load_answers(tmp_path / "answers.yaml").get("email") == "d@nyu.edu"
+
+
+def test_an_incomplete_identity_is_refused_and_writes_nothing(tmp_path):
+    """The loader's own message names what is missing, and safewrite means the refusal
+    leaves nothing behind — not a half-written bank the next run would choke on."""
+    h = _settings_handler(tmp_path)
+    res = h._api_identity({"identity": {"first_name": "Dylan"}})
+    assert not res["ok"]
+    assert "email" in res["error"]
+    assert not (tmp_path / "answers.yaml").exists()
+
+
+def test_an_unknown_identity_field_is_refused(tmp_path):
+    h = _settings_handler(tmp_path)
+    res = h._api_identity({"identity": {"first_name": "D", "last_name": "D",
+                                        "email": "d@nyu.edu", "favourite_colour": "blue"}})
+    assert not res["ok"]
+    assert "unknown identity field" in res["error"]
+
+
+def test_a_refused_edit_leaves_the_existing_bank_untouched(tmp_path):
+    """safewrite's contract, asserted at this layer: the candidate is parsed *before* it
+    replaces anything, so a bad edit costs you nothing."""
+    h = _settings_handler(tmp_path)
+    h._api_identity({"identity": {"first_name": "Dylan", "last_name": "D",
+                                  "email": "d@nyu.edu"}})
+    before = (tmp_path / "answers.yaml").read_text()
+    assert not h._api_identity({"identity": {"email": ""}})["ok"]
+    assert (tmp_path / "answers.yaml").read_text() == before
+
+
+def _bank(tmp_path):
+    h = _settings_handler(tmp_path)
+    h._api_identity({"identity": {"first_name": "Dylan", "last_name": "D",
+                                  "email": "d@nyu.edu"}})
+    return h
+
+
+def _upload(h, name="resume.pdf", blob=b"%PDF-1.4 hello"):
+    import base64
+    return h._api_resume({"filename": name,
+                          "content_b64": base64.b64encode(blob).decode()})
+
+
+def test_uploading_a_resume_writes_the_file_and_points_the_key_at_it(tmp_path):
+    h = _bank(tmp_path)
+    res = _upload(h)
+    assert res["ok"], res
+    from jobtracker.answers import load_answers
+    assert load_answers(tmp_path / "answers.yaml").resume == tmp_path / "resume.pdf"
+    assert (tmp_path / "resume.pdf").read_bytes().startswith(b"%PDF")
+
+
+def test_a_resume_upload_needs_a_bank_to_record_the_path_in(tmp_path):
+    """Order is load-bearing. `load_answers` refuses a `resume:` that is not a real file,
+    so there is exactly one bootstrap path: identity first, then the file."""
+    res = _upload(_settings_handler(tmp_path))
+    assert not res["ok"]
+    assert "name and email" in res["error"]
+
+
+@pytest.mark.parametrize("name,blob,message", [
+    ("resume.exe", b"MZ\x90\x00", "not a resume"),
+    ("resume", b"%PDF-1.4", "not a resume"),
+    ("resume.pdf", b"<html>gotcha</html>", "not really"),
+    ("resume.docx", b"%PDF-1.4", "not really"),
+])
+def test_a_resume_is_checked_by_content_not_only_by_name(tmp_path, name, blob, message):
+    """The name is attacker-shaped input even when the attacker is you with a badly named
+    file, and whatever lands here is attached to a real application and read by a person."""
+    h = _bank(tmp_path)
+    res = _upload(h, name, blob)
+    assert not res["ok"]
+    assert message in res["error"]
+    assert not list(tmp_path.glob("resume.*"))
+
+
+def test_an_empty_upload_is_refused(tmp_path):
+    assert not _upload(_bank(tmp_path), blob=b"")["ok"]
+
+
+def test_the_settings_page_offers_every_identity_field(tmp_path):
+    """All of them, present or not: `IDENTITY_KEYS` is the whole vocabulary, so a field
+    missing from this form can never be filled by anything downstream."""
+    from jobtracker.answers import IDENTITY_KEYS
+    conn = store.connect(":memory:")
+    page = server.render_settings(conn, tmp_path / "nope.yaml")
+    for key in IDENTITY_KEYS:
+        assert f'data-key="{key}"' in page
+    conn.close()
+
+
+def test_the_settings_page_says_when_no_resume_is_attached(tmp_path):
+    conn = store.connect(":memory:")
+    page = server.render_settings(conn, _answers_file(tmp_path))
+    assert "No resume attached" in page
+    conn.close()
