@@ -224,7 +224,12 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
         padding: 16px 18px; display: grid; grid-template-columns: 34px 1fr; gap: 0 14px; }
 .pick .rank { font-size: 26px; font-weight: 700; color: var(--rule); line-height: 1;
-              grid-row: 1 / span 4; }
+              grid-column: 1; grid-row: 1; }
+/* Every content block is pinned to column 2. A row span on .rank would have to be kept
+   in sync with the number of blocks, and .why and .prefill are both optional — undercount
+   and auto-placement drops the button row into the 34px rank column, where it stacks
+   vertically instead of running left to right. */
+.pick > :not(.rank) { grid-column: 2; }
 .pick h3 { margin: 0 0 3px; font-size: 17px; line-height: 1.3; }
 .pick h3 a { color: var(--ink); text-decoration: none; }
 .pick h3 a:hover { text-decoration: underline; }
@@ -239,13 +244,18 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .prefill.none { color: var(--muted); }
 .pick .prefill.full { color: var(--good); }
 .pick .prefill .need { color: var(--warning); }
-.pick .act { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.pick .act { display: flex; flex-wrap: wrap; gap: 7px; align-items: stretch; }
+/* The anchor and the buttons share a box so the row lines up: same border box, same
+   line-height. Without the transparent border the anchor sits 2px shorter than its
+   neighbours. */
+.pick .act a.apply, .pick .act button { display: inline-flex; align-items: center;
+                     border: 1px solid transparent; border-radius: 6px; padding: 6px 11px;
+                     line-height: 1.4; white-space: nowrap; }
 .pick .act a.apply { background: var(--accent); color: #fcfcfb; text-decoration: none;
-                     padding: 6px 14px; border-radius: 6px; font-size: 13px;
-                     font-weight: 600; }
+                     padding-inline: 14px; font-size: 13px; font-weight: 600; }
 .pick .act button { appearance: none; background: var(--page); color: var(--ink-2);
-                    border: 1px solid var(--rule); border-radius: 6px; font: inherit;
-                    font-size: 12.5px; padding: 6px 11px; cursor: pointer; }
+                    border-color: var(--rule); font: inherit;
+                    font-size: 12.5px; line-height: 1.4; cursor: pointer; }
 .pick .act button:hover { color: var(--ink); border-color: var(--ink-2); }
 .pick .act button[disabled] { opacity: .5; cursor: default; }
 .pick .score { font-variant-numeric: tabular-nums; }

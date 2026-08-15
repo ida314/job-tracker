@@ -160,6 +160,19 @@ def test_picks_are_not_filterable():
     assert "data-filterable" not in picks
 
 
+def test_pick_content_is_pinned_to_the_second_column():
+    """The action row must not fall back into the 34px rank column.
+
+    `.pick` is a `34px 1fr` grid. `.why` and `.prefill` are both optional, so the number
+    of content blocks varies — anything left to auto-placement lands in column 1 as soon
+    as the count exceeds whatever the rank spans, and the button row stacks vertically in
+    34px instead of running left to right. Pinning every non-rank child to column 2 is
+    what makes the card independent of the block count.
+    """
+    assert ".pick > :not(.rank) { grid-column: 2; }" in dashboard._CSS
+    assert "grid-row: 1 / span" not in dashboard._CSS
+
+
 def test_unranked_matches_are_reported_not_hidden():
     """A silently short list is indistinguishable from having found nothing."""
     conn, companies = _setup(
