@@ -320,3 +320,96 @@ def test_an_llm_verdict_never_displaces_a_human_ruling(criteria):
         "SELECT decision, decided_by FROM overrides"
     ).fetchone()["decided_by"] == "human"
     conn.close()
+
+
+# -- the chain actually connects ----------------------------------------------------
+def test_work_alone_carries_a_posting_from_uncertain_to_prefilled(tmp_path, criteria, profile):
+    """The stages have to compose, not just each work.
+
+    `judge` writes a ranking with a NULL score and `prefill` only queues postings that
+    have one, so before scores were refreshed between runs a `work` loop drained level,
+    drained judge, and then reported "prefill: nothing to do" forever — a stall that
+    looked exactly like an empty queue. This walks one posting the whole way.
+    """
+    import json
+
+    from jobtracker.answers import load_answers
+    from jobtracker.cli import _rescore
+    from jobtracker.models import Company
+    from jobtracker.sources.greenhouse import Greenhouse
+    from jobtracker.tasks import run_next
+
+    (tmp_path / "resume.pdf").write_bytes(b"%PDF-1.4")
+    answers_path = tmp_path / "answers.yaml"
+    answers_path.write_text(
+        "identity:\n  first_name: D\n  last_name: D\n  email: e@x.edu\n"
+        "resume: ./resume.pdf\nanswers:\n  work_authorization: \"Yes\"\n"
+    )
+    form = {"questions": [
+        {"label": "First Name", "required": True,
+         "fields": [{"name": "first_name", "type": "input_text", "values": []}]},
+        {"label": "Email", "required": True,
+         "fields": [{"name": "email", "type": "input_text", "values": []}]},
+    ]}
+
+    class _Router:
+        async def complete(self, system, user, schema, schema_name="", **_k):
+            if schema_name == "level":
+                return json.dumps({"level": "entry", "evidence": "recent graduates"})
+            if schema_name == "ranking":
+                return json.dumps({"backend_fit": "strong", "growth": "strong",
+                                   "entry_risk": "low", "why": "w"})
+            return json.dumps({"question_key": "none"})
+
+    class _Form:
+        def fetch_application_form(self, company, job_id):
+            return Greenhouse().parse_application_form(form)
+
+    conn = store.connect(tmp_path / "s.db")
+    _uncertain(conn, "1")
+
+    def ctx():
+        return TaskContext(
+            today=TODAY, criteria=criteria, profile=profile,
+            answers=load_answers(answers_path), answers_path=answers_path,
+            companies={"Acme": Company(name="Acme", ats="greenhouse", slug="acme", tier=1)},
+            fetcher=_Form(),
+        )
+
+    ran = []
+    for _ in range(4):
+        c = ctx()
+        report = asyncio.run(run_next(conn, _Router(), c))
+        if report is None:
+            break
+        ran.append(report.task)
+        _rescore(conn, c.profile, c.criteria, c.tiers, TODAY)   # what cmd_work does
+
+    assert ran == ["level", "judge", "prefill"]        # in dependency order, no stall
+    assert conn.execute("SELECT verdict FROM verdicts").fetchone()[0] == "match"
+    assert conn.execute("SELECT score FROM rankings").fetchone()[0] is not None
+    assert store.get_plan(conn, "Acme", "1")["fields"] == 2
+    conn.close()
+
+
+def test_an_explicit_unit_list_overrides_the_queue(criteria):
+    """`prepare` targets tomorrow's picks, not "the N highest-scored needing a plan".
+
+    Usually the same set, but not when a pick already has a plan — and "prepare the
+    thing I am going to show you in the morning" has to mean exactly that.
+    """
+    conn = store.connect(":memory:")
+    _uncertain(conn, "1", "2", "3")
+    task = get_task("level")
+    ctx = _ctx(criteria)
+
+    only = [u for u in task.pending(conn, ctx) if u.ats_job_id == "2"]
+    client = _Answering({"level": "not_entry", "evidence": "senior"})
+    report = asyncio.run(run_task(conn, task, client, ctx, units=only))
+
+    assert report.attempted == 1
+    assert conn.execute(
+        "SELECT verdict FROM verdicts WHERE ats_job_id='2'").fetchone()[0] == "reject"
+    assert conn.execute(
+        "SELECT verdict FROM verdicts WHERE ats_job_id='1'").fetchone()[0] == "uncertain"
+    conn.close()

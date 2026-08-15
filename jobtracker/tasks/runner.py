@@ -135,10 +135,24 @@ async def run_task(
     ctx: TaskContext,
     budget: Optional[int] = None,
     concurrency: int = DEFAULT_CONCURRENCY,
+    units: Optional[list[TaskUnit]] = None,
 ) -> TaskReport:
-    """Drain up to `budget` units of one task."""
+    """Drain up to `budget` units of one task.
+
+    `units` overrides the queue, for a caller that has already decided *which* work it
+    wants — `prepare` targets exactly tomorrow's picks rather than "the N highest-scored
+    postings needing a plan", which are usually but not always the same set. The
+    out-of-retries filter still applies: a unit that has failed three nights running is
+    not worth spending on just because someone asked for it by name.
+    """
     report = TaskReport(task=task.name)
-    units = _units_for(conn, task, ctx, budget)
+    if units is None:
+        units = _units_for(conn, task, ctx, budget)
+    else:
+        blocked = store.blocked_units(conn, task.name, MAX_ATTEMPTS)
+        units = [u for u in units if u.ident not in blocked]
+        if budget is not None:
+            units = units[:budget]
     if not units:
         return report
 

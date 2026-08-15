@@ -9,8 +9,9 @@ judge   20   judge a match against profile.yaml                   -> produces sc
 prefill 30   work out what goes in an application form            -> consumes scores
 ```
 
-Cron is out of scope and deliberately so: this repo does not know about schedulers
-(docs/deployment.md). It ships the command; the machine that runs it decides when.
+This repo still does not know about schedulers — it ships the command and the machine
+that runs it decides when. What that decision should look like, including how to share a
+GPU with other services, is in docs/deployment.md under "Scheduling".
 
 ## Why a queue at all
 
@@ -148,6 +149,11 @@ jobtracker work --concurrency 8 --llm-url http://gpu:8000
 in whatever cron already calls it. `rank` still exists too: its judging phase is the
 `judge` task, and its scoring phase is not a task at all — scoring needs no model, must
 run whether or not one is reachable, and is arithmetic over rows `judge` already wrote.
+
+`jobtracker prepare` is the narrow version: rescore, take the postings `today` will
+surface, and prefill exactly those. It passes the picks to `run_task(units=...)` rather
+than trusting the budget to land on the same set — "prepare the thing you are going to
+show me in the morning" has to mean exactly that.
 
 `work` never fails for want of a model. With none configured or reachable it prints the
 queue and changes nothing, so it is safe to run before the router is up.

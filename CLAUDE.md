@@ -427,6 +427,17 @@ in `docs/tuning.md`; the rules that matter here:
 model work now lives: `level` (was `resolve`), `judge` (was `rank`'s first phase), and
 `prefill`. The scheduler polls tasks by priority and runs the first with work.
 
+- **`work` rescores after every run, and that is load-bearing.** `judge` writes a ranking
+  with a NULL score and `prefill` only queues postings that have one, so without it a
+  `work` loop drains level, drains judge, then reports "prefill: nothing to do" forever —
+  a stall that looks exactly like an empty queue. Scoring stays out of the queue (no
+  model, must always run) but it is still a link in the chain, so the runner closes it.
+  There is a test that walks one posting from uncertain to prefilled using only `work`.
+- **`jobtracker prepare` is the nightly "is tomorrow useful?" check.** Rescore, take the
+  postings `today` will surface, prefill exactly those, exit 2 if any has no plan.
+  **Gaps never cause exit 2** — an unanswered question is the normal state and failing on
+  it would make the unit permanently red for something only the user can clear, the same
+  trap as flagging dbt Labs' empty board.
 - **Priority is the pipeline's dependency chain, not a preference.** level → judge →
   prefill, because each produces what the next consumes. Reorder it and "work the next
   available task" stops meaning "keep every stage drained", which is the entire reason

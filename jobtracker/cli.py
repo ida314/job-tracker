@@ -8,6 +8,7 @@ Subcommands:
                 caching descriptions so every later pass can run offline
   work          run the next available model task, or the one you name. The scheduler
                 picks by priority, which is the pipeline's own dependency order
+  prepare       make tomorrow's picks ready: rescore, then prefill the top N
   apply-to      open an application in a browser with your answers already filled in
   resolve       alias for `work --task level`  (kept: it is in muscle memory and cron)
   rank          score open matches against profile.yaml (a model helps; not required)
@@ -39,6 +40,7 @@ import time
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 import yaml
 from opentelemetry import metrics
@@ -548,6 +550,35 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
     )
 
 
+def _rescore(conn, profile, criteria, tiers, today) -> tuple[int, int]:
+    """Recompute every open match's score from the judgments already stored.
+
+    Pure arithmetic — no model, no network — so it is cheap enough to run whenever
+    anything might have moved. Returns (scored, unranked).
+
+    This is deliberately not a task. It needs no model, it must run whether or not one
+    is reachable, and it is arithmetic over rows the `judge` task already wrote. But it
+    *is* a link in the chain: `judge` writes a ranking with a NULL score, and `prefill`
+    only queues postings that have one. Without a rescore between them the queue looks
+    permanently empty from `prefill`'s side, which is exactly the silent stall a derived
+    queue is supposed to make impossible.
+    """
+    from . import rank as rank_mod
+
+    scored = unranked = 0
+    for row in store.ranked_matches(conn):
+        breakdown = rank_mod.score_posting(
+            row, profile, criteria, tiers.get(row["company"]), today
+        )
+        if breakdown is None:
+            unranked += 1
+            continue
+        store.set_score(conn, row["company"], row["ats_job_id"], breakdown.total, today)
+        scored += 1
+    conn.commit()
+    return scored, unranked
+
+
 def _print_survey(candidates) -> None:
     print("Task queue, in the order the scheduler considers it:\n")
     for c in candidates:
@@ -664,6 +695,15 @@ def cmd_work(args: argparse.Namespace) -> int:
 
         log.info("work complete: %s", report.summary())
         print(report.summary())
+
+        # Refresh the derived score before returning, so the next task in the chain sees
+        # what this one produced. `judge` writes a ranking with a NULL score and
+        # `prefill` only queues postings that have one, so without this a `work` loop
+        # drains level, drains judge, and then reports "prefill: nothing to do" forever.
+        if ctx.profile is not None:
+            scored, _ = _rescore(conn, ctx.profile, ctx.criteria, ctx.tiers, today)
+            log.debug("rescored %d open match(es)", scored)
+
         if report.task == "prefill":
             outstanding = _refresh_gap_stubs(conn, ctx)
             if outstanding:
@@ -780,17 +820,8 @@ def cmd_rank(args: argparse.Namespace) -> int:
             stats.unreadable = report.no_answer + report.errors
 
     # Scoring is pure arithmetic over stored judgments — no model, every run.
-    rows = store.ranked_matches(conn)
-    for row in rows:
-        breakdown = rank_mod.score_posting(
-            row, profile, criteria, tiers.get(row["company"]), today
-        )
-        if breakdown is None:
-            stats.unranked += 1
-            continue
-        store.set_score(conn, row["company"], row["ats_job_id"], breakdown.total, today)
-        stats.scored += 1
-    conn.commit()
+    scored, unranked = _rescore(conn, profile, criteria, tiers, today)
+    stats.scored, stats.unranked = scored, unranked
 
     top = rank_mod.top_n(store.ranked_matches(conn), 3, today)
     conn.close()
@@ -806,6 +837,133 @@ def cmd_rank(args: argparse.Namespace) -> int:
         for i, row in enumerate(top, 1):
             print(f"  {i}. {row['company']} — {row['title'][:60]}  [{row['score']:.1f}]")
     return 0
+
+
+# -- prepare -----------------------------------------------------------------------
+async def _prefill_picks(args, conn, ctx, picks) -> Optional[object]:
+    """Build a prefill plan for exactly these postings. None if no router."""
+    from . import llm as llm_pkg
+    from .tasks import DEFAULT_CONCURRENCY, get_task, run_task
+
+    task = get_task("prefill")
+    wanted = {(p["company"], p["ats_job_id"]) for p in picks}
+    units = [u for u in task.pending(conn, ctx) if (u.company, u.ats_job_id) in wanted]
+    if not units:
+        return None
+
+    base_url = llm_pkg.resolve_base_url(getattr(args, "llm_url", None))
+    client = llm_pkg.LlmClient(model=getattr(args, "llm_model", None), base_url=base_url)
+    try:
+        if not await client.probe():
+            return None
+        return await run_task(
+            conn, task, client, ctx,
+            units=units,
+            concurrency=args.concurrency or DEFAULT_CONCURRENCY,
+        )
+    finally:
+        await client.aclose()
+
+
+def cmd_prepare(args: argparse.Namespace) -> int:
+    """Make tomorrow morning's picks ready to apply to.
+
+    The narrow, fast half of the nightly pipeline: rescore what is already judged, take
+    the postings `today` will surface, and make sure each has a prefill plan. It reads
+    no ATS board and does no level extraction — those belong to `check` and `work`,
+    which this is meant to run *after*.
+
+    **Gaps never make this fail.** A form with questions you have not answered yet is
+    the normal state, especially early on, and treating it as a failure would make the
+    job permanently red for a condition only you can clear — the same trap as flagging
+    dbt Labs' legitimately empty board. What counts as not-ready is a pick with *no
+    plan at all*, because that is the one thing that leaves you opening a blank form.
+    """
+    from . import rank as rank_mod
+
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = args.since or _today()
+    fetcher = Fetcher()
+    try:
+        ctx = _build_context(args, today, fetcher=fetcher)
+        if ctx.profile is None:
+            print("error: profile.yaml did not load — cannot rank or prepare",
+                  file=sys.stderr)
+            return 1
+
+        _rescore(conn, ctx.profile, ctx.criteria, ctx.tiers, today)
+        picks = rank_mod.top_n(store.ranked_matches(conn), args.count, today)
+        if not picks:
+            print("Nothing queued for tomorrow.")
+            print("  Run `check` then `work` — or you have dispositioned everything.")
+            return 0
+
+        if ctx.answers is None:
+            print(f"No answer bank at {ctx.answers_path} — cannot prefill.")
+            print("  cp answers.example.yaml answers.yaml, then fill it in.")
+        else:
+            report = asyncio.run(_prefill_picks(args, conn, ctx, picks))
+            if report is not None:
+                log.info("prepare: %s", report.summary())
+            _refresh_gap_stubs(conn, ctx)
+
+        return _report_readiness(conn, picks, ctx)
+    finally:
+        fetcher.close()
+        conn.close()
+
+
+def _report_readiness(conn, picks, ctx) -> int:
+    """Print whether each pick can actually be applied to, and exit accordingly."""
+    plans = store.plans_by_posting(conn)
+    ready = 0
+    lines: list[str] = []
+
+    for i, row in enumerate(picks, 1):
+        plan = plans.get((row["company"], row["ats_job_id"]))
+        head = f"  {i}. {row['company']} — {row['title'][:52]}"
+        if plan is None:
+            lines.append(f"{head}\n       NOT READY — {_why_no_plan(ctx, row)}")
+            continue
+        ready += 1
+        filled = plan["fields"] - plan["gaps"]
+        tail = f"{plan['gaps']} need you" if plan["gaps"] else "nothing left to type"
+        lines.append(f"{head}\n       prefill {filled}/{plan['fields']} fields · {tail}")
+
+    print(f"Tomorrow: {ready}/{len(picks)} ready to apply to\n")
+    print("\n".join(lines))
+
+    if ready < len(picks):
+        print("\nA pick with no plan opens as a blank form. See docs/prefill.md.")
+        return EXIT_DEGRADED
+    return EXIT_OK
+
+
+def _why_no_plan(ctx, row) -> str:
+    """The actionable reason, not just the absence.
+
+    Three different situations look identical in the database and need different things
+    from you, so they are named rather than collapsed into "no plan".
+    """
+    from .sources import get_source
+
+    company = ctx.companies.get(row["company"])
+    if company is None:
+        return f"{row['company']} is not in companies.yaml"
+    if ctx.answers is None:
+        return "no answer bank configured"
+    source = get_source(company.ats)
+    publishes = bool(
+        company.slug
+        and source is not None
+        and source.application_form_url(company.slug, row["ats_job_id"])
+    )
+    if not publishes:
+        return (
+            f"{company.ats or 'this ATS'} does not publish its form — run "
+            f"`jobtracker apply-to {company.name} {row['ats_job_id']}` once to learn it"
+        )
+    return "the router was unreachable, or the run was interrupted"
 
 
 # -- apply-to ----------------------------------------------------------------------
@@ -1221,6 +1379,21 @@ def build_parser() -> argparse.ArgumentParser:
     rk.add_argument("--dry-run", action="store_true")
     _llm_flags(rk)
     rk.set_defaults(func=cmd_rank)
+
+    pr = sub.add_parser(
+        "prepare",
+        help="make tomorrow's picks ready to apply to (rescore + prefill the top N)",
+    )
+    pr.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    pr.add_argument("--profile", default=str(config.PROFILE_YAML))
+    pr.add_argument("--answers", default=None)
+    pr.add_argument("--db", default=None)
+    pr.add_argument("--since", default=None)
+    pr.add_argument("--count", type=int, default=3,
+                    help="how many picks to prepare (default: 3, matching `today`)")
+    pr.add_argument("--concurrency", type=int, default=None)
+    _llm_flags(pr)
+    pr.set_defaults(func=cmd_prepare)
 
     at = sub.add_parser(
         "apply-to",

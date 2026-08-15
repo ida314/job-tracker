@@ -453,3 +453,115 @@ def test_an_unscored_match_is_not_at_the_front_of_the_application_queue(answers)
     conn.commit()
     assert get_task("prefill").pending_count(conn, _ctx(answers)) == 0
     conn.close()
+
+
+# -- `jobtracker prepare` ------------------------------------------------------------
+# The "is tomorrow morning actually useful?" check. Its exit code is the only thing an
+# unattended scheduler sees, so what it does and does not treat as a failure matters.
+def _prepare(db, answers, tmp_path, count=3):
+    from jobtracker.cli import main
+
+    return main(["prepare", "--db", str(db), "--answers", str(answers.path),
+                 "--since", TODAY, "--count", str(count)])
+
+
+def test_prepare_reports_ready_when_every_pick_has_a_plan(answers, tmp_path, capsys):
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    _seed(conn, answers)
+    store.record_plan(conn, "Stripe", "8077887", "[]", fields=6, gaps=0,
+                      answers_hash=answers.hash, now=TODAY)
+    conn.commit()
+    conn.close()
+
+    assert _prepare(db, answers, tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "1/1 ready" in out
+    assert "nothing left to type" in out
+
+
+def test_gaps_never_make_it_fail(answers, tmp_path, capsys):
+    """A form with questions you have not answered is the normal state, not a fault.
+
+    Failing on gaps would leave the nightly job permanently red for a condition only
+    the user can clear — the same trap as flagging dbt Labs' legitimately empty board.
+    """
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    _seed(conn, answers)
+    store.record_plan(conn, "Stripe", "8077887", "[]", fields=16, gaps=9,
+                      answers_hash=answers.hash, now=TODAY)
+    conn.commit()
+    conn.close()
+
+    assert _prepare(db, answers, tmp_path) == 0
+    assert "9 need you" in capsys.readouterr().out
+
+
+def test_a_pick_with_no_plan_at_all_is_not_ready(answers, tmp_path, capsys):
+    """That is the one state that leaves you opening a blank form in the morning."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    _seed(conn, answers)
+    conn.close()
+
+    # No router configured, so nothing can be built and the pick stays planless.
+    assert _prepare(db, answers, tmp_path) == 2
+    out = capsys.readouterr().out
+    assert "0/1 ready" in out
+    assert "NOT READY" in out
+
+
+def test_it_names_the_reason_a_pick_could_not_be_prepared(answers, tmp_path, capsys,
+                                                          monkeypatch):
+    """Three situations look identical in the DB and need different things from you."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    _seed(conn, answers)
+    conn.close()
+
+    # An Ashby company: no published form, so a browser visit is the only way forward.
+    import jobtracker.config as cfg
+
+    companies = tmp_path / "companies.yaml"
+    companies.write_text(
+        "- name: Stripe\n  ats: ashby\n  slug: stripe\n  tier: 1\n"
+        "  check_method: api\n  expected_board_name: Stripe\n"
+    )
+    monkeypatch.setattr(cfg, "COMPANIES_YAML", companies)
+
+    from jobtracker.cli import main
+
+    # --companies is a global flag, so it precedes the subcommand.
+    assert main(["--companies", str(companies), "prepare", "--db", str(db),
+                 "--answers", str(answers.path), "--since", TODAY]) == 2
+    out = capsys.readouterr().out
+    assert "does not publish its form" in out
+    assert "apply-to Stripe 8077887" in out
+
+
+def test_prepare_with_nothing_queued_is_not_a_failure(answers, tmp_path, capsys):
+    db = tmp_path / "s.db"
+    store.connect(db).close()
+    assert _prepare(db, answers, tmp_path) == 0
+    assert "Nothing queued" in capsys.readouterr().out
+
+
+def test_prepare_rescores_before_choosing_the_picks(answers, tmp_path):
+    """The picks must reflect the judgments as they stand now, not as they were scored.
+
+    Otherwise a weight edit, or a `judge` run that has not been followed by a `rank`,
+    silently prepares yesterday's three.
+    """
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    _seed(conn, answers)
+    conn.execute("UPDATE rankings SET score=NULL, scored_at=NULL")  # judged, unscored
+    conn.commit()
+    conn.close()
+
+    _prepare(db, answers, tmp_path)
+
+    conn = store.connect(db)
+    assert conn.execute("SELECT score FROM rankings").fetchone()[0] is not None
+    conn.close()

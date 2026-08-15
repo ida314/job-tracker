@@ -72,10 +72,15 @@ one-shot commands against the same `$JOBTRACKER_DB`, in order:
 
 ```sh
 jobtracker check              # fetch → health → store → match → cache descriptions → report
-jobtracker work               # the next model task: settle uncertain / judge / prefill
-jobtracker rank               # judge whatever is left, then score the queue
+jobtracker work               # the next model task; repeat until it reports nothing to do
+jobtracker prepare            # make tomorrow's picks ready to apply to
 jobtracker dashboard          # render state.db → a static HTML file
 ```
+
+`rank` is deliberately not in that list any more. `work` refreshes scores after every run
+and `prepare` refreshes them before choosing the picks, so the nightly path no longer
+needs it. It stays as the interactive command for "I changed a weight in profile.yaml,
+re-sort the queue now" — which costs no model calls at all.
 
 - **`check` is the only step that touches an ATS.** It caches a description for every
   match/uncertain posting, which is what lets everything after it read `state.db` and talk
@@ -91,6 +96,13 @@ jobtracker dashboard          # render state.db → a static HTML file
   is always fine to include in the sequence. Every failure path leaves a posting where it
   was, so a down router never corrupts a verdict — and each unit commits on its own, so a
   container killed mid-run keeps everything that already landed.
+- **`prepare` is the last thing to run and the one whose exit code matters.** It
+  rescores, takes the postings `today` will surface in the morning, and makes sure each
+  has a prefill plan. Exit 2 means at least one pick has no plan at all — the state that
+  leaves you opening a blank form — and the output names why for each one. **Unanswered
+  questions never cause exit 2**: a form with gaps is the normal state, especially in the
+  first weeks, and failing on it would leave the job permanently red for a condition only
+  you can clear. Same reasoning as dbt Labs' legitimately empty board.
 - **`apply-to` is interactive and does not belong in an unattended sequence.** It opens a
   browser window and waits for you. Nothing about it is safe to schedule, and it never
   submits anything on its own.
@@ -104,6 +116,95 @@ jobtracker dashboard          # render state.db → a static HTML file
   entries, or four steps in one wrapper — the container does not care. Keep each a
   separate invocation so one failing does not abort the others (a model being down should
   not stop the dashboard from rendering).
+
+## Scheduling, and sharing a GPU with other services
+
+### How often: the queue is fed by `check`, so pace everything off that
+
+Model work has no new input except what `check` brings in. Between two checks the queue
+can only shrink. So a `work` loop on a short timer is not "keeping up" — it is asking a
+question whose answer cannot have changed, and it does it while holding a model resident
+that something else may want.
+
+**Once a night is the right default.** Measured shape on this corpus:
+
+| | first ~4 nights | steady state |
+|---|---|---|
+| new descriptions cached | 400 (the `--max-descriptions` cap) | ~30–40 |
+| `level` units | a few hundred | ~30–40 |
+| `judge` + `prefill` units | tens | single digits |
+| model time | ~30–60 min | ~5–10 min |
+
+The backlog is the only reason the first week is long, and it is bounded by the
+description budget rather than by the model. Once it drains, the whole nightly model
+window is under ten minutes and there is nothing to gain from running it more often.
+
+Run `check` twice a day only if you want fresher postings; the boards themselves do not
+move fast enough to justify more, and `boards-api.greenhouse.io` throttles a run that
+pushes too hard (see the parallelism note in CLAUDE.md).
+
+### Contention: let the router arbitrate, do not schedule around it
+
+`sir` exists to decide which model is resident. Trying to also solve that with a
+timetable means two schedulers disagreeing, and the timetable is the one with no idea
+what is actually queued. So:
+
+- **Give job-tracker the lowest `priority` in the router config.** It is a batch job with
+  nobody waiting on it. Anything interactive should preempt it, and the router's
+  `max_wait_seconds` ceiling guarantees this still cannot starve.
+- **Batch into one contiguous window rather than dribbling.** The thing that actually
+  costs you is *swap thrash*: alternating requests between two models that cannot
+  co-reside makes the GPU spend its time loading rather than generating. `sir`'s
+  `min_residency_seconds` hysteresis is what absorbs that, and it works by letting a
+  resident model keep the GPU while it still has work. A run that submits 200 units back
+  to back cooperates with that; a cron entry that submits one unit every five minutes
+  defeats it.
+- **Raise `--concurrency` before raising frequency.** More units in flight fills the
+  window the model is already resident for. The default of 4 matches `fetch.MAX_WORKERS`;
+  8–16 is reasonable against a local GPU with nothing else running.
+- **Do not add retry timers.** A unit that fails is retried on the next night's run and
+  set aside after three consecutive failures. That is already the backoff.
+
+### Two units, and why they are separate
+
+```systemd
+# jobtracker-nightly.service — the long one. Everything that needs the GPU.
+ExecStart=/usr/local/bin/jobtracker check
+ExecStart=/usr/local/bin/jobtracker work --budget 400 --concurrency 8
+ExecStart=/usr/local/bin/jobtracker work --budget 400 --concurrency 8
+ExecStart=/usr/local/bin/jobtracker work --budget 400 --concurrency 8
+SuccessExitStatus=0 2
+```
+
+```systemd
+# jobtracker-tomorrow.service — the short one. Runs after, and its result is the one
+# you actually care about in the morning.
+ExecStart=/usr/local/bin/jobtracker prepare
+ExecStart=/usr/local/bin/jobtracker dashboard
+```
+
+Three `work` lines rather than a loop because each drains one stage: `level`, then
+`judge`, then `prefill`. `systemd` runs `ExecStart=` lines in order and stops on failure,
+which is the behaviour you want — and `work` exits 0 even with no router, so a down GPU
+skips the model work without failing the unit.
+
+They are separate units for one reason: **`prepare` is the one whose failure means
+something to you.** Bundled together, a red unit could mean anything from "a board 500'd"
+to "tomorrow has no prefills". Split, `jobtracker-tomorrow` failing means exactly one
+thing — open the dashboard and something will be a blank form. Alert on that one.
+
+Order them with `After=`/`Requires=` on the timer, not by guessing at durations:
+
+```systemd
+# jobtracker-tomorrow.service
+After=jobtracker-nightly.service
+Requires=jobtracker-nightly.service
+```
+
+Pick the window from what else uses the GPU, not from the clock. If the box is otherwise
+idle overnight, anything from 02:00 works. If another service has a nightly batch of its
+own, put job-tracker *after* it rather than beside it — two batch jobs alternating is the
+thrash case, two batch jobs in sequence is not.
 
 The **weekly** cadence is separate: `manual` companies are surfaced for hand-checking at
 most once per week (rate-limited by `last_checked`), and the aggregator feeds

@@ -68,16 +68,18 @@ python -m jobtracker.cli today --snooze  Stripe 7966029 --days 14
 
 # prefilled applications — see docs/prefill.md
 cp answers.example.yaml answers.yaml                  # gitignored; holds your details
+python -m jobtracker.cli prepare                      # make tomorrow's picks ready
 python -m jobtracker.cli apply-to Cloudflare 7695702  # opens a browser, fills, stops
 ```
 
-**The nightly sequence is `check` → `work` → `rank` → `dashboard`,** and only `check`
+**The nightly sequence is `check` → `work` → `prepare` → `dashboard`,** and only `check`
 touches an ATS. It caches a description for every match/uncertain posting, which is what
 lets the rest read `state.db` and talk to nothing but the local inference router.
 
 `work` picks the task itself, in the pipeline's own dependency order — settle uncertain
 postings, judge the matches that produces, prefill the best of those. Run it more than
-once to drain more than one stage.
+once to drain more than one stage. `prepare` then makes sure tomorrow's three picks each
+have a prefill plan, and exits 2 if one does not.
 
 `check` writes the report to **stdout**; progress goes to **stderr**, so `check > report.md`
 stays clean. `--output report.md` writes the file directly.

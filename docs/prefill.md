@@ -4,6 +4,7 @@ Two halves, and the split is what makes the second one optional:
 
 ```
 work --task prefill    offline.  Read the form, place the answers, name what is missing.
+prepare                offline.  Do that for exactly the postings `today` will surface.
 apply-to COMPANY JOB   a browser. Carry that plan to the page, attach the resume, stop.
 ```
 
@@ -191,6 +192,31 @@ is run inside an asyncio loop, which is why the task runner (async) and the brow
 The static dashboard shows the prefill counts — `prefill 13/16 fields · 3 need you` —
 and **no button**. The counts are useful offline; a button that cannot drive a browser is
 worse than no button, the same rule the disposition buttons follow.
+
+## `prepare`: is tomorrow morning actually useful?
+
+```
+$ jobtracker prepare
+Tomorrow: 2/3 ready to apply to
+
+  1. Cloudflare — Backend Engineer, New Grad
+       prefill 6/13 fields · 7 need you
+  2. Ramp — Software Engineer, Platform
+       NOT READY — ashby does not publish its form — run
+       `jobtracker apply-to Ramp abc123` once to learn it
+  3. Figma — Backend Engineer
+       prefill 11/11 fields · nothing left to type
+```
+
+Exit 0 when every pick has a plan, exit 2 when one does not — because a pick with no plan
+is the state that leaves you opening a blank form. **Gaps never cause exit 2.** A form
+with questions you have not answered is the normal state, especially in the first weeks,
+and failing on it would leave a nightly unit permanently red for something only you can
+clear. That is the dbt-Labs-is-legitimately-empty rule applied here.
+
+Each not-ready line names its own reason, because three situations look identical in the
+database and want different things from you: no answer bank, an ATS that publishes no
+form (go visit it once), or a router that was down.
 
 ## Checking its work
 
