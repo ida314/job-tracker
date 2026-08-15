@@ -142,3 +142,78 @@ def test_application_rejects_unknown_status():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+# -- board health: the failure streak the repair detector reads -------------------------
+def test_consecutive_failures_round_trips():
+    from jobtracker.models import BoardHealth, HealthStatus
+
+    conn = _conn()
+    store.upsert_health(
+        conn,
+        BoardHealth("Acme", HealthStatus.FETCH_FAILED, consecutive_failures=3),
+        "2026-08-03",
+    )
+    assert store.get_health(conn, "Acme").consecutive_failures == 3
+
+    # And it must come back DOWN on update, not just up. Leaving a repaired board
+    # carrying its old streak would keep the detector firing on a healthy board.
+    store.upsert_health(
+        conn, BoardHealth("Acme", HealthStatus.OK, consecutive_failures=0), "2026-08-04"
+    )
+    assert store.get_health(conn, "Acme").consecutive_failures == 0
+
+
+def test_unhealthy_health_returns_typed_rows_with_the_streak():
+    from jobtracker.models import BoardHealth, HealthStatus
+
+    conn = _conn()
+    store.upsert_health(conn, BoardHealth("Ok", HealthStatus.OK), "d")
+    store.upsert_health(
+        conn, BoardHealth("Bad", HealthStatus.FETCH_FAILED, consecutive_failures=4), "d"
+    )
+    got = store.unhealthy_health(conn)
+    assert [h.company for h in got] == ["Bad"]
+    assert got[0].consecutive_failures == 4
+
+
+# -- repair proposals ------------------------------------------------------------------
+class _Proposal:
+    company = "HubSpot"
+    from_ats, from_slug = "greenhouse", "hubspot"
+    to_ats, to_slug = "greenhouse", "hubspotjobs"
+    board_name = "HubSpot"
+    job_count = 214
+    sample_titles = ("Backend Engineer", "SRE")
+    evidence_kind = "identity"
+    found_by = "regex"
+    evidence = "for=hubspotjobs"
+    trigger = "suspect_empty"
+
+
+def test_a_proposal_is_upserted_not_appended():
+    """A board broken for a week re-derives the same conclusion nightly. One row."""
+    conn = _conn()
+    store.record_proposal(conn, _Proposal(), "2026-08-03")
+    store.record_proposal(conn, _Proposal(), "2026-08-04")
+    rows = store.open_proposals(conn)
+    assert len(rows) == 1
+    assert rows[0]["verified_at"] == "2026-08-04"
+    assert rows[0]["sample_titles"] == "Backend Engineer · SRE"
+
+
+def test_applied_proposals_leave_the_queue():
+    conn = _conn()
+    store.record_proposal(conn, _Proposal(), "2026-08-03")
+    store.mark_proposal_applied(conn, "HubSpot", "2026-08-03")
+    assert store.open_proposals(conn) == []
+
+
+def test_re_proposing_after_an_apply_reopens_the_claim():
+    """A board that broke again has a new, unreviewed claim against it. Carrying the
+    old applied_at forward would hide it from the queue."""
+    conn = _conn()
+    store.record_proposal(conn, _Proposal(), "2026-08-03")
+    store.mark_proposal_applied(conn, "HubSpot", "2026-08-03")
+    store.record_proposal(conn, _Proposal(), "2026-09-01")
+    assert [r["company"] for r in store.open_proposals(conn)] == ["HubSpot"]

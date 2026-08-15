@@ -146,3 +146,27 @@ def test_a_failed_description_leaves_the_row_retryable_and_raises_nothing():
     store.sync_postings(conn, "Acme", [posting], "2026-08-02")
     _cache(conn, _FakeFetcher(fail={"1"}), [(company, posting)])
     assert store.get_description(conn, "Acme", "1") is None
+
+
+def test_a_source_with_no_detail_endpoint_is_not_retried_forever():
+    """The aggregator feeds have no per-posting page, so a fetch cannot exist.
+
+    Leaving description NULL meant every run re-attempted them and counted each as a
+    failure: 249 aggregator postings a night, with no request ever made. Recording ''
+    — the documented "fetched and genuinely empty" sentinel — retires them.
+    """
+    conn = store.connect(":memory:")
+    company = Company(name="Simplify", ats="aggregator", slug="",
+                      check_method="aggregator")
+    posting = Posting("Simplify", "abc", "NVIDIA — Backend Engineer, New Grad", "u")
+    store.sync_postings(conn, "Simplify", [posting], "2026-08-02")
+
+    f = _FakeFetcher()
+    _cache(conn, f, [(company, posting)])
+    assert f.requested == []                                  # nothing was attempted
+    assert store.get_description(conn, "Simplify", "abc") == ""   # and not NULL
+
+    # A second run must not reconsider it at all.
+    f2 = _FakeFetcher()
+    _cache(conn, f2, [(company, posting)])
+    assert f2.requested == []

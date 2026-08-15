@@ -75,10 +75,10 @@ def to_yaml_entries(parsed: list[dict]) -> list[dict]:
 
 
 _HEADER = (
-    "# Curated target list. Human-authored, git-tracked, NEVER machine-written.\n"
-    "# Generated once from backend-newgrad-2027-tracker.md by `jobtracker migrate`.\n"
-    "# No status / last_checked here — run state lives in state.db (DESIGN.md §5).\n"
-    "# expected_board_name is bootstrapped by `jobtracker verify-slugs --write`.\n\n"
+    "# Curated target list. Human-authored and git-tracked. NO SCHEDULED RUN WRITES\n"
+    "# THIS FILE — every writer is a foreground command you typed, leaving a diff you\n"
+    "# read: `migrate` (once), `add-company`, `verify-slugs --write`, `repair --write`.\n"
+    "# No status / last_checked here — run state lives in state.db (DESIGN.md §5).\n\n"
 )
 
 

@@ -1,5 +1,7 @@
 """The three invariants: failure != absence, reachability != identity, empty != zero."""
 
+import pytest
+
 from jobtracker.health import (
     EMPTY_ALERT_THRESHOLD,
     evaluate,
@@ -106,3 +108,42 @@ def test_board_that_went_empty_after_being_populated_is_degraded():
 
 def test_healthy_board_is_not_degraded():
     assert is_degraded(evaluate(_company(), _ok_result(n=3), None, "d", True)) is False
+
+
+# -- consecutive_failures: what makes "persistent" expressible -------------------------
+def test_failures_accumulate_across_runs():
+    res = FetchResult("Acme", "greenhouse", "acme", ok=False, error="HTTP 500")
+    h1 = evaluate(_company(), res, None, "d", True)
+    assert h1.consecutive_failures == 1
+    h2 = evaluate(_company(), res, h1, "d", True)
+    assert h2.consecutive_failures == 2
+
+
+@pytest.mark.parametrize("result", [_ok_result(n=3), _ok_result(n=0)])
+def test_any_answer_ends_the_failure_streak(result):
+    """Drift and empty are *answers* — the fetch worked. Only a failed fetch counts."""
+    prior = BoardHealth("Acme", HealthStatus.FETCH_FAILED, consecutive_failures=7)
+    assert evaluate(_company(), result, prior, "d", True).consecutive_failures == 0
+
+
+def test_drift_also_ends_the_failure_streak():
+    prior = BoardHealth("Acme", HealthStatus.FETCH_FAILED, consecutive_failures=7)
+    h = evaluate(
+        _company(expected_board_name="Cedar Health"),
+        _ok_result(n=5, name="Cedar Real Estate"), prior, "d", True,
+    )
+    assert h.status is HealthStatus.IDENTITY_DRIFT
+    assert h.consecutive_failures == 0
+
+
+def test_the_two_counters_are_independent():
+    """A failure preserves the empty counter and advances its own. Conflating them
+    would lose the distinction between "answers with nothing" and "does not answer"."""
+    prior = BoardHealth("Acme", HealthStatus.SUSPECT_EMPTY, consecutive_empty_runs=3,
+                        consecutive_failures=1)
+    h = evaluate(
+        _company(),
+        FetchResult("Acme", "greenhouse", "acme", ok=False, error="timeout"),
+        prior, "d", True,
+    )
+    assert (h.consecutive_empty_runs, h.consecutive_failures) == (3, 2)

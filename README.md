@@ -50,6 +50,10 @@ python -m jobtracker.cli report          # re-render the latest state (no networ
 python -m jobtracker.cli dashboard       # render state.db to data/dashboard.html (no network)
 python -m jobtracker.cli add-company --name X --ats greenhouse --slug x --tier 2
 
+# slug repair — see docs/repair.md
+python -m jobtracker.cli repair          # broken boards -> careers page -> verified proposal
+python -m jobtracker.cli repair --write  # apply the proposals (nothing is written without it)
+
 # tuning — see docs/tuning.md
 python -m jobtracker.cli decide Stripe 7966029 reject --note "operations, not engineering"
 python -m jobtracker.cli eval            # replay criteria against your judgments; exits 1 on a regression
@@ -89,6 +93,11 @@ does, and `1` if it could not run at all. Exit `2` is narrower than "something w
 OK": dbt Labs and Root Insurance are correct slugs with genuinely zero reqs, so a healthy
 run reports `60 ok, 2 failed` and still exits `0`. Details in
 [`docs/deployment.md`](docs/deployment.md).
+
+**When a board does break,** `repair` reads its careers page for the new slug, verifies
+the candidate against the live API, and prints a diff. It never writes `companies.yaml`
+without `--write`, so it is safe to run unattended after a degraded night. See
+[`docs/repair.md`](docs/repair.md).
 
 ## Three views
 

@@ -15,6 +15,14 @@ from .models import BoardHealth, Company, FetchResult, HealthStatus
 # Consecutive empty runs (on a board that was once populated) before we escalate.
 EMPTY_ALERT_THRESHOLD = 2
 
+# Consecutive *failed* runs before a board counts as persistently broken and its careers
+# page is worth reading (DESIGN.md §8.2). Nights, not retries: fetch.py already burns
+# MAX_RETRIES with backoff inside a single run, so anything transient has been absorbed
+# one layer down before this counter moves at all. Two nights is past any plausible
+# throttle or deploy window, and rewriting a hand-verified slug because a CDN hiccuped
+# once is the expensive mistake here.
+REPAIR_FAILURE_THRESHOLD = 2
+
 
 def _normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
@@ -40,11 +48,17 @@ def evaluate(
     ever_nonempty: bool,
 ) -> BoardHealth:
     prev_empty = prior.consecutive_empty_runs if prior else 0
+    prev_failures = prior.consecutive_failures if prior else 0
     prev_ok_at = prior.last_ok_at if prior else None
     prev_name = prior.observed_board_name if prior else None
     observed = result.observed_board_name or prev_name
 
     # 7.3 Failure is not absence.
+    #
+    # This is the only branch that advances consecutive_failures. Every other outcome
+    # below leaves it at its default of 0, which is deliberate rather than an oversight:
+    # drift and empty are *answers* — the fetch worked and the board said something — so
+    # a streak of failed fetches has ended even though the board is still unhealthy.
     if not result.ok or result.error:
         return BoardHealth(
             company.name,
@@ -53,6 +67,7 @@ def evaluate(
             observed_board_name=prev_name,
             last_ok_at=prev_ok_at,
             detail=result.error or "fetch failed",
+            consecutive_failures=prev_failures + 1,
         )
 
     # 7.2 Reachability is not identity. Contents discarded on drift.
@@ -118,3 +133,45 @@ def is_degraded(health: BoardHealth) -> bool:
         health.status in (HealthStatus.FETCH_FAILED, HealthStatus.IDENTITY_DRIFT)
         or health.alerting
     )
+
+
+def needs_repair(
+    health: BoardHealth, threshold: int = REPAIR_FAILURE_THRESHOLD
+) -> bool:
+    """Is this board broken in a way a *new slug* could plausibly fix? (DESIGN.md §8.2)
+
+    Deliberately not `is_degraded()`, and the two differences both matter.
+
+    `is_degraded` answers "should tonight's run go red", so it fires on the first failed
+    fetch — which is exactly when you must not go reading careers pages and rewriting
+    curated slugs, because most single-night failures fix themselves. This one answers
+    "has this been broken long enough that the board itself probably moved".
+
+    Three triggers:
+
+      IDENTITY_DRIFT  — immediately. Drift is not transient: the assertion is
+                        deterministic over two stable strings, so one observation is
+                        worth as much as ten, and the board we are reading is already
+                        known to be the wrong company's.
+      FETCH_FAILED    — after `threshold` consecutive nights.
+      SUSPECT_EMPTY   — only when `alerting`. This trigger is an addition to what §8
+                        anticipated, and it is the one that covers the failure mode this
+                        repo cites most: `greenhouse/hubspot` is a real, reachable,
+                        permanently empty board, and Mercury and Vercel both left one
+                        behind when they migrated to Greenhouse. A dead board never
+                        presents as FETCH_FAILED — it answers 200 with an empty array
+                        forever — so leaving it out would put the canonical case outside
+                        the reach of the thing built to fix it.
+
+    dbt Labs and Root Insurance are excluded by `alerting`, which by construction
+    requires the board to have been populated at some point. They are correct slugs with
+    genuinely zero reqs, they report SUSPECT_EMPTY every night, and "repairing" them
+    nightly would corrupt hand-verified data to fix nothing.
+    """
+    if health.status is HealthStatus.IDENTITY_DRIFT:
+        return True
+    if health.status is HealthStatus.FETCH_FAILED:
+        return health.consecutive_failures >= threshold
+    if health.status is HealthStatus.SUSPECT_EMPTY:
+        return health.alerting
+    return False

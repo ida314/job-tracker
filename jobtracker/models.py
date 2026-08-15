@@ -36,7 +36,11 @@ class HealthStatus(str, Enum):
 
 @dataclass(frozen=True)
 class Company:
-    """A curated target. Mirrors one entry in companies.yaml (never machine-written)."""
+    """A curated target. Mirrors one entry in companies.yaml.
+
+    That file is only ever written by a foreground command someone typed — never by a
+    scheduled run — which is what keeps curation and run state apart (DESIGN.md §2.3).
+    """
 
     name: str
     ats: str
@@ -152,3 +156,10 @@ class BoardHealth:
     last_ok_at: Optional[str] = None
     detail: str = ""
     alerting: bool = False  # SUSPECT_EMPTY that has crossed the escalation threshold
+    # Consecutive runs this board has failed to *fetch*. Counts a different thing from
+    # consecutive_empty_runs next door, and conflating the two loses the distinction the
+    # whole health module exists to preserve: empty is a fact about the company (dbt Labs
+    # has no reqs), failing is a fact about the board (it moved, or it is down). This is
+    # the counter that makes "persistent FETCH_FAILED" expressible — see
+    # health.needs_repair.
+    consecutive_failures: int = 0

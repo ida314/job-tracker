@@ -226,6 +226,48 @@ CREATE TABLE IF NOT EXISTS prefill_plans (
     built_at     TEXT NOT NULL,
     PRIMARY KEY (company, ats_job_id)
 );
+
+-- Verified slug repairs awaiting a human (DESIGN.md §8.2). OBSERVATION, not curation:
+-- a proposal is something the system noticed about a board, so it lives here and never
+-- in companies.yaml, which no scheduled run may write (§2.3, principle 3).
+--
+-- Deliberately NOT a column on board_health. `check` rewrites every board_health row
+-- nightly, which is the same mechanism that erased the LLM's verdicts before `rankings`
+-- was given its own table. A proposal is a durable claim, not this run's status.
+--
+-- Keyed on company alone: one open proposal per board. A board broken for a week
+-- re-derives the same conclusion every night and updates this row, so the report shows
+-- one line rather than seven.
+--
+-- `verified_at` is the load-bearing column. A row exists here only because an actual
+-- API fetch of the proposed slug returned postings AND passed the identity check for
+-- its ATS. That is "slugs are verified, never guessed" (CLAUDE.md) in executable form,
+-- and it is why `board_name`, `job_count` and `sample_titles` are stored rather than
+-- recomputed on read: they are the evidence the human is reviewing, as of the moment
+-- the claim was made.
+--
+-- `evidence_kind` records WHICH kind of evidence backed the claim, because the two are
+-- not equally strong. 'identity' means the ATS has a dedicated identity endpoint
+-- (Greenhouse `.name`) whose answer comes from a different endpoint than the slug, so
+-- agreement is real. 'provenance' means identity was derived from a job URL (Ashby,
+-- Lever), where for a candidate slug it merely restates that slug — see repair.py. A
+-- 'provenance' row is a weaker claim and is flagged as such everywhere it is shown.
+CREATE TABLE IF NOT EXISTS repair_proposals (
+    company        TEXT PRIMARY KEY,
+    from_ats       TEXT NOT NULL,
+    from_slug      TEXT NOT NULL,
+    to_ats         TEXT NOT NULL,
+    to_slug        TEXT NOT NULL,
+    board_name     TEXT,
+    job_count      INTEGER NOT NULL DEFAULT 0,
+    sample_titles  TEXT NOT NULL DEFAULT '',
+    evidence_kind  TEXT NOT NULL,          -- identity | provenance
+    found_by       TEXT NOT NULL,          -- regex | llm
+    evidence       TEXT NOT NULL DEFAULT '',
+    trigger_status TEXT NOT NULL,
+    verified_at    TEXT NOT NULL,
+    applied_at     TEXT                    -- NULL = still awaiting a human
+);
 """
 
 # Columns added after the initial schema shipped. CREATE TABLE IF NOT EXISTS cannot
@@ -243,6 +285,13 @@ _ADDED_COLUMNS = [
     # so this is the only one anything may sort on. NULL means "not normalized yet",
     # and must never be read as "posted today".
     ("postings", "posted_on", "TEXT"),
+    # Consecutive failed *fetches*, the counter that makes "persistent FETCH_FAILED"
+    # expressible for the slug-repair detector. `consecutive_empty_runs` next door was
+    # never a substitute — it counts a board that answers with nothing, not one that
+    # does not answer — and `last_ok_at` is not either: it is NULL forever for a board
+    # that has never been healthy, so "failed for three nights" and "failed since day
+    # one" read identically. Reset by every non-failing outcome, so it is a streak.
+    ("board_health", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -278,6 +327,7 @@ def get_health(conn: sqlite3.Connection, company: str) -> Optional[BoardHealth]:
         last_ok_at=row["last_ok_at"],
         detail=row["detail"] or "",
         alerting=bool(row["alerting"]),
+        consecutive_failures=row["consecutive_failures"] or 0,
     )
 
 
@@ -286,8 +336,8 @@ def upsert_health(conn: sqlite3.Connection, health: BoardHealth, now: str) -> No
         """
         INSERT INTO board_health
             (company, last_status, consecutive_empty_runs, observed_board_name,
-             last_ok_at, detail, alerting, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             last_ok_at, detail, alerting, updated_at, consecutive_failures)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company) DO UPDATE SET
             last_status=excluded.last_status,
             consecutive_empty_runs=excluded.consecutive_empty_runs,
@@ -295,7 +345,11 @@ def upsert_health(conn: sqlite3.Connection, health: BoardHealth, now: str) -> No
             last_ok_at=excluded.last_ok_at,
             detail=excluded.detail,
             alerting=excluded.alerting,
-            updated_at=excluded.updated_at
+            updated_at=excluded.updated_at,
+            -- Must be in the UPDATE list too, not just the INSERT. Omitting it would
+            -- leave a repaired board carrying its old failure streak forever, and the
+            -- repair detector would keep firing on a board that is now healthy.
+            consecutive_failures=excluded.consecutive_failures
         """,
         (
             health.company,
@@ -306,6 +360,7 @@ def upsert_health(conn: sqlite3.Connection, health: BoardHealth, now: str) -> No
             health.detail,
             int(health.alerting),
             now,
+            health.consecutive_failures,
         ),
     )
 
@@ -514,6 +569,95 @@ def unhealthy_boards(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             "SELECT company, last_status, detail, alerting FROM board_health "
             "WHERE last_status != 'ok' ORDER BY alerting DESC, company"
         )
+    )
+
+
+def unhealthy_health(conn: sqlite3.Connection) -> list[BoardHealth]:
+    """Every non-OK board as a typed BoardHealth. The repair detector's input.
+
+    Separate from `unhealthy_boards` rather than a widening of it. That query is
+    consumed by report.py and dashboard.py by column name, and the detector needs
+    fields (`consecutive_failures`) those two do not — so it gets its own reader
+    instead of a shared SELECT that grows a column every time someone needs one.
+    """
+    rows = conn.execute(
+        "SELECT * FROM board_health WHERE last_status != 'ok' ORDER BY company"
+    )
+    return [
+        BoardHealth(
+            company=r["company"],
+            status=HealthStatus(r["last_status"]),
+            consecutive_empty_runs=r["consecutive_empty_runs"],
+            observed_board_name=r["observed_board_name"],
+            last_ok_at=r["last_ok_at"],
+            detail=r["detail"] or "",
+            alerting=bool(r["alerting"]),
+            consecutive_failures=r["consecutive_failures"] or 0,
+        )
+        for r in rows
+    ]
+
+
+# -- slug repair proposals -----------------------------------------------------------
+def record_proposal(conn: sqlite3.Connection, proposal, now: str) -> None:
+    """Store a verified repair proposal, replacing any earlier one for that board.
+
+    Re-proposing resets `applied_at` to NULL: a board that is broken again after a
+    previous repair was applied has a new, unreviewed claim against it, and carrying
+    the old timestamp forward would hide it from `open_proposals`.
+    """
+    conn.execute(
+        """
+        INSERT INTO repair_proposals
+            (company, from_ats, from_slug, to_ats, to_slug, board_name, job_count,
+             sample_titles, evidence_kind, found_by, evidence, trigger_status,
+             verified_at, applied_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(company) DO UPDATE SET
+            from_ats=excluded.from_ats,
+            from_slug=excluded.from_slug,
+            to_ats=excluded.to_ats,
+            to_slug=excluded.to_slug,
+            board_name=excluded.board_name,
+            job_count=excluded.job_count,
+            sample_titles=excluded.sample_titles,
+            evidence_kind=excluded.evidence_kind,
+            found_by=excluded.found_by,
+            evidence=excluded.evidence,
+            trigger_status=excluded.trigger_status,
+            verified_at=excluded.verified_at,
+            applied_at=NULL
+        """,
+        (
+            proposal.company,
+            proposal.from_ats,
+            proposal.from_slug,
+            proposal.to_ats,
+            proposal.to_slug,
+            proposal.board_name,
+            proposal.job_count,
+            " · ".join(proposal.sample_titles),
+            proposal.evidence_kind,
+            proposal.found_by,
+            proposal.evidence,
+            proposal.trigger,
+            now,
+        ),
+    )
+
+
+def open_proposals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Proposals still awaiting a human. Applied ones are history, not a queue."""
+    return list(
+        conn.execute(
+            "SELECT * FROM repair_proposals WHERE applied_at IS NULL ORDER BY company"
+        )
+    )
+
+
+def mark_proposal_applied(conn: sqlite3.Connection, company: str, now: str) -> None:
+    conn.execute(
+        "UPDATE repair_proposals SET applied_at=? WHERE company=?", (now, company)
     )
 
 
