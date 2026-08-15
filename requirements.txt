@@ -7,7 +7,7 @@ PyYAML==6.0.3
 # why jobtracker/tasks/runner.py is async and jobtracker/browser.py is not.
 #
 #   pip install -e ../stupid-inference-router/clients/python
-#   pip install "git+ssh://git@github.com/ida314/stupid--inference-router.git#subdirectory=clients/python"
+#   pip install "git+ssh://git@github.com/ida314/stupid-inference-router.git#subdirectory=clients/python"
 #
 # httpx is its only dependency and is listed here because this file is what the image
 # installs; the SDK pulls it in either way.

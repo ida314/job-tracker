@@ -169,7 +169,7 @@ Transport is the **`sir-client` SDK** from the inference router (`sir`), as of
 ```sh
 pip install -e ../stupid-inference-router/clients/python
 # or, for a container:
-pip install "git+ssh://git@github.com/ida314/stupid--inference-router.git#subdirectory=clients/python"
+pip install "git+ssh://git@github.com/ida314/stupid-inference-router.git#subdirectory=clients/python"
 ```
 
 ### Why the `Provider` registry was deleted, not kept

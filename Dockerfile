@@ -11,7 +11,7 @@ WORKDIR /app
 # no-op and `check`, `rank`'s scoring, `report` and `dashboard` all still work. That is
 # the same "structurally optional" posture the pass has always had.
 #
-#   docker build --build-arg SIR_CLIENT="git+https://github.com/ida314/stupid--inference-router.git#subdirectory=clients/python" .
+#   docker build --build-arg SIR_CLIENT="git+https://github.com/ida314/stupid-inference-router.git#subdirectory=clients/python" .
 #
 # Two things here are not obvious and both used to break this silently:
 #

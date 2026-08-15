@@ -72,7 +72,7 @@ jobs:
         run: |
           docker build -t jobtracker:ci \
             --build-arg GIT_SHA=${{ github.sha }} \
-            --build-arg SIR_CLIENT=git+https://github.com/ida314/stupid--inference-router.git#subdirectory=clients/python \
+            --build-arg SIR_CLIENT=git+https://github.com/ida314/stupid-inference-router.git#subdirectory=clients/python \
             .
 
       # Same three assertions publish makes on the pushed image, made here on the one
@@ -137,7 +137,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/job-tracker:latest
           build-args: |
             GIT_SHA=${{ github.sha }}
-            SIR_CLIENT=git+https://github.com/ida314/stupid--inference-router.git#subdirectory=clients/python
+            SIR_CLIENT=git+https://github.com/ida314/stupid-inference-router.git#subdirectory=clients/python
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
