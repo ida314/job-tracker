@@ -736,6 +736,18 @@ above intact: publishing an artifact names no orchestrator.
   image.** Without it `work` is a silent nightly no-op that still exits 0 — the same
   failure-is-absence shape as the `response_format` regression. An unverified image
   would reproduce it at the deploy layer.
+- **The PR-time `docker` job builds with `SIR_CLIENT` too**, and repeats publish's three
+  assertions on the image it just built. The bare build exercises none of the SDK install
+  path, which is the half that has broken; without the arg that break would surface on
+  `main`, blocking publish after the merge that caused it. Publish still re-asserts
+  against what it pushed — this is earlier, not instead.
+- **The test job runs without `sir-client`,** because it is not on PyPI and pulling it
+  from git would make the unit suite depend on another repo staying reachable. So no test
+  may assume the SDK imports: `is_configured()` answers "is there an address" *and* "is
+  there anything to dial it with", and two address tests asserting the first were red on
+  every CI run from the day CI was added. Force the world you mean with the
+  `sdk_installed` fixture; the SDK-absent world has its own test, which builds an
+  SDK-less module rather than reading the environment.
 - **Two Dockerfile traps, both fixed 2026-08-15.** `python:*-slim` carries **no git**, so
   the `SIR_CLIENT="git+ssh://…"` invocation this file documented could never have worked;
   git is now installed and purged inside one `RUN` (+8MB net, not +50). And a credential

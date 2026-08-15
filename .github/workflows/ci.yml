@@ -61,8 +61,32 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+
+      # Built WITH the SDK arg, which is the shape publish uses. The bare build is the
+      # easy one; the arg is what drags in the install-git-then-purge-it dance, and that
+      # is the half with a history of breaking (git is absent from python:*-slim, so the
+      # documented invocation could never have worked). Skipping it here would mean that
+      # class of break first appears on main, where it blocks publish after the merge
+      # rather than on the PR that caused it. Costs ~10s.
       - name: Build image
-        run: docker build -t jobtracker:ci .
+        run: |
+          docker build -t jobtracker:ci \
+            --build-arg GIT_SHA=${{ github.sha }} \
+            --build-arg SIR_CLIENT=git+https://github.com/ida314/stupid--inference-router.git#subdirectory=clients/python \
+            .
+
+      # Same three assertions publish makes on the pushed image, made here on the one
+      # that was just built. Publish still repeats them against what it actually pushed —
+      # this catches the break a merge earlier, it does not replace that check.
+      - name: Check the image does what it claims
+        run: |
+          docker run --rm --entrypoint python jobtracker:ci -c 'import sir_client'
+          docker run --rm jobtracker:ci --help > /dev/null
+          docker run --rm --entrypoint python jobtracker:ci -c '
+          import jobtracker, sys
+          v = jobtracker.build_version()
+          print(v)
+          sys.exit(0 if "+" in v else 1)'
 
   # Continuous deployment, the publishing half.
   publish:
