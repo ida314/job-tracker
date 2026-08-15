@@ -45,7 +45,7 @@ from typing import Optional
 import yaml
 from opentelemetry import metrics
 
-from . import config, report as report_mod, store, telemetry, tuning
+from . import build_version, config, report as report_mod, store, telemetry, tuning
 from .criteria import load_criteria
 from .tuning import apply_override
 from .fetch import Fetcher
@@ -1492,6 +1492,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _setup_logging(args.verbose, args.quiet)
+    # Which build is running, on every subcommand rather than just `check`. A nightly
+    # host runs four of them, and an image that failed to update looks exactly like one
+    # that did: same duration, same output, exit 0. This line is the difference.
+    log.info("jobtracker %s", build_version(), extra={"version": build_version()})
     # Must happen before any traced code runs, but note that fetch.py grabbed its tracer
     # at import time and still picks this up — providers resolve lazily, by design.
     telemetry.configure(args.telemetry)

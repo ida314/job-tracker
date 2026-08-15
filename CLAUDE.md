@@ -671,6 +671,37 @@ through the same health/`sync_postings`/`match` loop as any board in `cmd_check`
 manifests, no systemd units in-tree. The deliverable is a container plus a documented
 contract; the units live on the machine that runs them.
 
+**CD publishes that container; it does not deploy it (added 2026-08-15).** Green `main`
+pushes `ghcr.io/ida314/job-tracker:{sha-<sha>,latest}` from the `publish` job, built on
+`ubuntu-24.04-arm` — arm64 only, matching the DGX Spark target and this aarch64 laptop.
+The host **pulls**; nothing in CI holds credentials to a machine. That keeps the rule
+above intact: publishing an artifact names no orchestrator.
+
+- **`sir-client` is baked in, and CI asserts `import sir_client` on the published
+  image.** Without it `work` is a silent nightly no-op that still exits 0 — the same
+  failure-is-absence shape as the `response_format` regression. An unverified image
+  would reproduce it at the deploy layer.
+- **Two Dockerfile traps, both fixed 2026-08-15.** `python:*-slim` carries **no git**, so
+  the `SIR_CLIENT="git+ssh://…"` invocation this file documented could never have worked;
+  git is now installed and purged inside one `RUN` (+8MB net, not +50). And a credential
+  must **never** be a build arg — build args are readable with `docker history` on the
+  published image. The Dockerfile takes an optional BuildKit secret instead, and wipes
+  `/root/.gitconfig` in the same layer. The router repo is public today, so no secret is
+  needed; if it goes private the clone fails loudly rather than shipping an SDK-less
+  image.
+- **Every run names its own build**: `jobtracker 0.1.0+<sha12>`, from `JOBTRACKER_REVISION`
+  (`ARG GIT_SHA`), logged by `main()` for every subcommand and set as `service.version`.
+  This exists because a host that failed to pull is otherwise indistinguishable from one
+  that succeeded — identical runtime, identical report, exit 0. A bare `0.1.0` means not
+  running from a published image; absence is never guessed at.
+- **Rollback is by tag.** Pin `Image=` to a good `:sha-…`. `podman auto-update`'s
+  rollback needs a healthcheck, which a 32-second batch job does not have.
+- Forward image updates are safe unattended: `store.py` does `CREATE TABLE IF NOT EXISTS`
+  plus additive column migrations on connect, so a new image upgrades `state.db` in place.
+- **The host half is not written yet.** gx10 is a DGX Spark on the tailnet; whether it
+  runs podman/quadlet (like the laptop) or Docker (DGX OS's default) is unconfirmed, and
+  that decides the unit shape. Nothing is deployed there today.
+
 - `check` exits 0 (clean), 2 (a board needs attention), or 1 (could not run).
 - `serve` is the one long-running process, so it carries the service affordances: it
   exposes `/healthz` (liveness — a constant, never touches the DB) and `/readyz`

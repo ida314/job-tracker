@@ -22,6 +22,65 @@ The contract is small enough to state in full:
 Runs are idempotent. A second run against the same database re-fetches every board and
 reports `0 new postings`; it does not double-count.
 
+## Where the image comes from
+
+Every green push to `main` publishes one, to two tags:
+
+```
+ghcr.io/ida314/job-tracker:sha-<full-sha>   immutable; what you pin to and roll back to
+ghcr.io/ida314/job-tracker:latest           moving; what an auto-updating host follows
+```
+
+Built on `ubuntu-24.04-arm`, so the image is **arm64 only** — that matches the DGX Spark
+it deploys to and the aarch64 laptop it is developed on. A host on amd64 has no image to
+pull; making one means adding a platform to the buildx call, not a second job.
+
+`publish` is gated on `test` and `docker` both passing and on the ref being `main`. The
+pipeline pushes an artifact and stops there: **nothing in CI reaches into a machine.**
+The host pulls. That is a deliberate choice for a homelab target with no stable inbound
+address — a registry read token on the box is a far smaller blast radius than deploy
+credentials for the box living in a CI provider.
+
+`sir-client` is baked in and CI **verifies it imports** before the tag is considered
+good. Publishing an image without it would leave `work` no-opping in silence every
+night, since a model it cannot reach is a legitimate exit-0 condition. That is the one
+failure this pipeline is specifically shaped to prevent.
+
+## Which build is running
+
+The `check`/`work`/`prepare`/`dashboard` sequence looks identical whether or not last
+night's image was actually pulled: same runtime, same report, exit 0. So every run
+opens by naming its own build —
+
+```
+jobtracker 0.1.0+b64427938711
+```
+
+— from `JOBTRACKER_REVISION`, stamped by the image build (`ARG GIT_SHA`). It is also
+`service.version` on the OTel resource, so a Grafana panel can show the deployed
+revision alongside the run it produced.
+
+A bare `0.1.0` with no `+sha` means the process is **not** running from a published
+image — a working tree, or a locally-built one. Outside a build there is no commit to
+name and the stamp says so rather than guessing.
+
+To check the host from here:
+
+```sh
+journalctl --user -u jobtracker.service -n 200 | grep -o 'jobtracker 0\.[0-9.]*+[0-9a-f]*' | tail -1
+```
+
+Compare against `git rev-parse --short=12 origin/main`. If they differ, the pull did not
+happen; the image is not the thing to debug.
+
+Rollback is by tag, not by tooling: pin `Image=` to a known-good `:sha-…` and reload.
+`podman auto-update`'s own rollback keys off a container healthcheck, which a batch job
+that exits in 32 seconds does not have — do not expect it to catch a bad build.
+
+Schema changes need no coordination: `store.py` applies `CREATE TABLE IF NOT EXISTS`
+plus additive column migrations on every connect, so a newer image upgrades `state.db`
+in place on first run, and an older one ignores columns it does not know about.
+
 ## Exit 2 is narrower than "something was not OK"
 
 Two boards — dbt Labs and Root Insurance — are correct slugs with genuinely zero open

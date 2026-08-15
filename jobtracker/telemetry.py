@@ -203,6 +203,9 @@ def shutdown() -> None:
 
 
 def _version() -> str:
-    from . import __version__
+    # The built revision, not just the package version — `service.version` is how a
+    # backend answers "which commit produced this run", which is the whole point of
+    # stamping it. See jobtracker.build_version.
+    from . import build_version
 
-    return __version__
+    return build_version()
