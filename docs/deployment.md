@@ -283,7 +283,8 @@ machine that runs the job — **not** in this repo.
 Description=Job Tracker nightly board sweep
 
 [Container]
-Image=localhost/jobtracker:latest
+Image=ghcr.io/ida314/job-tracker:latest
+AutoUpdate=registry
 Exec=check
 Volume=%h/jobtracker/data:/data:Z
 Volume=%h/jobtracker/criteria.yaml:/app/criteria.yaml:Z,ro
@@ -294,6 +295,30 @@ LogDriver=none
 
 [Service]
 Type=oneshot
+```
+
+`Image=` names the registry, not `localhost/`: the host **pulls** what CI published, and
+building on the box would defeat the point of publishing at all. `AutoUpdate=registry`
+is what makes `podman auto-update` follow `:latest` — without it the tag is resolved once
+and the box runs that layer forever, which looks exactly like a host that is up to date.
+
+`JOBTRACKER_INSTANCE_ID=%H` is not optional here. `telemetry.py` pins
+`service.instance.id` to the container's nodename, which under `--rm` is a fresh random
+ID every night; `%H` is the host's name and keeps one continuous Prometheus series.
+
+If the package is private, the pull needs a credential — a read-only token, since nothing
+on the box ever writes to the registry:
+
+```sh
+podman login ghcr.io -u <user> --password-stdin <<<"$GHCR_READ_TOKEN"
+```
+
+To pin a build instead of following `:latest` — which is what rollback is — replace the
+tag with an immutable one and drop the auto-update line, so nothing quietly moves the box
+back off the version you pinned it to:
+
+```ini
+Image=ghcr.io/ida314/job-tracker:sha-<full-sha>
 ```
 
 ```ini
@@ -319,6 +344,7 @@ timer activates. Install and test:
 ```sh
 mkdir -p ~/jobtracker/data
 cp criteria.yaml ~/jobtracker/criteria.yaml
+podman pull ghcr.io/ida314/job-tracker:latest   # first run only; the unit pulls after
 systemctl --user daemon-reload
 systemctl --user start jobtracker.service     # run once, now
 systemctl --user show jobtracker.service -p Result -p ExecMainStatus
