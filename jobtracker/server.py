@@ -32,7 +32,6 @@ from __future__ import annotations
 import html
 import json
 import logging
-import shutil
 import signal
 import sqlite3
 import threading

@@ -375,7 +375,7 @@ class PrefillTask(Task):
                 f"  (type: {entry.type}"
                 + (f", one of: {', '.join(entry.options[:12])}" if entry.options else "")
                 + ")\n\n"
-                f"Answer keys available:\n"
+                "Answer keys available:\n"
                 + "\n".join(f"  {k}" for k in candidates)
             ),
             schema=match_schema(list(candidates)),
