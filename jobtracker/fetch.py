@@ -262,6 +262,35 @@ class Fetcher:
             span.set_attribute("fetch.outcome", "ok" if text else "empty")
             return text, source.parse_job_detail_posted_at(data)
 
+    def fetch_application_form(self, company: Company, ats_job_id: str) -> list:
+        """One posting's application questions. `[]` when the ATS does not publish them.
+
+        Same governor as everything else that touches an ATS: `_request_json`, so the
+        per-host limiter, the retry policy and the trace shape all apply. Prefill is a
+        background task and the boards are the scarce resource — it must not get its own
+        unpaced path to the same host.
+
+        An empty list is not an error and never fails the run. For Ashby and Lever it is
+        the expected answer, and their forms are read from the DOM instead.
+        """
+        source = get_source(company.ats)
+        if source is None or not company.slug:
+            return []
+        url = source.application_form_url(company.slug, ats_job_id)
+        if url is None:
+            return []
+        with tracer.start_as_current_span("fetch.application_form") as span:
+            span.set_attribute("company.name", company.name)
+            span.set_attribute("company.ats", company.ats)
+            _status, data, error = self._request_json(url)
+            if error or data is None:
+                span.set_attribute("fetch.outcome", "error")
+                return []
+            fields = source.parse_application_form(data)
+            span.set_attribute("fetch.outcome", "ok" if fields else "empty")
+            span.set_attribute("form.fields", len(fields))
+            return fields
+
     def fetch_company(self, company: Company) -> FetchResult:
         # Span names should be low-cardinality — "fetch.company", never
         # f"fetch {company.name}". The company goes in an *attribute*, which is the

@@ -5,7 +5,9 @@ deterministic matcher cannot honestly say yes or no. `"Backend Software Engineer
 be a new-grad role or might want eight years. The answer is in the job description,
 which the nightly sweep does not read.
 
-This pass reads it. It is **entirely optional** and **entirely local**.
+This pass reads it. It is **entirely optional** and **entirely local**, and it is now
+the `level` task in the queue described in docs/tasks.md — same scope, same
+guarantees, one commit per posting instead of one per run.
 
 ## Scope: level extraction, nothing else
 
@@ -40,40 +42,54 @@ Discord  Software Engineer, Notifications  reject   llm:not_entry:Senior
 
 ## Failure is absence, never a wrong answer
 
-No provider configured, connection refused, timeout, malformed response, low confidence
-— **every one of these leaves the posting `uncertain`**, which is where it already was.
+No router configured, connection refused, timeout, malformed response, an unroutable
+model, low confidence — **every one of these leaves the posting `uncertain`**, which is
+where it already was.
 
 That is the whole safety argument. The pass can only ever add resolution; it cannot
 subtract correctness. Matching must not depend on an inference server being up, so
 nothing here raises for an unreachable host.
 
-With no provider configured, `resolve` reports what it *would* do and changes nothing:
+With nothing configured, `work` reports what it *would* do and changes nothing:
 
 ```
-$ jobtracker resolve
-No LLM provider configured — nothing was changed.
-  1537 uncertain postings open, 674 with an engineering-looking title.
-  Configure one with --llm-provider vllm --llm-url http://HOST:PORT
+$ jobtracker work
+Task queue, in the order the scheduler considers it:
+
+   10  level      674 pending
+                  read descriptions to settle UNCERTAIN postings
+   ...
+
+No inference router configured — nothing was changed.
+  Point at one with --llm-url http://HOST:PORT
+  (or $JOBTRACKER_LLM_URL / $SIR_BASE_URL)
 ```
 
 ## Running it
 
 ```sh
-jobtracker resolve --llm-provider vllm --llm-url http://192.168.1.50:8000
-jobtracker resolve --llm-provider vllm --llm-url http://192.168.1.50:8000 --limit 50
+jobtracker work --task level --llm-url http://192.168.1.50:8000
+jobtracker work --task level --llm-url http://192.168.1.50:8000 --budget 50
+jobtracker resolve --limit 50                    # the same thing, older spelling
 ```
 
 Or via environment, following the same convention as `--telemetry`:
 
 ```sh
-export JOBTRACKER_LLM_PROVIDER=vllm
 export JOBTRACKER_LLM_URL=http://192.168.1.50:8000
 ```
 
-**Which model is out of scope.** Point it at an address; the client asks the server what
-it is serving via `/v1/models` and uses that. `--llm-model` overrides if the server hosts
-several. vLLM rejects a request naming a model it is not serving, so asking beats
-guessing.
+`$SIR_BASE_URL` and `$SIR_ENDPOINTS` — the SDK's own variables — are honoured too, so a
+machine that already points other services at the router does not have to repeat itself.
+`$SIR_ENDPOINTS` alone is enough: it routes per model rather than naming one address.
+
+**There is no `--llm-provider` any more** (removed 2026-08-13). There is one transport,
+and the router is the thing that knows which backend serves what. The configuration is
+an address.
+
+**Which model is out of scope.** Point it at an address; the client asks the router what
+it is serving via `/v1/models` and uses that. `--llm-model` overrides if several are
+routed.
 
 `probe()` runs first and contacts the server *even when a model name is configured* —
 short-circuiting there would report "ready" against a switched-off box, and the failure
@@ -102,13 +118,19 @@ rather than regressing into a reject.
 ## Where descriptions come from
 
 **Not from this pass.** Since 2026-08-02 `check` caches a description for every posting
-whose verdict is `match` or `uncertain`, so `resolve` is a pure read of `state.db` and
-the only socket it opens is to the local model. It lost its `fetcher`, `store_mod`, and
+whose verdict is `match` or `uncertain`, so the `level` task is a pure read of `state.db`
+and the only socket it opens is to the router. It lost its `fetcher`, `store_mod`, and
 `conn` parameters along with the lazy fetch path.
 
 That matters beyond tidiness: a throttled board can no longer shrink the queue this pass
 considers, and what is available to read no longer depends on which postings some earlier
 run happened to visit.
+
+It also changed what "pending" means, for the better. A posting with no cached
+description used to be counted as considered-and-skipped; now it is simply **not queued**,
+because with no fetching in this pass it is work that cannot be done rather than work
+waiting its turn. The old shape overstated the backlog every night and sent a `--limit`
+run to postings guaranteed to be no-ops.
 
 | ATS | Cost to `check` |
 |---|---|
@@ -132,58 +154,86 @@ One Greenhouse quirk worth knowing: `content` is HTML-escaped *inside* a JSON st
 it arrives as `&lt;h2&gt;Who we are&lt;/h2&gt;`. Unescaping has to happen before
 tag-stripping, or the model is handed a wall of `&lt;p&gt;`.
 
-## Adding a provider
+## The transport
 
-`jobtracker/llm/` deliberately mirrors `jobtracker/sources/`:
+`jobtracker/llm/` is two files:
 
 | File | Role |
 |---|---|
-| `llm/base.py` | `Provider` interface, `_REGISTRY`, `register()` / `get_provider()` |
-| `llm/vllm.py` | vLLM's wire format — the reference implementation |
-| `llm/client.py` | The **only** module that opens a socket |
+| `llm/wire.py` | The request body and how to read the answer out. Pure. |
+| `llm/client.py` | The **only** module that opens a socket. |
 
-The rule that matters: **adapters are pure.** A provider builds a request body and
-parses a response payload; it never touches the network, exactly as ATS adapters never
-do. That is what lets providers be tested against recorded payloads with no HTTP
-mocking.
+Transport is the **`sir-client` SDK** from the inference router (`sir`), as of
+2026-08-13. It is not on PyPI:
 
-To add one, implement `Provider` and add a line to `llm/__init__.py`:
-
-```python
-class Ollama(Provider):
-    name = "ollama"
-    def chat_url(self, base_url): return f"{base_url}/v1/chat/completions"
-    def build_request(self, model, system, user, schema, max_tokens=512): ...
-    def parse_response(self, raw): ...
-
-register(Ollama())
+```sh
+pip install -e ../stupid-inference-router/clients/python
+# or, for a container:
+pip install "git+ssh://git@github.com/ida314/stupid--inference-router.git#subdirectory=clients/python"
 ```
 
-There is no API-key handling anywhere in this package, and there should not be. A
-provider is an address you point at.
+### Why the `Provider` registry was deleted, not kept
 
-## Why vLLM first
+There used to be a `Provider` interface and a `_REGISTRY`, mirroring `sources/`, so a
+second wire format could be slotted in without touching the client. The router *is* that
+indirection now: it presents one OpenAI-compatible endpoint and decides which model is
+resident. Keeping a second dispatch layer in front of one that already exists would have
+been two abstractions doing one job.
 
-- **No SDK.** OpenAI-compatible JSON over HTTP, so `requests` — already a dependency for
-  the ATS fetches — is the entire client. Nothing to install is what makes "optional"
-  structurally true rather than aspirational.
+What survived is the split that actually mattered — `wire.py` is pure and knows the body
+shape, `client.py` owns every socket. That is deliberate on the router's side too: it
+reads only `model` and `stream` and forwards the rest **exactly as written**, because the
+extras backends accept (`guided_json` against `json_schema`, `ebnf` against
+`guided_grammar`) drift every release and a translator in the middle would have to be
+updated in lockstep with all of them. So the knowledge of what the backend accepts stays
+in the service that already has it, which is this one.
+
+There is still no API-key handling anywhere in this package, and there should not be.
+
+### Async, and what that forced
+
+The SDK is async-only — a sync wrapper you cannot call from inside a loop is a footgun.
+So `tasks/runner.py` is async, which is also what let units run concurrently through the
+router. `browser.py` is Playwright's *sync* API, which must **not** run inside an asyncio
+loop; that is why the two are separate modules and why `serve` drives the browser on a
+plain daemon thread.
+
+The SDK also submits asynchronously (`Prefer: respond-async`) and polls a job, so a
+request that waits minutes behind a model swap does not sit on an HTTP connection long
+enough to meet every idle timeout between here and the GPU. None of that is visible above
+`client.complete()`.
+
+### Failure is still absence
+
+Every SDK error — `ModelNotRouted`, `TransportError`, `JobLost`, `JobFailed`,
+`JobCancelled`, `RequestTimeout` — plus any raw `httpx` exception, returns `None`. They
+are all handled identically because they all mean "no answer", never "wrong answer".
+Nothing here raises for a router that is down.
+
+## Why `response_format`, and why it is still validated
+
 - **Constrained decoding.** `response_format` restricts sampling so the server emits text
   conforming to the schema. Malformed output stops being a failure mode to parse around.
-  The client validates anyway: a server that silently ignored the schema would
-  otherwise let free-form prose through as a verdict.
+  The client validates anyway: a server that silently ignored the schema would otherwise
+  let free-form prose through as a verdict.
 
   That validation earned its keep on 2026-07-24. The request used vLLM's older
   `guided_json` + `guided_decoding_backend` pair, both since dropped from the request
   schema. vLLM 0.23 does not reject a body carrying them — it **accepts the request,
-  ignores the keys, and answers in prose**. Every response then failed `_parse_verdict`,
-  so every posting stayed `uncertain`: the pass ran, spent a description fetch per
-  posting, and resolved nothing. Failure-is-absence meant this cost accuracy nothing,
-  which is also why nothing surfaced it — a no-op pass and a pass with no work to do
-  look identical from the outside. If `resolve` reports zero resolutions against a
-  server that is demonstrably up, suspect the wire format before the model.
+  ignores the keys, and answers in prose**. Every response then failed the parser, so
+  every posting stayed `uncertain`: the pass ran, spent a description fetch per posting,
+  and resolved nothing. Failure-is-absence meant this cost accuracy nothing, which is
+  also why nothing surfaced it — a no-op pass and a pass with no work to do look
+  identical from the outside. If a task reports zero applied against a router that is
+  demonstrably up, suspect the wire format before the model.
 
-  `response_format` is OpenAI's own spelling and the portable one. **Check it against
-  the server you actually run** — a schema request is a request, not a guarantee.
+  **Routing through `sir` does not make this safer.** It forwards the body untouched, so
+  a backend that ignores the key still answers in prose and the parsers are still the
+  only thing between that and a fabricated verdict. Demonstrated on 2026-08-13 against
+  the router's mock backend, which ignores the schema entirely: every prefill
+  question-match came back unparseable and every field became a gap. Exactly right —
+  no answer rather than a wrong one. **Check it against the server you actually run.**
+
 - `temperature: 0`, so the same posting classifies the same way on a rerun. Otherwise
   `eval` scores noise instead of the model.
 

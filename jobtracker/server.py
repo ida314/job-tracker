@@ -43,7 +43,14 @@ from typing import Optional
 
 import yaml
 
-from . import config, dashboard as dashboard_mod, rank as rank_mod, store, tuning
+from . import (
+    config,
+    dashboard as dashboard_mod,
+    rank as rank_mod,
+    safewrite,
+    store,
+    tuning,
+)
 from .criteria import _LIST_KEYS, load_criteria
 from .match import location_label, location_rank, match
 from .models import Decision, Posting, Verdict
@@ -134,16 +141,102 @@ def render_tuning(conn: sqlite3.Connection, criteria) -> str:
     return "\n".join(p)
 
 
+def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
+    """The answer bank and everything still unanswered. Pure read — never writes.
+
+    The gap list is the machine's half of the conversation: every question an
+    application form asked that nothing in `answers.yaml` could answer, deduplicated
+    across the companies that asked it. Answering one here writes it into the file and
+    invalidates the prefill plans that needed it, so the next `work --task prefill` run
+    fills that field everywhere.
+    """
+    gaps = store.open_gaps(conn)
+    answers, error = _load_answers_quietly(answers_path)
+
+    p = [
+        "<!doctype html><meta charset=utf-8><title>Settings</title>",
+        f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_SETTINGS_CSS}</style>",
+        "<body><div class=wrap><h1>Settings</h1>", _NAV,
+        f"<p class=note>Answer bank: <code>{html.escape(str(answers_path))}</code>"
+        " — git-ignored, and the source of truth. This page edits it in place.</p>",
+    ]
+
+    if error:
+        p.append(f"<p class='banner bad'>{html.escape(error)}</p>")
+    elif answers is None:
+        p.append(
+            "<p class='banner bad'>No answer bank yet. "
+            "<code>cp answers.example.yaml answers.yaml</code> and fill it in.</p>"
+        )
+
+    p.append(f"<h2>Unanswered questions ({len(gaps)})</h2>")
+    if not gaps:
+        p.append("<p class=note>Nothing outstanding. Every field prefill has seen so "
+                 "far has an answer.</p>")
+    for gap in gaps:
+        options = gap["options"] or ""
+        p.append("<div class=gap>")
+        p.append(f"<div class=ask>{html.escape(gap['ask'])}</div>")
+        p.append(
+            "<div class=note>"
+            f"asked by {html.escape(gap['seen_on'])} · type {html.escape(gap['type'])}"
+            f" · first seen {html.escape(gap['first_seen'])}</div>"
+        )
+        if options:
+            p.append(f"<div class=note>one of: {html.escape(options)}</div>")
+        # The key travels in a data attribute rather than being interpolated into a
+        # handler — the question text comes from a third-party ATS.
+        p.append(
+            f"<div class=row><input class=answer type=text placeholder='Your answer' "
+            f"data-key=\"{html.escape(gap['question_key'], quote=True)}\">"
+            f"<button class=save data-key=\"{html.escape(gap['question_key'], quote=True)}\">"
+            "Save</button></div>"
+        )
+        p.append("</div>")
+
+    if answers is not None:
+        p.append(f"<h2>Answers you have written ({len(answers.answerable)})</h2>")
+        p.append("<table><thead><tr><th>Key</th><th>Answer</th></tr></thead><tbody>")
+        for key in answers.answerable:
+            value = answers.get(key) or ""
+            p.append(
+                f"<tr><td><code>{html.escape(key)}</code></td>"
+                f"<td>{html.escape(value[:160])}</td></tr>"
+            )
+        p.append("</tbody></table>")
+        p.append(
+            "<p class=note>Edit these in the file directly; this page only adds "
+            "answers to questions it asked you.</p>"
+        )
+
+    p.append(f"<script>{_JS}</script></div></body></html>")
+    return "\n".join(p)
+
+
+def _load_answers_quietly(path: Path):
+    """(Answers|None, error|None). A missing or broken file is a page, not a 500."""
+    from .answers import load_answers
+
+    if not Path(path).exists():
+        return None, None
+    try:
+        return load_answers(path), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
 # -- server -------------------------------------------------------------------------
 class TuningServer(HTTPServer):
     """Carries the paths the handler needs; HTTPServer has nowhere else to put them."""
 
     def __init__(self, addr, handler, db_path: Path, criteria_path: Path,
-                 companies_path: Optional[Path]) -> None:
+                 companies_path: Optional[Path],
+                 answers_path: Optional[Path] = None) -> None:
         super().__init__(addr, handler)
         self.db_path = db_path
         self.criteria_path = criteria_path
         self.companies_path = companies_path
+        self.answers_path = answers_path or config.ANSWERS_YAML
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -211,6 +304,13 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._send(page)
+            elif path == "/settings":
+                conn = self._conn()
+                try:
+                    page = render_settings(conn, Path(self.server.answers_path))
+                finally:
+                    conn.close()
+                self._send(page)
             else:
                 self._send("<h1>404</h1>", 404)
         except Exception:  # noqa: BLE001
@@ -229,6 +329,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_rule(payload))
             elif path == "/api/rematch":
                 self._send_json(self._api_rematch())
+            elif path == "/api/answer":
+                self._send_json(self._api_answer(payload))
+            elif path == "/api/apply-to":
+                self._send_json(self._api_apply_to(payload))
             else:
                 self._send_json({"ok": False, "error": "unknown endpoint"}, 404)
         except Exception as exc:  # noqa: BLE001
@@ -407,18 +511,129 @@ class Handler(BaseHTTPRequestHandler):
 
         # Write a candidate, parse *that*, and only then swap. Validating after the
         # fact would leave a broken criteria.yaml on disk for the next run to hit.
-        tmp = path.with_suffix(".yaml.candidate")
-        tmp.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100))
+        # The four steps live in safewrite.py now, shared with the answers writer.
         try:
-            load_criteria(tmp)
-        except Exception as exc:  # noqa: BLE001
-            tmp.unlink(missing_ok=True)
+            safewrite.write_yaml(path, data, load_criteria)
+        except safewrite.RefusedWrite as exc:
             return {"ok": False, "error": f"refused invalid criteria: {exc}"}
-
-        shutil.copy2(path, path.with_suffix(".yaml.bak"))
-        tmp.replace(path)
         log.info("added %r to %s", phrase, key)
         return {"ok": True, "phrase": phrase, "list": key}
+
+    def _api_answer(self, payload: dict) -> dict:
+        """Write an answer to a question prefill could not answer.
+
+        Goes through the same candidate-parse-backup-swap path as a criteria edit, and
+        for the same reason: `answers.yaml` is loaded by a later run, so a malformed
+        write here would surface as a broken prefill rather than as an error now.
+
+        The insertion is text surgery rather than a YAML round trip. A round trip would
+        delete every comment in the file, including the stubs you are working through.
+        """
+        from .answers import insert_answer, load_answers
+
+        key = str(payload.get("question_key") or "").strip()
+        value = str(payload.get("value") or "").strip()
+        if not key:
+            return {"ok": False, "error": "no question_key"}
+        if not value:
+            return {"ok": False, "error": "an empty answer is not an answer"}
+
+        path = Path(self.server.answers_path)
+        if not path.exists():
+            return {"ok": False, "error": f"no answer bank at {path}"}
+
+        conn = self._conn()
+        try:
+            gap = conn.execute(
+                "SELECT ask FROM prefill_gaps WHERE question_key=?", (key,)
+            ).fetchone()
+            aliases = [gap["ask"]] if gap else []
+
+            body = insert_answer(path.read_text(), key, value, aliases)
+            try:
+                safewrite.write_text(path, body, load_answers)
+            except safewrite.RefusedWrite as exc:
+                return {"ok": False, "error": f"refused invalid answers.yaml: {exc}"}
+
+            store.resolve_gap(conn, key, _today())
+            conn.commit()
+            remaining = len(store.open_gaps(conn))
+        finally:
+            conn.close()
+
+        log.info("answered %r", key)
+        # Every stored plan was an answer to "what do I know today", and today changed.
+        # They rebuild on the next prefill run, mostly without any model call.
+        return {"ok": True, "question_key": key, "remaining": remaining}
+
+    def _api_apply_to(self, payload: dict) -> dict:
+        """Open one application in a browser, filled in. Returns before it finishes.
+
+        This server handles one request at a time — it is `HTTPServer`, not
+        `ThreadingHTTPServer` — so driving a browser inline would freeze the page for
+        as long as the window stayed open. The fill runs on a daemon thread and this
+        answers immediately.
+
+        Playwright's sync API is used on that thread, which is fine; what it must not do
+        is run inside an asyncio loop, and nothing here has one.
+        """
+        company_name = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company_name or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT url, title FROM postings WHERE company=? AND ats_job_id=?",
+                (company_name, job_id),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "error": "no such posting"}
+            plan = store.get_plan(conn, company_name, job_id)
+            plan_json = plan["plan"] if plan else None
+            url = row["url"]
+        finally:
+            conn.close()
+
+        companies = {c.name: c for c in config.load_companies(self.server.companies_path)}
+        company = companies.get(company_name)
+        if company is None:
+            return {"ok": False, "error": f"{company_name} is not in companies.yaml"}
+
+        answers, error = _load_answers_quietly(Path(self.server.answers_path))
+        if answers is None:
+            return {"ok": False, "error": error or "no usable answer bank"}
+
+        def _run() -> None:
+            from . import browser as browser_mod
+
+            worker_conn = store.connect(self.server.db_path)
+            try:
+                browser_mod.fill_application(
+                    worker_conn,
+                    company=company,
+                    ats_job_id=job_id,
+                    url=url,
+                    answers=answers,
+                    today=_today(),
+                    user_data_dir=config.BROWSER_PROFILE,
+                    plan_json=plan_json,
+                    headless=False,
+                    # Nothing is watching a terminal here, so there is no prompt to
+                    # wait on. The window stays open because the context is closed
+                    # only when the thread ends, and it ends when the fill is done.
+                    wait=False,
+                )
+            except Exception:  # noqa: BLE001 — a browser failure must not kill serve
+                log.exception("apply-to %s/%s failed", company_name, job_id)
+            finally:
+                worker_conn.close()
+
+        threading.Thread(
+            target=_run, name=f"jobtracker-apply-{job_id}", daemon=True
+        ).start()
+        return {"ok": True, "detail": f"opening {row['title'][:60]}…"}
 
     def _api_rematch(self) -> dict:
         """Re-apply criteria to every open posting — same logic as `jobtracker rematch`."""
@@ -449,7 +664,18 @@ def _today() -> str:
     return date.today().isoformat()
 
 
-_NAV = '<nav class=nav><a href="/">Dashboard</a> · <a href="/tuning">Tuning</a></nav>'
+_NAV = (
+    '<nav class=nav><a href="/">Dashboard</a> · <a href="/tuning">Tuning</a>'
+    ' · <a href="/settings">Settings</a></nav>'
+)
+
+_SETTINGS_CSS = """
+.gap{padding:.7rem .9rem;margin:.5rem 0;border-left:3px solid #d97706;background:rgba(217,119,6,.07)}
+.gap .ask{font-weight:600;margin-bottom:.2rem}
+.gap .row{display:flex;gap:.5rem;margin-top:.5rem}
+.gap input.answer{flex:1;padding:.3rem .5rem;border-radius:5px;
+border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
+"""
 
 _EXTRA_CSS = """
 .nav{margin:0 0 1rem;font-size:.9rem}
@@ -492,16 +718,37 @@ document.addEventListener('click', async (e) => {
     alert('Added "' + phrase + '"\\nmatch: ' + (rm.before.match||0) +
           ' -> ' + (rm.after.match||0));
     location.reload();
+    return;
+  }
+  const save = e.target.closest('button.save');
+  if (save) {
+    const box = document.querySelector('input.answer[data-key="' + save.dataset.key + '"]');
+    const res = await post('/api/answer', {question_key: save.dataset.key,
+                                           value: box ? box.value : ''});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const ap = e.target.closest('button.apply-to');
+  if (ap) {
+    ap.disabled = true;
+    const res = await post('/api/apply-to', {company: ap.dataset.company,
+                                             ats_job_id: ap.dataset.job});
+    if (!res.ok) { alert(res.error); ap.disabled = false; return; }
+    ap.textContent = 'Opening…';
   }
 });
 """
 
 
 def serve(db_path: Path, criteria_path: Path, companies_path: Optional[Path],
-          host: str = "127.0.0.1", port: int = 8765) -> int:
-    httpd = TuningServer((host, port), Handler, db_path, criteria_path, companies_path)
+          host: str = "127.0.0.1", port: int = 8765,
+          answers_path: Optional[Path] = None) -> int:
+    httpd = TuningServer((host, port), Handler, db_path, criteria_path, companies_path,
+                         answers_path)
     log.info(
-        "serving on http://%s:%d  (dashboard: /  tuning: /tuning  health: /healthz /readyz)",
+        "serving on http://%s:%d  (dashboard: /  tuning: /tuning  settings: /settings  "
+        "health: /healthz /readyz)",
         host, port,
     )
     if host not in ("127.0.0.1", "localhost", "::1"):

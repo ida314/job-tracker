@@ -193,32 +193,13 @@ class RankStats:
         )
 
 
-def judge_matches(rows, client, profile: Profile) -> tuple[list[tuple], RankStats]:
-    """Ask the model about each row. Returns [(company, ats_job_id, judgment), ...].
-
-    Pure with respect to storage — the caller writes. Takes an already-built client so
-    it can be tested against a stub with no network, the same shape `resolve_postings`
-    uses.
-
-    A row the model cannot read is simply absent from the result. It is never given a
-    default judgment, because a fabricated "moderate" is worse than a visible gap.
-    """
-    stats = RankStats()
-    out: list[tuple] = []
-    for row in rows:
-        stats.considered += 1
-        judgment = client.judge_posting(row["title"], row["description"], profile.prose)
-        if judgment is None:
-            stats.unreadable += 1
-            continue
-        stats.judged += 1
-        out.append((row["company"], row["ats_job_id"], judgment))
-        log.debug(
-            "judged %s — %s: fit=%s growth=%s risk=%s",
-            row["company"], row["title"][:48],
-            judgment.backend_fit, judgment.growth, judgment.entry_risk,
-        )
-    return out, stats
+# Judging itself lives in `tasks/judge.py`. It moved there on 2026-08-13 with the rest
+# of the model work, because "ask the model about each row" is the shape every model
+# pass has and keeping three copies of that loop is how they drifted apart. What stayed
+# here is everything that needs no model: the weights, the arithmetic, and the ordering.
+#
+# That boundary is the same one `docs/ranking.md` describes — the model supplies labels,
+# Python composes the score — so it is worth keeping the file split on it.
 
 
 def top_n(rows, n: int, today: str) -> list:

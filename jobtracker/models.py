@@ -98,6 +98,31 @@ class Verdict:
     decided_by: str = "rules"
 
 
+@dataclass(frozen=True)
+class FormField:
+    """One question on one application form.
+
+    The shared vocabulary between the two ways a form becomes known — an ATS that
+    publishes its questions, and a browser reading the rendered DOM — so the resolution
+    and gap machinery downstream never has to know which one it is looking at.
+
+    `key` is the ATS's own field name where there is one (`first_name`, `question_681…`)
+    and a slug of the label where there is not. `options` is empty for anything that is
+    not a select; a select with no options is a form we failed to read properly, not a
+    select with nothing to choose.
+    """
+
+    key: str
+    label: str
+    type: str  # text | textarea | select | multiselect | file | checkbox
+    required: bool = False
+    options: tuple[str, ...] = ()
+
+    @property
+    def is_file(self) -> bool:
+        return self.type == "file"
+
+
 @dataclass
 class FetchResult:
     """The outcome of fetching one company's board.

@@ -234,6 +234,11 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
              border-left: 2px solid var(--grid); padding-left: 11px; margin-bottom: 10px; }
 .pick .terms { font-size: 11.5px; color: var(--muted); font-family: ui-monospace,
                SFMono-Regular, Menlo, monospace; margin-bottom: 10px; }
+.pick .prefill { font-size: 12px; color: var(--ink-2); margin-bottom: 10px;
+                 font-variant-numeric: tabular-nums; }
+.pick .prefill.none { color: var(--muted); }
+.pick .prefill.full { color: var(--good); }
+.pick .prefill .need { color: var(--warning); }
 .pick .act { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
 .pick .act a.apply { background: var(--accent); color: #fcfcfb; text-decoration: none;
                      padding: 6px 14px; border-radius: 6px; font-size: 13px;
@@ -388,6 +393,7 @@ def build_dashboard(
     ranked = store.ranked_matches(conn)
     picks = rank_mod.top_n(ranked, 3, today)
     unranked = sum(1 for r in ranked if r["score"] is None)
+    plans = store.plans_by_posting(conn)
 
     parts: list[str] = []
     parts.append("<!doctype html>")
@@ -403,7 +409,7 @@ def build_dashboard(
     # Today first, and by itself: the point of the page is to shorten the distance
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
-    _picks(parts, picks, by_name, unranked, today, interactive, criteria)
+    _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="all" hidden>')
@@ -450,7 +456,8 @@ def _tabs(parts, picks, matches, uncertain, unhealthy) -> None:
     parts.append("</nav>")
 
 
-def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None) -> None:
+def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
+           plans=None) -> None:
     """The three to apply to today.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -466,7 +473,7 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None) -
     else:
         parts.append('<div class="picks">')
         for i, row in enumerate(picks, 1):
-            _pick(parts, i, row, by_name, today, interactive, criteria)
+            _pick(parts, i, row, by_name, today, interactive, criteria, plans)
         parts.append("</div>")
 
     if unranked:
@@ -479,7 +486,7 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None) -
         )
 
 
-def _pick(parts, i, row, by_name, today, interactive, criteria=None) -> None:
+def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None) -> None:
     tier = _tier_of(row["company"], by_name)
     var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
@@ -510,6 +517,8 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None) -> None:
         f'entry risk {html.escape(row["entry_risk"])}</div>'
     )
 
+    _prefill_line(parts, row, plans)
+
     parts.append('<div class="act">')
     parts.append(
         f'<a class="apply" href="{_safe_url(row["url"])}" target="_blank" '
@@ -518,6 +527,13 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None) -> None:
     if interactive:
         c = html.escape(row["company"], quote=True)
         j = html.escape(row["ats_job_id"], quote=True)
+        # Only under `serve`. The static file must stay offline and read-only, and a
+        # button that cannot drive a browser is worse than no button — the same rule
+        # the disposition buttons follow.
+        parts.append(
+            f'<button class="apply-to" data-company="{c}" data-job="{j}">'
+            "Open prefilled</button>"
+        )
         for action, label in (
             ("applied", "I applied"), ("skipped", "Skip"), ("snoozed", "Snooze 7d"),
         ):
@@ -527,6 +543,31 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None) -> None:
             )
     parts.append("</div>")
     parts.append("</article>")
+
+
+def _prefill_line(parts, row, plans) -> None:
+    """How much of this application we can fill in, and what still needs the user.
+
+    Rendered in the static file too, without the button. The counts are the useful part
+    even offline: they say whether opening this one will take thirty seconds or ten
+    minutes, which is exactly the question the Today tab exists to answer.
+    """
+    plan = (plans or {}).get((row["company"], row["ats_job_id"]))
+    if plan is None:
+        parts.append(
+            '<div class="prefill none">no prefill yet — '
+            "<code>jobtracker work --task prefill</code></div>"
+        )
+        return
+    filled = plan["fields"] - plan["gaps"]
+    cls = "prefill" if plan["gaps"] else "prefill full"
+    tail = (
+        f' · <span class="need">{plan["gaps"]} need you</span>'
+        if plan["gaps"] else " · nothing left to type"
+    )
+    parts.append(
+        f'<div class="{cls}">prefill {filled}/{plan["fields"]} fields{tail}</div>'
+    )
 
 
 def _header(parts, today, run, companies) -> None:

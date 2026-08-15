@@ -154,6 +154,78 @@ CREATE TABLE IF NOT EXISTS deferrals (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (company, ats_job_id)
 );
+
+-- A failure ledger for the task queue. NOT a queue: the queue is derived every run by
+-- each task's own SQL over the tables above, so there is nothing here to drift out of
+-- sync with what is actually pending. This exists for one purpose — to stop retrying a
+-- unit that has failed the same way three nights running, which would otherwise consume
+-- the whole budget forever while the rest of the queue starves.
+--
+-- `unit_key` identifies the *question*, not the posting: for `judge` it carries the
+-- profile prose hash, for `prefill` the answers hash. Change the question and the unit
+-- is new, so it is retried with a clean slate — which is correct, because a failure
+-- against the old question says nothing about the new one.
+CREATE TABLE IF NOT EXISTS task_attempts (
+    task        TEXT NOT NULL,
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    unit_key    TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_status TEXT NOT NULL,   -- ok | no_answer | error
+    last_error  TEXT,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (task, company, ats_job_id, unit_key)
+);
+
+-- What we know about one company's application form, learned either from an ATS that
+-- publishes its questions (Greenhouse) or from the DOM on the first browser visit
+-- (everything else). Keyed per company because forms are per company and stable, so one
+-- visit teaches the system that employer's form permanently.
+--
+-- `question_key` NULL is the whole point: it means "this field was seen and we have no
+-- answer for it", which is what `prefill_gaps` is generated from.
+CREATE TABLE IF NOT EXISTS form_fields (
+    company      TEXT NOT NULL,
+    form_key     TEXT NOT NULL,   -- ATS field name, or a slug of the label for DOM finds
+    label        TEXT NOT NULL,
+    type         TEXT NOT NULL,
+    required     INTEGER NOT NULL DEFAULT 0,
+    options      TEXT,            -- JSON array of {label, value}, for selects
+    question_key TEXT,            -- resolved answers.yaml key; NULL means gap
+    source       TEXT NOT NULL,   -- greenhouse-api | dom
+    first_seen   TEXT NOT NULL,
+    last_seen    TEXT NOT NULL,
+    PRIMARY KEY (company, form_key)
+);
+
+-- One row per question we cannot answer, deduplicated across every company that asks
+-- it. This is what the Settings page renders, and what the commented stubs appended to
+-- answers.yaml mirror. `resolved_at` is set rather than the row deleted, so the history
+-- of what the system had to ask you stays readable.
+CREATE TABLE IF NOT EXISTS prefill_gaps (
+    question_key TEXT PRIMARY KEY,
+    ask          TEXT NOT NULL,   -- the question text, verbatim from the form
+    type         TEXT NOT NULL,
+    options      TEXT,
+    seen_on      TEXT NOT NULL,   -- comma-separated company names
+    first_seen   TEXT NOT NULL,
+    resolved_at  TEXT
+);
+
+-- A built prefill for one posting: which value goes in which field, and how many fields
+-- had no answer. `answers_hash` plays exactly the role `rankings.prose_hash` plays for
+-- judging — it records which version of the question this was an answer to, so adding an
+-- answer invalidates the plans that needed it and nothing else.
+CREATE TABLE IF NOT EXISTS prefill_plans (
+    company      TEXT NOT NULL,
+    ats_job_id   TEXT NOT NULL,
+    plan         TEXT NOT NULL,   -- JSON [{form_key, label, type, value, source}]
+    fields       INTEGER NOT NULL DEFAULT 0,
+    gaps         INTEGER NOT NULL DEFAULT 0,
+    answers_hash TEXT NOT NULL,
+    built_at     TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
 """
 
 # Columns added after the initial schema shipped. CREATE TABLE IF NOT EXISTS cannot
@@ -812,3 +884,267 @@ def get_description(
         (company, ats_job_id),
     ).fetchone()
     return row["description"] if row else None
+
+
+# -- the task ledger ---------------------------------------------------------------
+TASK_STATUSES = ("ok", "no_answer", "error")
+
+
+def record_attempt(
+    conn: sqlite3.Connection,
+    task: str,
+    company: str,
+    ats_job_id: str,
+    unit_key: str,
+    status: str,
+    now: str,
+    error: Optional[str] = None,
+) -> None:
+    """Note that a unit was tried, and how it went.
+
+    `attempts` counts consecutive failures, so a success resets it to zero. A unit that
+    works one night and fails the next has not used up two of its three lives.
+    """
+    if status not in TASK_STATUSES:
+        raise ValueError(f"unknown task status {status!r}; expected {TASK_STATUSES}")
+    attempts_expr = "0" if status == "ok" else "task_attempts.attempts + 1"
+    conn.execute(
+        f"""
+        INSERT INTO task_attempts (task, company, ats_job_id, unit_key,
+                                   attempts, last_status, last_error, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task, company, ats_job_id, unit_key) DO UPDATE SET
+            attempts={attempts_expr},
+            last_status=excluded.last_status,
+            last_error=excluded.last_error,
+            updated_at=excluded.updated_at
+        """,
+        (task, company, ats_job_id, unit_key,
+         0 if status == "ok" else 1, status, error, now),
+    )
+
+
+def blocked_units(
+    conn: sqlite3.Connection, task: str, max_attempts: int
+) -> set[tuple[str, str, str]]:
+    """Units that have failed `max_attempts` times running and are out of retries.
+
+    Deliberately small — only failures are in this table at all — so the caller loads
+    the whole set once per run and filters in Python rather than joining it into every
+    task's own query.
+    """
+    rows = conn.execute(
+        """
+        SELECT company, ats_job_id, unit_key FROM task_attempts
+        WHERE task=? AND attempts >= ? AND last_status != 'ok'
+        """,
+        (task, int(max_attempts)),
+    )
+    return {(r["company"], r["ats_job_id"], r["unit_key"]) for r in rows}
+
+
+def task_ledger(conn: sqlite3.Connection, task: Optional[str] = None) -> list[sqlite3.Row]:
+    """Every unit that has failed at least once, worst first. For reporting."""
+    sql = """
+        SELECT task, company, ats_job_id, unit_key, attempts,
+               last_status, last_error, updated_at
+        FROM task_attempts WHERE last_status != 'ok'
+    """
+    params: tuple = ()
+    if task:
+        sql += " AND task=?"
+        params = (task,)
+    sql += " ORDER BY attempts DESC, updated_at DESC"
+    return list(conn.execute(sql, params))
+
+
+# -- application forms and prefill --------------------------------------------------
+def upsert_form_field(
+    conn: sqlite3.Connection,
+    company: str,
+    form_key: str,
+    label: str,
+    field_type: str,
+    now: str,
+    required: bool = False,
+    options: Optional[str] = None,
+    question_key: Optional[str] = None,
+    source: str = "greenhouse-api",
+) -> None:
+    """Record one field of one company's application form.
+
+    `question_key` is written even when NULL — an unresolved field must be able to
+    *become* unresolved again if an answer is deleted, and a COALESCE here would pin
+    the first resolution forever.
+    """
+    conn.execute(
+        """
+        INSERT INTO form_fields (company, form_key, label, type, required, options,
+                                 question_key, source, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, form_key) DO UPDATE SET
+            label=excluded.label, type=excluded.type, required=excluded.required,
+            options=excluded.options, question_key=excluded.question_key,
+            source=excluded.source, last_seen=excluded.last_seen
+        """,
+        (company, form_key, label, field_type, 1 if required else 0, options,
+         question_key, source, now, now),
+    )
+
+
+def form_fields_for(conn: sqlite3.Connection, company: str) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT * FROM form_fields WHERE company=? ORDER BY rowid", (company,)
+    ))
+
+
+def known_question_keys(conn: sqlite3.Connection) -> dict[str, str]:
+    """Every label we have already resolved, normalized -> question_key.
+
+    This is the alias pass: a question one company asked, answered once, is recognized
+    at every other company that phrases it the same way, with no model call.
+    """
+    rows = conn.execute(
+        "SELECT label, question_key FROM form_fields WHERE question_key IS NOT NULL"
+    )
+    return {normalize_label(r["label"]): r["question_key"] for r in rows}
+
+
+def normalize_label(label: str) -> str:
+    """Fold a form label to a comparison key.
+
+    Lowercase, strip anything that is not alphanumeric, collapse whitespace. Deliberately
+    aggressive: "Who is your current or previous employer?" and "Who is your current or
+    previous employer" must be the same question, because a trailing asterisk marking a
+    field required is not a different question.
+    """
+    kept = [c.lower() if c.isalnum() else " " for c in label]
+    return " ".join("".join(kept).split())
+
+
+def record_gap(
+    conn: sqlite3.Connection,
+    question_key: str,
+    ask: str,
+    field_type: str,
+    company: str,
+    now: str,
+    options: Optional[str] = None,
+) -> bool:
+    """Note a question we have no answer for. True if this is the first sighting.
+
+    Re-seeing a gap appends the company to `seen_on` rather than creating a second row:
+    the same question asked by six employers is one thing for you to answer, not six.
+    """
+    row = conn.execute(
+        "SELECT seen_on, resolved_at FROM prefill_gaps WHERE question_key=?",
+        (question_key,),
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            """
+            INSERT INTO prefill_gaps (question_key, ask, type, options, seen_on,
+                                      first_seen, resolved_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (question_key, ask, field_type, options, company, now),
+        )
+        return True
+    seen = [s for s in row["seen_on"].split(",") if s]
+    if company not in seen:
+        seen.append(company)
+        conn.execute(
+            "UPDATE prefill_gaps SET seen_on=? WHERE question_key=?",
+            (",".join(seen), question_key),
+        )
+    return False
+
+
+def open_gaps(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT * FROM prefill_gaps WHERE resolved_at IS NULL ORDER BY first_seen, question_key"
+    ))
+
+
+def resolve_gap(conn: sqlite3.Connection, question_key: str, now: str) -> None:
+    conn.execute(
+        "UPDATE prefill_gaps SET resolved_at=? WHERE question_key=?", (now, question_key)
+    )
+
+
+def record_plan(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    plan_json: str,
+    fields: int,
+    gaps: int,
+    answers_hash: str,
+    now: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO prefill_plans (company, ats_job_id, plan, fields, gaps,
+                                   answers_hash, built_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            plan=excluded.plan, fields=excluded.fields, gaps=excluded.gaps,
+            answers_hash=excluded.answers_hash, built_at=excluded.built_at
+        """,
+        (company, ats_job_id, plan_json, fields, gaps, answers_hash, now),
+    )
+
+
+def get_plan(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM prefill_plans WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+
+
+def plans_by_posting(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Row]:
+    """Every plan, keyed for a cheap lookup while rendering."""
+    return {
+        (r["company"], r["ats_job_id"]): r
+        for r in conn.execute("SELECT * FROM prefill_plans")
+    }
+
+
+def matches_needing_prefill(
+    conn: sqlite3.Connection,
+    answers_hash: str,
+    today: str,
+    limit: Optional[int] = None,
+) -> list[sqlite3.Row]:
+    """Open, scored, undeferred matches with no current prefill plan — best first.
+
+    Ordered by score DESC, which is the "highest-matched jobs first" the queue is meant
+    to work down. Unscored matches are excluded rather than sorted last: a posting the
+    ranker has not read yet has no claim to be at the front of an application queue, and
+    `judge` runs ahead of this task precisely so that stays a temporary state.
+
+    Already-applied and skipped postings are excluded here rather than filtered later —
+    building a prefill for a job you have already applied to is pure waste.
+    """
+    sql = """
+        SELECT p.company, p.ats_job_id, p.title, p.url, r.score
+        FROM postings p
+        JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        JOIN rankings r ON p.company=r.company AND p.ats_job_id=r.ats_job_id
+        LEFT JOIN applications a ON p.company=a.company AND p.ats_job_id=a.ats_job_id
+        LEFT JOIN deferrals d ON p.company=d.company AND p.ats_job_id=d.ats_job_id
+        LEFT JOIN prefill_plans pp
+               ON p.company=pp.company AND p.ats_job_id=pp.ats_job_id
+        WHERE v.verdict='match' AND p.closed_at IS NULL
+          AND r.score IS NOT NULL
+          AND a.company IS NULL
+          AND (d.company IS NULL
+               OR (d.kind='snoozed' AND d.until IS NOT NULL AND d.until <= ?))
+          AND (pp.answers_hash IS NULL OR pp.answers_hash != ?)
+        ORDER BY r.score DESC, p.company
+    """
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return list(conn.execute(sql, (today, answers_hash)))

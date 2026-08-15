@@ -1,12 +1,15 @@
 """Command-line entry point.
 
-The nightly sequence is  check -> resolve -> rank -> dashboard,  and only `check`
-touches an ATS. Everything after it reads state.db and, at most, a local model.
+The nightly sequence is  check -> work -> rank -> dashboard,  and only `check` touches
+an ATS. Everything after it reads state.db and, at most, the local inference router.
 
 Subcommands:
   check         the daily pipeline: fetch -> health -> store -> match -> report,
                 caching descriptions so every later pass can run offline
-  resolve       read those descriptions to settle uncertain postings (needs a model)
+  work          run the next available model task, or the one you name. The scheduler
+                picks by priority, which is the pipeline's own dependency order
+  apply-to      open an application in a browser with your answers already filled in
+  resolve       alias for `work --task level`  (kept: it is in muscle memory and cron)
   rank          score open matches against profile.yaml (a model helps; not required)
   today         the jobs to apply to today; --applied/--skip/--snooze to act on one
   dashboard     render state.db to a single self-contained HTML file
@@ -27,6 +30,7 @@ therefore still clean, and you can watch a run without waiting for it to finish.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -490,72 +494,200 @@ def cmd_rematch(args: argparse.Namespace) -> int:
     return 0
 
 
-# -- resolve -----------------------------------------------------------------------
-def cmd_resolve(args: argparse.Namespace) -> int:
-    """Read descriptions for the UNCERTAIN queue and resolve what the level allows.
+# -- work --------------------------------------------------------------------------
+def _load_answers(path: Path | None):
+    """answers.yaml, or None with a warning. Never fatal.
 
-    Entirely optional. With no provider configured this reports what it *would* do
-    and changes nothing, so the command is safe to run before you have a model up.
+    Absent is a normal state — the file holds personal data, is gitignored, and a fresh
+    checkout has none. Prefill reports itself unavailable and the other tasks are
+    unaffected, which is the same posture as running with no model at all.
     """
-    from . import llm as llm_pkg, resolve as resolve_mod
+    from .answers import load_answers
 
-    provider_name = args.llm_provider or os.environ.get("JOBTRACKER_LLM_PROVIDER", "none")
-    base_url = args.llm_url or os.environ.get("JOBTRACKER_LLM_URL", "")
+    resolved = Path(path) if path else config.ANSWERS_YAML
+    if not resolved.exists():
+        return None, resolved
+    try:
+        return load_answers(resolved), resolved
+    except ValueError as exc:
+        log.warning("answers.yaml did not load: %s", exc)
+        return None, resolved
+
+
+def _build_context(args: argparse.Namespace, today: str, fetcher=None):
+    """Everything every task might need, loaded once.
+
+    Loaded eagerly and tolerantly: a task whose configuration is missing reports itself
+    unavailable at selection time, which reads as "prefill: unavailable (no answers.yaml)"
+    in the report rather than as a crash three tasks later.
+    """
+    from . import rank as rank_mod
+    from .profile import load_profile
+    from .tasks import TaskContext
 
     criteria = load_criteria(args.criteria)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
-    rows = store.uncertain_for_resolution(conn, limit=args.limit)
+    companies = config.load_companies(args.companies)
 
-    if provider_name == "none" or not base_url:
-        eligible = sum(1 for r in rows if resolve_mod.looks_engineering(r["title"], criteria))
-        conn.close()
-        print("No LLM provider configured — nothing was changed.")
-        print(f"  {len(rows)} uncertain postings open, {eligible} with an engineering-looking title.")
-        print("  Configure one with --llm-provider vllm --llm-url http://HOST:PORT")
-        print("  (or $JOBTRACKER_LLM_PROVIDER / $JOBTRACKER_LLM_URL)")
+    profile = None
+    try:
+        profile = load_profile(getattr(args, "profile", None) or config.PROFILE_YAML)
+    except (FileNotFoundError, ValueError) as exc:
+        log.warning("profile.yaml did not load: %s", exc)
+
+    answers, answers_path = _load_answers(getattr(args, "answers", None))
+
+    return TaskContext(
+        today=today,
+        criteria=criteria,
+        profile=profile,
+        answers=answers,
+        answers_path=answers_path,
+        tiers=rank_mod.tier_lookup(companies),
+        companies={c.name: c for c in companies},
+        fetcher=fetcher,
+    )
+
+
+def _print_survey(candidates) -> None:
+    print("Task queue, in the order the scheduler considers it:\n")
+    for c in candidates:
+        if c.unavailable:
+            state = f"unavailable — {c.unavailable}"
+        elif c.pending:
+            state = f"{c.pending} pending"
+            if c.blocked:
+                state += f" ({c.blocked} set aside after repeated failures)"
+        else:
+            state = "nothing to do"
+        print(f"  {c.task.priority:>3}  {c.task.name:<10} {state}")
+        print(f"       {'':<10} {c.task.summary}")
+
+
+def _refresh_gap_stubs(conn, ctx) -> int:
+    """Mirror the open gaps into the tail of answers.yaml. Returns how many.
+
+    The database is the truth; this block is a rendering of it, regenerated wholesale
+    so that answering a question makes its stub disappear on the next run. Everything
+    above the marker is yours and is never read, parsed, or rewritten.
+    """
+    from .answers import rewrite_gaps
+
+    if ctx.answers is None or not ctx.answers_path or not Path(ctx.answers_path).exists():
         return 0
+    gaps = store.open_gaps(conn)
+    try:
+        rewrite_gaps(ctx.answers_path, gaps)
+    except OSError as exc:
+        log.warning("could not update the unanswered block in answers.yaml: %s", exc)
+    return len(gaps)
 
-    provider = llm_pkg.get_provider(provider_name)
-    if provider is None:
-        print(f"error: unknown provider {provider_name!r}; "
-              f"known: {', '.join(llm_pkg.provider_names())}", file=sys.stderr)
-        conn.close()
+
+async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None):
+    """Build a client, run one task, tear the client down. Async because the SDK is."""
+    from . import llm as llm_pkg
+    from .tasks import run_next
+
+    base_url = llm_pkg.resolve_base_url(getattr(args, "llm_url", None))
+    client = llm_pkg.LlmClient(model=getattr(args, "llm_model", None), base_url=base_url)
+    try:
+        if not await client.probe():
+            # Unreachable is not an error: the queue is simply left as it was.
+            return None
+        from .tasks import DEFAULT_CONCURRENCY
+
+        return await run_next(
+            conn, client, ctx,
+            task_name=task_name,
+            budget=args.budget,
+            concurrency=args.concurrency or DEFAULT_CONCURRENCY,
+        )
+    finally:
+        await client.aclose()
+
+
+def cmd_work(args: argparse.Namespace) -> int:
+    """Run the next available model task, or the one you name.
+
+    Selection is by priority, and priority is the pipeline's dependency chain: `level`
+    turns uncertain postings into matches, `judge` scores matches, `prefill` works down
+    scored matches. Draining the earliest stage that has work is therefore the same
+    instruction as never starving a later one.
+
+    Never fails for want of a model. With none configured or reachable it reports the
+    queue and changes nothing, which makes it safe to run before the router is up.
+    """
+    from . import llm as llm_pkg
+    from .tasks import survey, task_names
+
+    if args.task and args.task not in task_names():
+        print(f"error: unknown task {args.task!r}; known: {', '.join(task_names())}",
+              file=sys.stderr)
         return 1
 
-    client = llm_pkg.LlmClient(provider, base_url, model=args.llm_model)
-    if not client.probe():
-        # Unreachable is not an error: the queue is simply left as it was.
-        client.close()
-        conn.close()
-        return 0
-
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
-    kept = 0
-    try:
-        verdicts, stats = resolve_mod.resolve_postings(rows, criteria, client)
-        for v in verdicts:
-            # Pin before recording. `check` re-derives a rules verdict from the title
-            # for every posting it fetches, and the title is exactly what the rules
-            # already found insufficient — so an unpinned llm verdict lasts one night.
-            # A posting you have already ruled on keeps your ruling; set_override says
-            # so by returning False, and then the verdict is not ours to write either.
-            if not store.set_override(
-                conn, v.company, v.ats_job_id, v.decision.value, today,
-                reason=v.reason, decided_by="llm",
-            ):
-                kept += 1
-                continue
-            store.record_verdict(conn, v, today)
-        conn.commit()
-    finally:
-        client.close()
 
-    conn.close()
-    if kept:
-        log.info("%d verdict(s) left alone — you had already ruled on them", kept)
-    log.info("resolve complete: %s", stats.summary())
-    print(stats.summary())
-    return 0
+    fetcher = None
+    if args.task in (None, "prefill"):
+        # Only prefill fetches, and only for a form it has never seen. Built here rather
+        # than in the task so the socket ownership stays with the command, next to the
+        # DB connection it is already responsible for closing.
+        fetcher = Fetcher()
+
+    try:
+        ctx = _build_context(args, today, fetcher=fetcher)
+        candidates = survey(conn, ctx)
+
+        if args.dry_run:
+            _print_survey(candidates)
+            chosen = next((c for c in candidates if not c.unavailable and c.pending), None)
+            print()
+            if chosen is None:
+                print("Nothing to do.")
+            else:
+                print(f"Would work: {chosen.task.name} "
+                      f"({min(chosen.pending, args.budget or chosen.pending)} unit(s))")
+            return 0
+
+        if not llm_pkg.is_configured(args.llm_url):
+            _print_survey(candidates)
+            print("\nNo inference router configured — nothing was changed.")
+            print("  Point at one with --llm-url http://HOST:PORT")
+            print("  (or $JOBTRACKER_LLM_URL / $SIR_BASE_URL)")
+            return 0
+
+        report = asyncio.run(_work(args, conn, ctx, args.task))
+        if report is None:
+            _print_survey(candidates)
+            print("\nRouter unreachable — the queue was left as it was.")
+            return 0
+
+        log.info("work complete: %s", report.summary())
+        print(report.summary())
+        if report.task == "prefill":
+            outstanding = _refresh_gap_stubs(conn, ctx)
+            if outstanding:
+                print(f"  {outstanding} question(s) still need an answer from you — "
+                      f"see the end of {ctx.answers_path}, or the Settings tab.")
+        return 0
+    finally:
+        if fetcher is not None:
+            fetcher.close()
+        conn.close()
+
+
+def cmd_resolve(args: argparse.Namespace) -> int:
+    """Settle the UNCERTAIN queue by reading descriptions. `work --task level`.
+
+    Kept as its own command because it is in muscle memory, in the docs, and in
+    whatever cron already calls it — but it is the same machinery aimed at one task,
+    not a second implementation of it.
+    """
+    args.task = "level"
+    args.dry_run = getattr(args, "dry_run", False)
+    args.concurrency = getattr(args, "concurrency", None) or 4
+    args.budget = args.limit
+    return cmd_work(args)
 
 
 # -- eval --------------------------------------------------------------------------
@@ -602,19 +734,17 @@ def cmd_eval(args: argparse.Namespace) -> int:
 def cmd_rank(args: argparse.Namespace) -> int:
     """Judge open matches against profile.yaml and score the queue.
 
-    Two phases, and only the first needs a model. Judging asks the local model about
-    postings it has not read yet; scoring recomputes every score in Python. So a
-    weights-only edit to profile.yaml re-sorts the whole queue with no model at all —
-    which is why running this with the server down is useful rather than pointless.
+    Two phases, and only the first needs a model. Judging is the `judge` task, run
+    through the same scheduler as everything else; scoring recomputes every score in
+    Python. So a weights-only edit to profile.yaml re-sorts the whole queue with no
+    model at all — which is why running this with the router down is useful rather than
+    pointless.
 
-    Like `resolve`, it is entirely optional and never fails for want of a model. With
-    no provider configured it reports what it would do and changes nothing.
+    Scoring is deliberately not a task: it must run on every invocation whether or not
+    a model was reachable, and it is arithmetic over rows the judge task already wrote.
     """
     from . import llm as llm_pkg, rank as rank_mod
     from .profile import load_profile
-
-    provider_name = args.llm_provider or os.environ.get("JOBTRACKER_LLM_PROVIDER", "none")
-    base_url = args.llm_url or os.environ.get("JOBTRACKER_LLM_URL", "")
 
     criteria = load_criteria(args.criteria)
     try:
@@ -627,39 +757,27 @@ def cmd_rank(args: argparse.Namespace) -> int:
     tiers = rank_mod.tier_lookup(companies)
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
-
-    pending = store.matches_needing_judgment(conn, profile.prose_hash, limit=args.limit)
     stats = rank_mod.RankStats()
 
-    if provider_name == "none" or not base_url:
-        log.info("no llm provider configured — scoring with the judgments already held")
-        if pending:
-            print(f"No LLM provider configured — {len(pending)} match(es) left unjudged.")
-            print("  Configure one with --llm-provider vllm --llm-url http://HOST:PORT")
+    pending = store.matches_needing_judgment(conn, profile.prose_hash, limit=args.limit)
+    if pending and not llm_pkg.is_configured(args.llm_url):
+        log.info("no router configured — scoring with the judgments already held")
+        print(f"No inference router configured — {len(pending)} match(es) left unjudged.")
+        print("  Point at one with --llm-url http://HOST:PORT")
     elif pending:
-        provider = llm_pkg.get_provider(provider_name)
-        if provider is None:
-            print(f"error: unknown provider {provider_name!r}; "
-                  f"known: {', '.join(llm_pkg.provider_names())}", file=sys.stderr)
-            conn.close()
-            return 1
-        client = llm_pkg.LlmClient(provider, base_url, model=args.llm_model)
-        if not client.probe():
-            # Unreachable is not an error. Fall through to scoring: yesterday's
-            # judgments still order the queue, which beats surfacing nothing.
-            client.close()
-        else:
-            try:
-                log.info("judging %d match(es) against profile %s",
-                         len(pending), profile.prose_hash)
-                judged, stats = rank_mod.judge_matches(pending, client, profile)
-                for company_name, job_id, judgment in judged:
-                    store.record_judgment(
-                        conn, company_name, job_id, judgment, profile.prose_hash, today
-                    )
-                conn.commit()
-            finally:
-                client.close()
+        args.task = "judge"
+        args.budget = args.limit
+        args.concurrency = getattr(args, "concurrency", None) or 4
+        ctx = _build_context(args, today)
+        log.info("judging %d match(es) against profile %s", len(pending), profile.prose_hash)
+        report = asyncio.run(_work(args, conn, ctx, "judge"))
+        if report is not None:
+            # `judged` and `unreadable` come off the task report rather than being
+            # recounted here — the runner is what actually knows, and it already
+            # committed each judgment as it landed.
+            stats.considered = report.attempted
+            stats.judged = report.applied
+            stats.unreadable = report.no_answer + report.errors
 
     # Scoring is pure arithmetic over stored judgments — no model, every run.
     rows = store.ranked_matches(conn)
@@ -690,6 +808,74 @@ def cmd_rank(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- apply-to ----------------------------------------------------------------------
+def cmd_apply_to(args: argparse.Namespace) -> int:
+    """Open one application with your answers already in the boxes, and stop there.
+
+    The nearest honest thing to "a link that opens the form prefilled". It cannot be a
+    link: no URL attaches a file, and only Lever honours query-parameter prefill. So the
+    filling happens in a browser this command drives, and then hands to you.
+
+    It never submits. It fills what it knows, outlines what it does not, and leaves the
+    window open — see docs/prefill.md for why that boundary is where it is.
+    """
+    from . import browser as browser_mod
+
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = args.since or _today()
+    try:
+        row = conn.execute(
+            "SELECT company, ats_job_id, title, url FROM postings "
+            "WHERE company=? AND ats_job_id=?",
+            (args.company, args.job_id),
+        ).fetchone()
+        if row is None:
+            print(f"error: no posting {args.company} / {args.job_id}", file=sys.stderr)
+            return 1
+
+        answers, answers_path = _load_answers(args.answers)
+        if answers is None:
+            print(f"error: no usable answer bank at {answers_path}.", file=sys.stderr)
+            print("  Copy answers.example.yaml to answers.yaml and fill it in.",
+                  file=sys.stderr)
+            return 1
+
+        companies = {c.name: c for c in config.load_companies(args.companies)}
+        company = companies.get(args.company)
+        if company is None:
+            print(f"error: {args.company} is not in companies.yaml", file=sys.stderr)
+            return 1
+
+        plan = store.get_plan(conn, args.company, args.job_id)
+        if plan is None:
+            # Not fatal. The browser re-derives every rules-resolvable field itself, so
+            # a plan is a head start rather than a prerequisite; without one you simply
+            # lose the model's question-matching for this form.
+            log.info("no prefill plan stored — filling from the rules alone")
+
+        print(f"{row['company']} — {row['title']}")
+        report = browser_mod.fill_application(
+            conn,
+            company=company,
+            ats_job_id=args.job_id,
+            url=row["url"],
+            answers=answers,
+            today=today,
+            user_data_dir=config.BROWSER_PROFILE,
+            plan_json=plan["plan"] if plan else None,
+            headless=args.headless,
+        )
+        if args.headless:
+            print(report.summary())
+            browser_mod._print_gaps(report)
+        return 0
+    except browser_mod.BrowserUnavailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
 # -- today -------------------------------------------------------------------------
 def cmd_today(args: argparse.Namespace) -> int:
     """Show the three jobs to apply to today, or record what you did about one.
@@ -701,7 +887,10 @@ def cmd_today(args: argparse.Namespace) -> int:
     from . import rank as rank_mod
 
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
-    today = _today()
+    # `--since` for the same reason every other command has it: a snooze is "today plus
+    # N days", so without a way to pin today, anything that asserts on the resulting date
+    # is a time bomb that passes until midnight.
+    today = args.since or _today()
 
     if args.snooze and args.days < 1:
         # A zero or negative snooze expires the moment it is written, which looks like
@@ -897,6 +1086,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         companies_path=Path(args.companies) if args.companies else None,
         host=args.host,
         port=args.port,
+        answers_path=Path(args.answers) if args.answers else config.ANSWERS_YAML,
     )
 
 
@@ -979,37 +1169,77 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--since", default=None)
     rm.set_defaults(func=cmd_rematch)
 
-    rs = sub.add_parser("resolve", help="read descriptions to resolve uncertain postings")
+    def _llm_flags(parser) -> None:
+        # One transport now, so there is no --llm-provider: the router is the thing that
+        # knows which backend serves what. An address is the whole configuration.
+        parser.add_argument("--llm-url", default=None,
+                            help="http://HOST:PORT of the inference router. "
+                                 "Env: $JOBTRACKER_LLM_URL or $SIR_BASE_URL")
+        parser.add_argument("--llm-model", default=None,
+                            help="model tag (default: ask the router what it serves)")
+
+    w = sub.add_parser("work", help="run the next available model task")
+    w.add_argument("--task", default=None,
+                   help="pin the task instead of letting the scheduler pick")
+    w.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    w.add_argument("--profile", default=str(config.PROFILE_YAML))
+    w.add_argument("--answers", default=None,
+                   help=f"answer bank for prefill (default: {config.ANSWERS_YAML})")
+    w.add_argument("--db", default=None)
+    w.add_argument("--since", default=None)
+    w.add_argument("--budget", type=int, default=None,
+                   help="stop after N units (default: drain the task)")
+    w.add_argument("--concurrency", type=int, default=None,
+                   help="units in flight at once (default 4)")
+    w.add_argument("--dry-run", action="store_true",
+                   help="show the queue and what would be worked; change nothing")
+    _llm_flags(w)
+    w.set_defaults(func=cmd_work)
+
+    rs = sub.add_parser("resolve", help="alias for `work --task level`")
     rs.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    rs.add_argument("--profile", default=str(config.PROFILE_YAML))
+    rs.add_argument("--answers", default=None)
     rs.add_argument("--db", default=None)
     rs.add_argument("--since", default=None)
     rs.add_argument("--limit", type=int, default=None,
                     help="stop after N postings (default: the whole queue)")
-    rs.add_argument("--llm-provider", default=None,
-                    help="local inference server type. Env: $JOBTRACKER_LLM_PROVIDER")
-    rs.add_argument("--llm-url", default=None,
-                    help="http://HOST:PORT of that server. Env: $JOBTRACKER_LLM_URL")
-    rs.add_argument("--llm-model", default=None,
-                    help="model name (default: ask the server what it serves)")
+    rs.add_argument("--concurrency", type=int, default=None)
+    rs.add_argument("--dry-run", action="store_true")
+    _llm_flags(rs)
     rs.set_defaults(func=cmd_resolve)
 
     rk = sub.add_parser("rank", help="score open matches against profile.yaml")
     rk.add_argument("--criteria", default=str(config.CRITERIA_YAML))
     rk.add_argument("--profile", default=str(config.PROFILE_YAML))
+    rk.add_argument("--answers", default=None)
     rk.add_argument("--db", default=None)
     rk.add_argument("--since", default=None)
     rk.add_argument("--limit", type=int, default=None,
                     help="judge at most N postings (scoring always covers all)")
-    rk.add_argument("--llm-provider", default=None,
-                    help="local inference server type. Env: $JOBTRACKER_LLM_PROVIDER")
-    rk.add_argument("--llm-url", default=None,
-                    help="http://HOST:PORT of that server. Env: $JOBTRACKER_LLM_URL")
-    rk.add_argument("--llm-model", default=None,
-                    help="model name (default: ask the server what it serves)")
+    rk.add_argument("--concurrency", type=int, default=None)
+    rk.add_argument("--dry-run", action="store_true")
+    _llm_flags(rk)
     rk.set_defaults(func=cmd_rank)
+
+    at = sub.add_parser(
+        "apply-to",
+        help="open an application in a browser with your answers already filled in",
+    )
+    at.add_argument("company")
+    at.add_argument("job_id")
+    at.add_argument("--answers", default=None)
+    at.add_argument("--db", default=None)
+    at.add_argument("--since", default=None)
+    at.add_argument("--headless", action="store_true",
+                    help="do not show the window (discovery only; nothing is submitted "
+                         "either way)")
+    at.set_defaults(func=cmd_apply_to)
 
     td = sub.add_parser("today", help="the jobs to apply to today, or record what you did")
     td.add_argument("--db", default=None)
+    td.add_argument("--since", default=None,
+                    help="treat this ISO date as today (snoozes are measured from it)")
     td.add_argument("--count", type=int, default=3, help="how many to show (default: 3)")
     td.add_argument("--applied", nargs=2, metavar=("COMPANY", "JOB_ID"),
                     help="record that you applied; also logs it in `applications`")
@@ -1065,6 +1295,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sv = sub.add_parser("serve", help="live tuning UI on localhost")
     sv.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    sv.add_argument("--answers", default=None)
     sv.add_argument("--db", default=None)
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--host", default="127.0.0.1",

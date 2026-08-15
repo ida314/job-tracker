@@ -47,9 +47,11 @@ is a fact about the company.
 | `JOBTRACKER_COMPANIES` | No | Defaults to the copy baked into the image |
 | `JOBTRACKER_TELEMETRY` | No | `off` (default), `console`, or `otlp` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | With `otlp` | Where the collector is |
-| `JOBTRACKER_LLM_PROVIDER` | For `resolve`/`rank` | e.g. `vllm`. Absent → `resolve` is a no-op; `rank` still re-scores from stored judgments |
-| `JOBTRACKER_LLM_URL` | For `resolve`/`rank` | `http://HOST:PORT` of the local model. The model name is discovered from `/v1/models` |
+| `JOBTRACKER_LLM_URL` | For `work`/`rank` | `http://HOST:PORT` of the inference router. The model tag is discovered from `/v1/models`. Absent → `work` is a no-op; `rank` still re-scores from stored judgments |
+| `SIR_BASE_URL` / `SIR_ENDPOINTS` | Alternative | The SDK's own variables, honoured so a host already pointing services at the router need not repeat itself |
 | `JOBTRACKER_PROFILE` | No | Defaults to the copy baked into the image. Mount it to tune the ranking without rebuilding |
+| `JOBTRACKER_ANSWERS` | For `prefill`/`apply-to` | Your answer bank. Not in the image — it is personal data. Absent → the `prefill` task reports itself unavailable and nothing else notices |
+| `JOBTRACKER_BROWSER_PROFILE` | For `apply-to` | Persistent browser profile. Put it on a volume or every run starts logged out |
 
 Every run logs the resolved `companies=`/`criteria=`/`db=` paths as its first line. When
 something behaves as though your config changed nothing, read that line first.
@@ -70,8 +72,8 @@ one-shot commands against the same `$JOBTRACKER_DB`, in order:
 
 ```sh
 jobtracker check              # fetch → health → store → match → cache descriptions → report
-jobtracker resolve            # read descriptions, settle the UNCERTAIN residual (needs a model)
-jobtracker rank               # judge open matches against profile.yaml, score the queue
+jobtracker work               # the next model task: settle uncertain / judge / prefill
+jobtracker rank               # judge whatever is left, then score the queue
 jobtracker dashboard          # render state.db → a static HTML file
 ```
 
@@ -80,13 +82,19 @@ jobtracker dashboard          # render state.db → a static HTML file
   to nothing but the local model. `--max-descriptions` (default 400) bounds that work; the
   remainder is picked up the next night, so a first run after a criteria change drains
   over a few days rather than in one long job.
-- **`resolve` is the automated drain for the review pile.** `check` leaves every
-  no-level-token title `uncertain`; `resolve` reads the description with the local model
-  and settles what it can (→ match/reject), leaving only the genuinely ambiguous. Without
-  `JOBTRACKER_LLM_PROVIDER`/`_URL` it is a safe no-op, so it is always fine to include in
-  the sequence — it simply does nothing until a model is reachable. Every failure path
-  leaves a posting `uncertain`, so a down model never corrupts a verdict.
-- **`rank` orders what survived, and degrades further than `resolve` does.** With no model
+- **`work` is the automated drain, and it picks its own task.** `check` leaves every
+  no-level-token title `uncertain`; the `level` task reads the description and settles
+  what it can (→ match/reject), leaving only the genuinely ambiguous. When that queue is
+  empty it moves to `judge`, then to `prefill` — the pipeline's dependency order, so one
+  command keeps every stage drained. Run it several times per night to drain more than
+  one stage. Without `JOBTRACKER_LLM_URL` it is a safe no-op that prints the queue, so it
+  is always fine to include in the sequence. Every failure path leaves a posting where it
+  was, so a down router never corrupts a verdict — and each unit commits on its own, so a
+  container killed mid-run keeps everything that already landed.
+- **`apply-to` is interactive and does not belong in an unattended sequence.** It opens a
+  browser window and waits for you. Nothing about it is safe to schedule, and it never
+  submits anything on its own.
+- **`rank` orders what survived, and degrades further than `work` does.** With no model
   it still re-scores from the judgments it already holds, so yesterday's ordering stands
   rather than the queue emptying. It exits 0 either way. `--limit` bounds the model calls
   (~8s each); scoring always covers everything and needs no model at all.

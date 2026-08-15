@@ -1,27 +1,62 @@
 """The only module in this package that touches the network.
 
-Mirrors `fetch.py`'s split: providers are pure, this owns sockets, timeouts, retries
-and tracing. It also owns the one behavioural rule that makes the whole pass safe to
-enable — **every failure returns None**, and None means the posting stays UNCERTAIN,
-which is exactly where it already was. A model that is down, slow, misconfigured, or
-returning nonsense costs you the resolution you did not have before; it can never
-produce a wrong verdict.
+Transport moved to the `sir-client` SDK on 2026-08-13. What did *not* move is the one
+behavioural rule that makes every model pass safe to enable — **every failure returns
+None**, and None means the caller learned nothing, which leaves the posting exactly
+where it already was. A model that is down, slow, misconfigured, swapped out, or
+returning nonsense costs you the answer you did not have before; it can never produce a
+wrong one.
 
-That is why nothing here raises for an unreachable server. Matching correctness must
-not depend on an inference server being up.
+That is why nothing here raises for an unreachable server, and why the `except` clauses
+are as wide as they are. Pipeline correctness must not depend on an inference server
+being up.
+
+Why the SDK replaced the old `Provider` registry
+------------------------------------------------
+The registry existed so a second wire format could be added without touching the client.
+The router *is* that indirection now: it presents one OpenAI-compatible endpoint, decides
+which model is resident, and forwards bodies untouched. Keeping a second dispatch layer
+in front of it would have been two abstractions doing one job. What survives is
+`wire.py`, because knowing what the backend accepts is exactly the knowledge the router
+refuses to hold (see its `registry.py`).
+
+The SDK is async-only, on the reasoning that a sync wrapper you cannot call from a loop
+is a footgun. That is why `tasks/runner.py` is async and why `browser.py` — Playwright's
+sync API, which must not run inside a loop — stays in a separate module.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass
-from typing import Optional
+import os
+from typing import Any, Optional
 
-import requests
 from opentelemetry import trace
 
-from .base import Provider
+from . import wire
+
+# The SDK and its http client are imported defensively so that a checkout without them
+# still runs everything that needs no model — `check`, `rematch`, `report`, `dashboard`,
+# and `rank`'s scoring phase. Absent, `is_configured()` is False and the task queue
+# reports itself as having no router, which is the same state as a router that is down
+# and is handled by the same code path.
+#
+# This is what keeps "the model is optional" structurally true rather than aspirational.
+# It used to be true because there was nothing to install at all; now it is true because
+# nothing imports the SDK until something actually wants an answer.
+try:  # pragma: no cover - exercised by the absence, not the presence
+    import httpx
+    from sir_client import AsyncClient, Registry, SirClientError
+
+    SDK_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    httpx = None  # type: ignore[assignment]
+    AsyncClient = Registry = None  # type: ignore[assignment]
+
+    class SirClientError(Exception):  # type: ignore[no-redef]
+        """Stand-in so the except clauses below stay well-formed without the SDK."""
+
+    SDK_AVAILABLE = False
 
 log = logging.getLogger("jobtracker.llm")
 tracer = trace.get_tracer("jobtracker.llm")
@@ -32,186 +67,171 @@ tracer = trace.get_tracer("jobtracker.llm")
 # without losing what we are reading for.
 MAX_DESCRIPTION_CHARS = 6000
 
-LEVEL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "level": {"type": "string", "enum": ["entry", "not_entry", "unclear"]},
-        "evidence": {"type": "string"},
-    },
-    "required": ["level", "evidence"],
-    "additionalProperties": False,
-}
+# How long the SDK is given to produce a completion. Generous because the router may
+# have to evict and load a model before this request starts generating at all — the
+# whole reason it hands back a job to poll instead of holding a socket open.
+DEFAULT_TIMEOUT = 180.0
 
-SYSTEM_PROMPT = """\
-You read a software job description and report ONLY the experience level it requires.
-
-Answer with one of:
-  entry      — explicitly open to new/recent graduates, or asks for roughly 0-2 years,
-               or is labelled new grad / university grad / early career / campus.
-  not_entry  — requires more experience than a new graduate has: a minimum number of
-               years above 2, or seniority (senior, staff, principal, lead, manager).
-  unclear    — the description does not state a level either way.
-
-Rules:
-- Judge ONLY experience level. Do not judge whether the role is backend, interesting,
-  or a good fit. Something else decides that.
-- "unclear" is a correct and useful answer. Prefer it over guessing. A wrong "entry"
-  wastes an application; a wrong "not_entry" hides a real job.
-- An internship is not entry-level for this purpose; answer not_entry.
-- Quote the exact phrase you used as evidence. If there is none, use "unclear" and
-  leave evidence empty.
-"""
+ENV_URL = "JOBTRACKER_LLM_URL"
+ENV_MODEL = "JOBTRACKER_LLM_MODEL"
 
 
-ORDINAL = ["none", "weak", "moderate", "strong"]
-RISK = ["low", "medium", "high"]
+def resolve_base_url(cli_url: Optional[str] = None) -> Optional[str]:
+    """Where the router is, from the flag, our env var, or the SDK's own.
 
-RANK_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "backend_fit": {"type": "string", "enum": ORDINAL},
-        "growth": {"type": "string", "enum": ORDINAL},
-        "entry_risk": {"type": "string", "enum": RISK},
-        "why": {"type": "string"},
-    },
-    "required": ["backend_fit", "growth", "entry_risk", "why"],
-    "additionalProperties": False,
-}
-
-# Note what this asks for and what it does not. Three labelled ordinals and a sentence
-# — never a score, never a rank, never a comparison. The model judges one posting in
-# isolation and has no idea another exists; Python turns these into a number and an
-# order, from weights you can read and diff (DESIGN.md §3.2).
-#
-# Ordinals rather than 0-100 because absolute numeric scores from an LLM cluster in a
-# narrow band and shift whenever the prompt or model changes, which would silently
-# re-rank the whole queue. A four-point labelled scale is stable across both.
-RANK_SYSTEM_PROMPT = """\
-You judge how well ONE job posting fits ONE candidate's stated goals.
-
-You are given the candidate's profile and a single job description. Answer four
-questions about THIS posting only. You are not ranking, comparing, or choosing —
-another system does that with your answers.
-
-  backend_fit — how well the ACTUAL WORK described matches the candidate's target
-                roles. Judge the day-to-day engineering described in the body, not
-                the job title and not the company's reputation.
-                  strong   — the core work is squarely what they are looking for
-                  moderate — adjacent or partially on-target
-                  weak     — mostly off-target with some overlap
-                  none     — a different discipline entirely
-
-  growth      — evidence in the description of learning and mentorship: named senior
-                engineers or mentors, structured onboarding, a new-grad or early-career
-                program, explicit teaching, breadth of systems they would touch.
-                  strong   — the posting concretely describes these
-                  moderate — implied but not stated
-                  weak     — little sign either way
-                  none     — the posting reads as "deliver alone, no support"
-
-  entry_risk  — the risk that this is NOT actually open to a new graduate, despite
-                its title. Look for required years of experience, "proven track
-                record", ownership of a whole system, or on-call leadership.
-                  low      — clearly open to new grads
-                  medium   — ambiguous
-                  high     — reads as needing real prior experience
-
-  why         — ONE sentence, under 200 characters, citing something specific from
-                the description. Not a summary of the role; the reason for your
-                judgment. This is shown to the candidate, so make it useful.
-
-Judge only what the description says. If it is vague, say so through the labels —
-"moderate" and "medium" are honest answers and are preferred over guessing.
-"""
+    `$SIR_BASE_URL` is honoured so a machine that already points other services at the
+    router does not have to repeat itself. `$SIR_ENDPOINTS` alone is also workable — it
+    routes per model — and returns None here, which the client handles by letting the
+    SDK's registry answer.
+    """
+    for candidate in (cli_url, os.environ.get(ENV_URL), os.environ.get("SIR_BASE_URL")):
+        if candidate and candidate.strip():
+            return candidate.strip().rstrip("/")
+    return None
 
 
-@dataclass(frozen=True)
-class RankJudgment:
-    backend_fit: str
-    growth: str
-    entry_risk: str
-    why: str = ""
-
-
-@dataclass(frozen=True)
-class LevelVerdict:
-    level: str  # 'entry' | 'not_entry' | 'unclear'
-    evidence: str = ""
-
-    @property
-    def usable(self) -> bool:
-        return self.level in ("entry", "not_entry")
+def is_configured(cli_url: Optional[str] = None) -> bool:
+    """True if there is any address to talk to, and anything to talk to it with."""
+    if not SDK_AVAILABLE:
+        return False
+    return bool(resolve_base_url(cli_url) or os.environ.get("SIR_ENDPOINTS"))
 
 
 class LlmClient:
-    """A configured local inference endpoint. Construct once per run."""
+    """A configured route to the inference router. Construct once per run.
+
+    Async, and safe to share across concurrent tasks — the SDK's client is, and the
+    only mutable state here is the resolved model name, which is written once.
+    """
 
     def __init__(
         self,
-        provider: Provider,
-        base_url: str,
         model: Optional[str] = None,
-        timeout: float = 60.0,
+        base_url: Optional[str] = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        sdk: Optional[AsyncClient] = None,
+        http: Optional[httpx.AsyncClient] = None,
     ) -> None:
-        self.provider = provider
-        self.base_url = base_url.rstrip("/")
+        self._model = model or os.environ.get(ENV_MODEL) or None
+        self.base_url = base_url.rstrip("/") if base_url else None
         self.timeout = timeout
-        self._model = model
-        self._session = requests.Session()
+        # An injected SDK client (or http client) belongs to the caller; that is how the
+        # tests point this at an in-process app instead of a socket.
+        self._sdk = sdk
+        self._http = http
+        self._owns_http = http is None
+        self._owns_sdk = sdk is None
 
     # -- lifecycle -----------------------------------------------------------------
-    def close(self) -> None:
-        self._session.close()
+    def _client(self) -> Optional[AsyncClient]:
+        """Build the SDK client on first use. None if it cannot be configured.
 
-    def __enter__(self) -> "LlmClient":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
-
-    # -- model discovery -----------------------------------------------------------
-    def _served_models(self) -> Optional[list[str]]:
-        """Ask the server what it is serving. None means it could not be reached."""
-        url = self.provider.models_url(self.base_url)
-        if not url:
+        Lazy so that constructing an `LlmClient` reads no environment and opens no
+        socket — `work --dry-run` builds one and must stay inert.
+        """
+        if self._sdk is not None:
+            return self._sdk
+        if not SDK_AVAILABLE:
+            log.warning(
+                "sir-client is not installed — no model work will run. "
+                "pip install -e ../stupid-inference-router/clients/python"
+            )
             return None
         try:
-            resp = self._session.get(url, timeout=self.timeout)
-            resp.raise_for_status()
-            return self.provider.parse_models(resp.json())
-        except Exception as exc:  # noqa: BLE001 — unreachable is a normal state here
-            log.debug("model discovery failed at %s: %s", url, exc)
+            if self._http is None:
+                self._http = httpx.AsyncClient(timeout=self.timeout)
+            registry = (
+                Registry(default=self.base_url)
+                if self.base_url
+                else Registry.from_env()  # raises on a malformed $SIR_ENDPOINTS
+            )
+            self._sdk = AsyncClient(registry, http=self._http, timeout=self.timeout)
+        except Exception as exc:  # noqa: BLE001 — misconfiguration is a normal state
+            log.warning("llm client could not be configured: %s", exc)
             return None
+        return self._sdk
 
-    def resolve_model(self) -> Optional[str]:
-        """The model name to send, discovered from the server if not configured.
+    async def aclose(self) -> None:
+        if self._sdk is not None and self._owns_sdk:
+            await self._sdk.aclose()
+        if self._http is not None and self._owns_http:
+            await self._http.aclose()
 
-        vLLM rejects a request naming a model it is not serving, so guessing is worse
-        than asking. Cached: one call per run, not per posting.
+    async def __aenter__(self) -> "LlmClient":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    # -- model discovery -----------------------------------------------------------
+    def _discovery_urls(self) -> list[str]:
+        if self.base_url:
+            return [self.base_url]
+        sdk = self._client()
+        if sdk is None:
+            return []
+        urls: list[str] = []
+        for tag in sdk.registry.models:
+            url = sdk.registry.resolve(tag)
+            if url not in urls:
+                urls.append(url)
+        return urls
+
+    async def _served_models(self) -> Optional[list[str]]:
+        """Ask the router what it can serve. None means it could not be reached."""
+        sdk = self._client()
+        if sdk is None:
+            return None
+        urls = self._discovery_urls()
+        if not urls:
+            return None
+        if self._http is None:
+            # Only reachable when an SDK client was injected without an http client.
+            if httpx is None:
+                return None
+            self._http = httpx.AsyncClient(timeout=self.timeout)
+        names: list[str] = []
+        for url in urls:
+            try:
+                resp = await self._http.get(f"{url}/v1/models", timeout=self.timeout)
+                if resp.status_code != 200:
+                    log.debug("model discovery at %s returned %s", url, resp.status_code)
+                    return None
+                names.extend(wire.model_ids(resp.json()))
+            except Exception as exc:  # noqa: BLE001 — unreachable is a normal state
+                log.debug("model discovery failed at %s: %s", url, exc)
+                return None
+        return names
+
+    async def resolve_model(self) -> Optional[str]:
+        """The model tag to send, discovered from the router if not configured.
+
+        The router rejects a tag it does not serve, so asking beats guessing. Cached:
+        one call per run, not per unit of work.
         """
         if self._model:
             return self._model
-        names = self._served_models()
+        names = await self._served_models()
         if not names:
             return None
         self._model = names[0]
         if len(names) > 1:
-            log.info("server offers %d models; using %r", len(names), self._model)
+            log.info("router offers %d models; using %r", len(names), self._model)
         return self._model
 
-    def probe(self) -> bool:
-        """Confirm the server is actually reachable before processing the queue.
+    async def probe(self) -> bool:
+        """Confirm the router is actually reachable before working the queue.
 
-        This deliberately contacts the server even when a model name was configured.
-        Short-circuiting on a configured name would let `probe` report "ready" against
-        a box that is switched off, and the failure would then surface as one silent
-        miss per posting for the rest of the run — precisely what this exists to stop.
+        This deliberately contacts the server **even when a model tag was configured**.
+        Short-circuiting on a configured name would let `probe` report "ready" against a
+        box that is switched off, and the failure would then surface as one silent miss
+        per unit for the rest of the run — precisely what this exists to stop.
         """
-        names = self._served_models()
+        names = await self._served_models()
         if names is None:
             log.warning(
-                "llm unreachable at %s — the uncertain queue will be left as-is",
-                self.base_url,
+                "llm unreachable at %s — the queue will be left as-is",
+                self.base_url or "the configured endpoints",
             )
             return False
         if not names:
@@ -219,149 +239,78 @@ class LlmClient:
             return False
 
         if self._model and self._model not in names:
-            # Not fatal — the server is the authority and may accept aliases — but it
-            # is the most likely explanation if every call then fails.
+            # Not fatal — the router may accept an alias the models list does not show —
+            # but it is the likeliest explanation if every call then fails.
             log.warning(
-                "configured model %r is not in the server's list (%s)",
-                self._model, ", ".join(names[:3]),
+                "configured model %r is not in the router's list (%s)",
+                self._model,
+                ", ".join(names[:3]),
             )
         elif not self._model:
             self._model = names[0]
 
-        log.info(
-            "llm ready: %s at %s (model=%s)", self.provider.name, self.base_url, self._model
-        )
+        log.info("llm ready: %s (model=%s)", self.base_url or "via registry", self._model)
         return True
 
-    # -- classification ------------------------------------------------------------
-    def classify_level(self, title: str, description: str) -> Optional[LevelVerdict]:
-        """Read a description for its experience level. None on any failure."""
-        if not description or not description.strip():
-            return None
-        model = self.resolve_model()
-        if not model:
-            return None
+    # -- the one call ----------------------------------------------------------------
+    async def complete(
+        self,
+        system: str,
+        user: str,
+        schema: dict,
+        schema_name: str = "verdict",
+        idempotency_key: Optional[str] = None,
+        max_tokens: int = 512,
+    ) -> Optional[str]:
+        """Ask one schema-constrained question. None on any failure whatsoever.
 
-        body = self.provider.build_request(
-            model=model,
-            system=SYSTEM_PROMPT,
-            user=f"Job title: {title}\n\nJob description:\n{description[:MAX_DESCRIPTION_CHARS]}",
-            schema=LEVEL_SCHEMA,
-            schema_name="level",
-        )
-
-        with tracer.start_as_current_span("llm.classify") as span:
-            # Low cardinality only: the provider and model are bounded, titles are not.
-            span.set_attribute("llm.provider", self.provider.name)
-            span.set_attribute("llm.model", model)
-            try:
-                resp = self._session.post(
-                    self.provider.chat_url(self.base_url), json=body, timeout=self.timeout
-                )
-                resp.raise_for_status()
-                text = self.provider.parse_response(resp.json())
-            except Exception as exc:  # noqa: BLE001
-                log.debug("llm call failed for %r: %s", title[:40], exc)
-                span.set_attribute("llm.outcome", "error")
-                return None
-
-            verdict = _parse_verdict(text)
-            span.set_attribute("llm.outcome", verdict.level if verdict else "unparseable")
-            return verdict
-
-
-    # -- ranking -------------------------------------------------------------------
-    def judge_posting(
-        self, title: str, description: str, profile_prose: str
-    ) -> Optional["RankJudgment"]:
-        """Judge one posting against the candidate profile. None on any failure.
-
-        Same contract as `classify_level`: None means "no new information", and the
-        posting simply stays unranked and out of the top 3 rather than being scored
-        wrongly. A model that is down, slow, or nonsensical costs you the ranking you
-        did not have before; it can never invent an order.
+        This is the whole model interface. Every task is a system prompt, a schema, and
+        a parser; nothing above this layer knows there is an HTTP request involved.
         """
-        if not description or not description.strip():
+        sdk = self._client()
+        if sdk is None:
             return None
-        model = self.resolve_model()
+        model = await self.resolve_model()
         if not model:
             return None
 
-        body = self.provider.build_request(
+        body = wire.chat_body(
             model=model,
-            system=RANK_SYSTEM_PROMPT,
-            user=(
-                f"CANDIDATE PROFILE\n{profile_prose}\n\n"
-                f"---\n\nJob title: {title}\n\n"
-                f"Job description:\n{description[:MAX_DESCRIPTION_CHARS]}"
-            ),
-            schema=RANK_SCHEMA,
-            schema_name="ranking",
+            system=system,
+            user=user,
+            schema=schema,
+            schema_name=schema_name,
+            max_tokens=max_tokens,
         )
 
-        with tracer.start_as_current_span("llm.judge") as span:
-            span.set_attribute("llm.provider", self.provider.name)
+        with tracer.start_as_current_span("llm.complete") as span:
+            # Low cardinality only: the model and the schema name are bounded, the
+            # postings they are asked about are not.
             span.set_attribute("llm.model", model)
+            span.set_attribute("llm.schema", schema_name)
             try:
-                resp = self._session.post(
-                    self.provider.chat_url(self.base_url), json=body, timeout=self.timeout
+                # `resubmit_on_loss` needs the idempotency key to do anything at all —
+                # the SDK silently stays at one attempt without it. With both, a router
+                # restart mid-flight costs one retry instead of one lost answer.
+                completion: Any = await sdk.run(
+                    model,
+                    body,
+                    timeout=self.timeout,
+                    idempotency_key=idempotency_key,
+                    resubmit_on_loss=bool(idempotency_key),
                 )
-                resp.raise_for_status()
-                text = self.provider.parse_response(resp.json())
-            except Exception as exc:  # noqa: BLE001
-                log.debug("llm judge failed for %r: %s", title[:40], exc)
+            except SirClientError as exc:
+                # ModelNotRouted, TransportError, JobLost, JobFailed, JobCancelled,
+                # RequestTimeout — every one of them means "no answer", never "wrong
+                # answer", so they are all handled identically.
+                log.debug("llm call failed (%s): %s", type(exc).__name__, exc)
+                span.set_attribute("llm.outcome", "error")
+                return None
+            except Exception as exc:  # noqa: BLE001 — httpx errors are not wrapped
+                log.debug("llm call failed: %s", exc)
                 span.set_attribute("llm.outcome", "error")
                 return None
 
-            judgment = _parse_judgment(text)
-            span.set_attribute("llm.outcome", "ok" if judgment else "unparseable")
-            return judgment
-
-
-def _parse_judgment(text: Optional[str]) -> Optional["RankJudgment"]:
-    """Validate the model's JSON. Anything off-enum is treated as no answer.
-
-    Same reasoning as `_parse_verdict`: constrained decoding should make this total,
-    but a server that silently ignores `response_format` would otherwise let prose
-    through as a judgment — the exact regression that made `resolve` a no-op for a
-    month. Rejecting here means such a server produces no ranking rather than a
-    fabricated one.
-    """
-    if not text:
-        return None
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    fit, growth = data.get("backend_fit"), data.get("growth")
-    risk = data.get("entry_risk")
-    if fit not in ORDINAL or growth not in ORDINAL or risk not in RISK:
-        return None
-    return RankJudgment(
-        backend_fit=fit,
-        growth=growth,
-        entry_risk=risk,
-        why=str(data.get("why") or "")[:300],
-    )
-
-
-def _parse_verdict(text: Optional[str]) -> Optional[LevelVerdict]:
-    """Validate the model's JSON. Anything unexpected is treated as no answer.
-
-    Constrained decoding should make this total, but a provider that silently ignores
-    `guided_json` would otherwise let free-form prose through as a verdict.
-    """
-    if not text:
-        return None
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    level = data.get("level")
-    if level not in ("entry", "not_entry", "unclear"):
-        return None
-    return LevelVerdict(level=level, evidence=str(data.get("evidence") or "")[:300])
+            text = wire.content_of(completion)
+            span.set_attribute("llm.outcome", "ok" if text else "empty")
+            return text

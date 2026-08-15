@@ -29,7 +29,9 @@ docs/            reference notes — see the table below
 |---|---|
 | [`docs/deployment.md`](docs/deployment.md) | Running it unattended: the container contract, exit codes, and five silent failure modes |
 | [`docs/tuning.md`](docs/tuning.md) | Fixing bad matches so they stay fixed — decisions, `eval`, suggestions |
-| [`docs/llm.md`](docs/llm.md) | The optional local ambiguity pass and how to add a provider |
+| [`docs/llm.md`](docs/llm.md) | The optional local ambiguity pass, and the router the model calls go through |
+| [`docs/tasks.md`](docs/tasks.md) | The task queue: what the model works on next, and why that order |
+| [`docs/prefill.md`](docs/prefill.md) | Opening an application with your answers already in it |
 | [`docs/ranking.md`](docs/ranking.md) | Picking the three to apply to tomorrow, and tuning it without a GPU |
 | [`docs/observability.md`](docs/observability.md) | Traces, metrics, and the query idioms that are not obvious |
 
@@ -53,19 +55,29 @@ python -m jobtracker.cli decide Stripe 7966029 reject --note "operations, not en
 python -m jobtracker.cli eval            # replay criteria against your judgments; exits 1 on a regression
 python -m jobtracker.cli serve           # live tuning UI on http://127.0.0.1:8765
 
-# optional local ambiguity pass — see docs/llm.md
-python -m jobtracker.cli resolve --llm-provider vllm --llm-url http://HOST:PORT
+# the model tasks — see docs/tasks.md
+python -m jobtracker.cli work --dry-run               # what it would work on, and why
+python -m jobtracker.cli work --llm-url http://HOST:PORT
+python -m jobtracker.cli work --task prefill --budget 20
 
 # ranking — see docs/ranking.md
-python -m jobtracker.cli rank --llm-provider vllm --llm-url http://HOST:PORT
+python -m jobtracker.cli rank --llm-url http://HOST:PORT
 python -m jobtracker.cli today                        # the three to apply to
 python -m jobtracker.cli today --applied Stripe 7966029
 python -m jobtracker.cli today --snooze  Stripe 7966029 --days 14
+
+# prefilled applications — see docs/prefill.md
+cp answers.example.yaml answers.yaml                  # gitignored; holds your details
+python -m jobtracker.cli apply-to Cloudflare 7695702  # opens a browser, fills, stops
 ```
 
-**The nightly sequence is `check` → `resolve` → `rank` → `dashboard`,** and only `check`
+**The nightly sequence is `check` → `work` → `rank` → `dashboard`,** and only `check`
 touches an ATS. It caches a description for every match/uncertain posting, which is what
-lets the rest read `state.db` and talk to nothing but a local model.
+lets the rest read `state.db` and talk to nothing but the local inference router.
+
+`work` picks the task itself, in the pipeline's own dependency order — settle uncertain
+postings, judge the matches that produces, prefill the best of those. Run it more than
+once to drain more than one stage.
 
 `check` writes the report to **stdout**; progress goes to **stderr**, so `check > report.md`
 stays clean. `--output report.md` writes the file directly.

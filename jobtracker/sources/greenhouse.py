@@ -15,10 +15,23 @@ import html
 import re
 from typing import Optional
 
-from ..models import Posting
+from ..models import FormField, Posting
 from .base import Source, register
 
 BASE = "https://boards-api.greenhouse.io/v1/boards"
+
+# Greenhouse's own field types, mapped to the vocabulary in models.FormField. Anything
+# not listed is treated as free text, which is the safe default: a field we fill with a
+# typed answer is recoverable, a field we skip because we did not recognize its type is
+# a blank on a submitted application.
+_GH_TYPES = {
+    "input_text": "text",
+    "textarea": "textarea",
+    "input_file": "file",
+    "multi_value_single_select": "select",
+    "multi_value_multi_select": "multiselect",
+    "boolean": "select",
+}
 
 
 class Greenhouse(Source):
@@ -92,6 +105,50 @@ class Greenhouse(Source):
                 )
             )
         return postings
+
+    # -- application form ------------------------------------------------------------
+    def application_form_url(self, slug: str, ats_job_id: str) -> Optional[str]:
+        """The single-job payload, asked for its questions.
+
+        `?questions=true` is keyless and complete: field names, types, required flags,
+        and the full option list of every select. That is the whole reason prefill can
+        detect a question it has no answer for without ever opening a browser — and it
+        is the only ATS here that offers it.
+        """
+        return f"{BASE}/{slug}/jobs/{ats_job_id}?questions=true"
+
+    def parse_application_form(self, raw: object) -> list[FormField]:
+        """Flatten `questions[].fields[]` into one field per input.
+
+        Greenhouse nests fields under a question because one question can render as
+        several inputs — "Resume/CV" is a file input *and* a textarea, either of which
+        satisfies it. They are kept as separate fields, sharing the question's label, so
+        that filling the file input and leaving the textarea empty is representable.
+        """
+        if not isinstance(raw, dict):
+            return []
+        out: list[FormField] = []
+        for question in raw.get("questions") or []:
+            if not isinstance(question, dict):
+                continue
+            label = str(question.get("label") or "").strip()
+            required = bool(question.get("required"))
+            for field in question.get("fields") or []:
+                if not isinstance(field, dict) or not field.get("name"):
+                    continue
+                options = tuple(
+                    str(v["label"])
+                    for v in (field.get("values") or [])
+                    if isinstance(v, dict) and v.get("label") is not None
+                )
+                out.append(FormField(
+                    key=str(field["name"]),
+                    label=label or str(field["name"]),
+                    type=_GH_TYPES.get(str(field.get("type")), "text"),
+                    required=required,
+                    options=options,
+                ))
+        return out
 
 
 register(Greenhouse())

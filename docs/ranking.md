@@ -6,10 +6,16 @@ model roles — and the model's part here is the smaller one.
 
 ```
 check   fetch, match, cache descriptions        (the only step that touches an ATS)
-resolve read descriptions, settle uncertain     (local model)
-rank    judge open matches, score the queue     (local model; optional)
+work    the next model task, whichever it is    (the router; optional)
+rank    judge open matches, score the queue     (the router; optional)
 today   the three to apply to                   (offline)
 ```
+
+Judging is the `judge` task in the queue (docs/tasks.md) — same scope, same prompt, one
+commit per posting instead of one per run. Scoring is deliberately **not** a task: it
+needs no model, it must run on every invocation whether or not one is reachable, and it
+is arithmetic over rows the task already wrote. `jobtracker rank` still runs both, in
+that order.
 
 ## What the model does, and what it does not
 
@@ -123,7 +129,7 @@ out of the picks — never scored wrongly. Nothing here raises for a model that 
 unreachable one, it skips judging and **still scores** from the judgments it already
 holds. Yesterday's ordering beats surfacing nothing.
 
-`_parse_judgment` rejecting off-enum values is the same guard that turned the
+`parse_judgment` rejecting off-enum values is the same guard that turned the
 `guided_json` regression into "resolves nothing" rather than "wrong answers" — see
 docs/llm.md. A server that silently ignores `response_format` and answers in prose must
 produce no ranking, not a fabricated one.
@@ -161,7 +167,7 @@ So a fresh corpus drains over a few nights:
 | Budget | Flag | Default | Governs |
 |---|---|---|---|
 | descriptions | `check --max-descriptions` | 400 | ATS requests per run (~0.6s each) |
-| judgments | `rank --limit` | unlimited | model calls per run (~8s each) |
+| judgments | `rank --limit` / `work --budget` | unlimited | model calls per run (~8s each) |
 
 If `rank` reports a large "still unranked" count while the model is up, the cause is
 usually the description backfill still draining, not the model.
@@ -169,15 +175,15 @@ usually the description backfill still draining, not the model.
 ## Running it
 
 ```bash
-jobtracker check                                             # caches descriptions
-jobtracker resolve --llm-provider vllm --llm-url http://localhost:8000
-jobtracker rank    --llm-provider vllm --llm-url http://localhost:8000
+jobtracker check                                    # caches descriptions
+jobtracker work --llm-url http://localhost:8000     # drains level, then judge, then prefill
+jobtracker rank --llm-url http://localhost:8000     # judge what is left, then score
 jobtracker dashboard && jobtracker today
 ```
 
-Env equivalents `$JOBTRACKER_LLM_PROVIDER` / `$JOBTRACKER_LLM_URL` work here exactly as
-they do for `resolve`. `rank` exits 0 whether or not a model was reachable; sequencing
-is the caller's job, not the app's (docs/deployment.md).
+`$JOBTRACKER_LLM_URL` works here exactly as it does for `work`, as do the SDK's own
+`$SIR_BASE_URL` / `$SIR_ENDPOINTS`. `rank` exits 0 whether or not a model was reachable;
+sequencing is the caller's job, not the app's (docs/deployment.md).
 
 ## Checking its work
 

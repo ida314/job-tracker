@@ -122,7 +122,7 @@ def test_closed_postings_are_excluded():
 # The page's whole purpose is to shorten the distance between opening it and applying
 # to something, so these guard the picks against the ways they could silently vanish.
 def _ranked(conn, company, jid, score, why="because", loc="New York, NY"):
-    from jobtracker.llm.client import RankJudgment
+    from jobtracker.tasks.judge import RankJudgment
 
     store.record_judgment(conn, company, jid, RankJudgment("strong", "strong", "low", why),
                           "h", "2026-07-22")
@@ -226,3 +226,59 @@ def test_a_hostile_company_name_cannot_break_out_of_a_button_attribute():
         conn, [_company('Ac"me', 1)], "2026-07-22", interactive=True)
     assert 'data-company="Ac"me"' not in doc
     assert "Ac&quot;me" in doc
+
+
+# -- prefill on the Today tab --------------------------------------------------------
+# The counts belong in the static file (they say whether opening this one takes thirty
+# seconds or ten minutes) but the button does not, for the same reason the disposition
+# buttons do not: it drives a browser, which only `serve` can do.
+def test_a_pick_says_how_much_of_the_application_is_already_filled():
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+    store.record_plan(conn, "Acme", "1", "[]", fields=16, gaps=3,
+                      answers_hash="h", now="2026-07-22")
+    conn.commit()
+
+    page = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "prefill 13/16 fields" in page
+    assert "3 need you" in page
+
+
+def test_a_fully_prefilled_application_says_there_is_nothing_left_to_type():
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+    store.record_plan(conn, "Acme", "1", "[]", fields=8, gaps=0,
+                      answers_hash="h", now="2026-07-22")
+    conn.commit()
+
+    page = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "prefill 8/8 fields" in page
+    assert "nothing left to type" in page
+
+
+def test_a_pick_with_no_plan_says_how_to_get_one():
+    """Silence would read as "nothing to fill", which is the opposite of the truth."""
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+
+    page = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "no prefill yet" in page
+    assert "work --task prefill" in page
+
+
+def test_the_open_prefilled_button_exists_only_under_serve():
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+    store.record_plan(conn, "Acme", "1", "[]", 16, 3, "h", "2026-07-22")
+    conn.commit()
+
+    static = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    served = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
+    assert 'class="apply-to"' not in static
+    assert 'class="apply-to"' in served
+    # The counts are useful offline and appear in both.
+    assert "prefill 13/16 fields" in static and "prefill 13/16 fields" in served

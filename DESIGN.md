@@ -289,14 +289,20 @@ postings today."
 ## 8. Where the model still earns its place
 
 The rewrite does not eliminate the language model. It relocates it from the runtime to
-bounded roles — two when this was written, three now:
+bounded roles — two when this was written, four now. Since 2026-08-13 they share one
+mechanism: each is a **task** (docs/tasks.md), which is a prompt, a schema, a parser, a
+query for what still needs asking, and a write. A scheduler picks between them by
+priority, and priority is the pipeline's own dependency order. The bounds below did not
+change; what changed is that they are now stated once instead of three times.
 
 1. **Ambiguity resolution** (§6) — schema-constrained, on the residual only.
-   **Implemented** as `jobtracker resolve`; see `docs/llm.md`. It came out narrower than
-   this section anticipated in three ways worth recording:
+   **Implemented** as the `level` task (`jobtracker work --task level`, or `resolve`);
+   see `docs/llm.md`. It came out narrower than this section anticipated in three ways
+   worth recording:
 
-   - **Local only.** The provider is an address you point at (vLLM first), not a hosted
-     API. There is no key handling anywhere in `jobtracker/llm/`.
+   - **Local only.** The model is an address you point at — an inference router (`sir`)
+     since 2026-08-13, vLLM directly before that — not a hosted API. There is no key
+     handling anywhere in `jobtracker/llm/`, and there should not be.
    - **Level extraction only.** It answers "what experience level does this description
      require" and nothing else. An `entry` reading still has to pass the *rules'* own
      engineering gate before it can produce a MATCH, so the `Finance Associate` guard
@@ -306,10 +312,12 @@ bounded roles — two when this was written, three now:
      posting UNCERTAIN — where it already was. The pass can add resolution; it cannot
      subtract correctness. This is the §7.3 principle applied to inference.
 
-   Constrained decoding (`guided_json`) turned out to matter more than model choice:
-   malformed output stops being a failure mode you parse around. The client validates
-   anyway, since a server ignoring the field would otherwise let prose through as a
-   verdict.
+   Constrained decoding (`response_format`; `guided_json` originally) turned out to
+   matter more than model choice: malformed output stops being a failure mode you parse
+   around. The client validates anyway, since a server ignoring the field would otherwise
+   let prose through as a verdict. Routing through `sir` does not change that — it
+   forwards the body untouched, so the validation is still the only thing between a
+   backend that ignores the schema and a fabricated verdict.
 2. **Repair.** When `health.py` raises `IDENTITY_DRIFT` or persistent `FETCH_FAILED`, an
    agent is dispatched to read the company's careers page, locate the current board
    identifier — a Greenhouse `job_board?for=X` embed, or a link to `jobs.lever.co/X` — and
@@ -342,10 +350,28 @@ bounded roles — two when this was written, three now:
      that matching already accepted, in a separate table, so a bad judgment costs you one
      misplaced row and never a wrong match.
 
-   The general principle across all three: the model is allowed to *read*, never to
+4. **Question matching** (added 2026-08-13) — **implemented** as the `prefill` task; see
+   `docs/prefill.md`. An application form asks a question in the employer's words; the
+   answer bank holds it in yours. Deciding that *"Who is your current or previous
+   employer?"* and `current_employer` are the same question is exactly the fuzzy string
+   problem §3.2 reserves for a model, and exactly the kind of rule you cannot finish
+   writing.
+
+   It is the most tightly bounded of the four. Its schema is an **enum of keys the
+   candidate already wrote, plus `none`**, so the model cannot produce text: there is no
+   code path by which a sentence it composed reaches a form field. It names a key; the
+   value comes from `answers.yaml`. A key it names still has to fit the field — a
+   dropdown that does not offer the stored answer is a gap, not a fill.
+
+   And it is asked only about what the rules could not place. A canonical field name or
+   a question already answered elsewhere resolves with no call at all, so the steady
+   state is zero model calls per form.
+
+   The general principle across all four: the model is allowed to *read*, never to
    *decide*. Level extraction reads a description for a fact the title omitted; ranking
-   reads it for a fit judgment no rule could encode. In both cases deterministic code
-   holds the verdict, the ordering, and the reason.
+   reads it for a fit judgment no rule could encode; question matching reads a label and
+   points at an answer already written. In every case deterministic code holds the
+   verdict, the ordering, the text, and the reason.
 
 ---
 

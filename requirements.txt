@@ -2,6 +2,17 @@
 requests==2.34.2
 PyYAML==6.0.3
 
+# The inference router's SDK. Not on PyPI — it lives in the sibling repo and installs
+# by path locally, or by git subdirectory in a container. It is async-only, which is
+# why jobtracker/tasks/runner.py is async and jobtracker/browser.py is not.
+#
+#   pip install -e ../stupid-inference-router/clients/python
+#   pip install "git+ssh://git@github.com/ida314/stupid--inference-router.git#subdirectory=clients/python"
+#
+# httpx is its only dependency and is listed here because this file is what the image
+# installs; the SDK pulls it in either way.
+httpx==0.28.1
+
 # OpenTelemetry. The api package is what jobtracker/fetch.py imports; without the sdk
 # installed and configured it is a no-op, so tracing costs nothing when --telemetry=off
 # (the default). The otlp exporter is only needed for --telemetry=otlp.

@@ -4,6 +4,20 @@ data/
 *.db-wal
 *.db-shm
 
+# personal data — curated like criteria.yaml, but never committed. answers.yaml holds
+# your name, email, phone, and whatever else an application form has asked for;
+# answers.example.yaml is the tracked file that documents its shape.
+answers.yaml
+answers.yaml.bak
+answers.yaml.candidate
+resume.pdf
+resume*.pdf
+cover-letter*.pdf
+
+# safe-write leftovers from an interrupted criteria edit
+criteria.yaml.bak
+criteria.yaml.candidate
+
 # python
 .venv/
 __pycache__/

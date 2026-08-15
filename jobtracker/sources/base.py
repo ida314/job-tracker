@@ -84,6 +84,21 @@ class Source:
     def normalize_posted_at(self, raw: object, today: str) -> Optional[str]:
         return iso_day(raw)
 
+    # The application form's questions, for prefill. Greenhouse publishes these keylessly
+    # and completely; nobody else does. Ashby's per-job posting-api answers 401 and its
+    # GraphQL introspection is off, and Lever's public postings API carries no custom
+    # questions at all — so both return None here and their forms are learned from the
+    # DOM on the first browser visit instead (docs/prefill.md).
+    #
+    # Returning None is not a stub to be filled in later. It is the honest state, and it
+    # is what makes the DOM path load-bearing rather than a fallback nobody exercises.
+    def application_form_url(self, slug: str, ats_job_id: str) -> Optional[str]:
+        return None
+
+    def parse_application_form(self, raw: object) -> list:
+        """Questions from an application-form payload, as `FormField`s."""
+        return []
+
 
 _REGISTRY: dict[str, Source] = {}
 

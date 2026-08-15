@@ -2,17 +2,28 @@
 name = "jobtracker"
 version = "0.1.0"
 description = "Deterministic backend new-grad job-discovery pipeline (Design A)."
-requires-python = ">=3.11"
+# 3.12 is the floor sir-client sets, and it is the model transport now.
+requires-python = ">=3.12"
 dependencies = [
     "requests>=2.32",
     "PyYAML>=6.0",
+    # The inference router's SDK, and the http client it is built on. Unpublished, so
+    # it installs by path or by git subdirectory — see docs/llm.md.
+    "sir-client>=0.1.0",
+    "httpx>=0.27",
 ]
+
+[project.optional-dependencies]
+# Only `jobtracker apply-to` and the Settings tab's Apply button need this. The prefill
+# *task* runs without it and still produces the plan and the gap list, which is what
+# keeps "optional" structurally true rather than aspirational.
+browser = ["playwright>=1.40"]
 
 [project.scripts]
 jobtracker = "jobtracker.cli:main"
 
 [tool.setuptools]
-packages = ["jobtracker", "jobtracker.sources"]
+packages = ["jobtracker", "jobtracker.sources", "jobtracker.llm", "jobtracker.tasks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

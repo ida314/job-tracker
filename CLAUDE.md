@@ -219,6 +219,13 @@ matches on `level:associate+role:systems`, because `systems` in `role_type_inclu
 on an operations title. This is the `Finance Associate` bug through a different door. Fix
 it with the tuning loop and a regression check, not with a bare YAML edit.
 
+**The model passes became tasks (2026-08-13).** `resolve` and `rank`'s judging phase are
+now `level` and `judge` in the queue behind `jobtracker work`, joined by a third task,
+`prefill`. Both old commands still exist and still work — `resolve` is literally
+`work --task level`. Transport moved to the `sir-client` SDK and the `Provider` registry
+was deleted. See `docs/tasks.md` and `docs/prefill.md`; the schema gained
+`task_attempts`, `form_fields`, `prefill_gaps` and `prefill_plans`.
+
 **Not yet done:**
 
 - **The tracker markdown is a stale mirror.** `status`, `last_checked`, and
@@ -367,7 +374,15 @@ the distance between opening the page and applying to something.
   the user never asked to filter. There is a test.
 - **Disposition buttons only exist under `serve`** (`build_dashboard(interactive=True)`).
   They POST, and the static file has to stay offline and read-only — a dead button in a
-  mailed file is worse than no button.
+  mailed file is worse than no button. The "Open prefilled" button follows the same rule,
+  and for a stronger reason: it drives a browser, which only a live process can do. The
+  *counts* (`prefill 13/16 fields · 3 need you`) render in both, because they are useful
+  offline — they say whether opening a job takes thirty seconds or ten minutes.
+- **`serve` has a third page, `/settings`** — the answer bank and every question prefill
+  could not answer. `render_settings` is connection-in/string-out like `render_tuning`,
+  and `POST /api/answer` writes through `safewrite`. `POST /api/apply-to` starts the
+  browser **on a daemon thread**: `server.py` is `HTTPServer`, not `ThreadingHTTPServer`,
+  so driving it inline would freeze the page for as long as the window stayed open.
 - **It is a pure read.** Unlike `report`, it never marks manual companies as surfaced.
   Opening a view of your data must not mutate it; there is a test asserting this.
 - **No network at view time, ever.** No CDN, no chart library — the one chart is CSS.
@@ -406,15 +421,54 @@ in `docs/tuning.md`; the rules that matter here:
 - `decisions.title` is denormalized on purpose. Joining to `postings` would shrink the
   corpus every time a req closed, which is exactly when the evidence matters most.
 
+## The task queue
+
+`jobtracker work`, documented in `docs/tasks.md`. Added 2026-08-13, and it is where all
+model work now lives: `level` (was `resolve`), `judge` (was `rank`'s first phase), and
+`prefill`. The scheduler polls tasks by priority and runs the first with work.
+
+- **Priority is the pipeline's dependency chain, not a preference.** level → judge →
+  prefill, because each produces what the next consumes. Reorder it and "work the next
+  available task" stops meaning "keep every stage drained", which is the entire reason
+  the scheduler exists. There is a test.
+- **The queue is derived, never stored.** Each task's `pending()` is a SQL read over
+  tables that already exist, so there is nothing to reconcile — a posting that closes
+  overnight simply stops appearing. `task_attempts` is a *failure ledger*, not a queue:
+  three consecutive failures set a unit aside so it stops eating the budget while the
+  rest of the queue starves. Do not turn it into a work table.
+- **Every unit commits on its own.** That is the fix for a real defect — the old passes
+  held everything until one commit at the end, so an interrupted run wrote nothing. A
+  task that raises while writing is rolled back to the last committed unit.
+- **`unit_key` is the question, not the posting.** `judge` carries the profile prose
+  hash, `prefill` the answers hash. Change the question and every unit is new, with its
+  retry count reset — correct, because a failure answering the old question says nothing
+  about the new one. It is also the router's idempotency key.
+- **`pending()` must only return work the task can actually do.** `level` excludes
+  postings with no cached description; `prefill` excludes companies whose form it has
+  never seen. Counting those overstates a backlog no model could drain, and sends a
+  budgeted run to guaranteed no-ops.
+- Adding a task is one module plus one import line, same as an ATS. **Task modules are
+  pure** — prompts, parsers, and a description of what to write; `runner.py` owns every
+  socket, transaction, and clock.
+
 ## The ambiguity pass
 
-`jobtracker resolve`, documented in `docs/llm.md`. **Local only** — a provider is an
-address, and there is no API-key handling anywhere in `jobtracker/llm/`. Do not add a
-hosted provider.
+The `level` task, documented in `docs/llm.md`. **Local only** — the model is an address,
+and there is no API-key handling anywhere in `jobtracker/llm/`. Do not add a hosted
+provider.
 
-- `jobtracker/llm/` mirrors `jobtracker/sources/`: **adapters are pure**, `client.py` is
-  the only module that opens a socket. Keep it that way — it is what lets providers be
-  tested against recorded payloads with no HTTP mocking.
+- **Transport is the `sir-client` SDK** (`../stupid-inference-router`), since 2026-08-13.
+  The `Provider` interface and its registry were **deleted**, not kept: they existed so a
+  second wire format could be slotted in, and the router is that indirection now. Two
+  dispatch layers doing one job is what was removed. `llm/` is two files — `wire.py`
+  (pure, knows the body shape) and `client.py` (the only module that opens a socket).
+- **The SDK is async-only**, which is why `tasks/runner.py` is async and why
+  `browser.py` — Playwright's sync API, which must not run inside a loop — is a separate
+  module. Do not try to merge them.
+- **`sir` forwards the body untouched.** It reads only `model` and `stream`. So the
+  schema request still travels, and the parsers are still the only thing between a
+  backend that ignores it and a fabricated verdict. Routing through a router is not a
+  guarantee about anything.
 - **Scope is level extraction only.** The model never decides that a role is on-target;
   an `entry` reading still has to pass the rules' engineering gate. Widening this would
   put a nondeterministic component back in the main loop, which is what DESIGN.md was
@@ -428,11 +482,13 @@ hosted provider.
   every response and the whole pass became a silent no-op — it still fetched a
   description per posting and resolved nothing. Because failure-is-absence is the
   design, this cost no accuracy and raised no error, which is exactly why it could sit
-  undetected. Diagnostic: `resolve` reporting ~zero resolutions while the server is up
-  means the wire format, not the model. Verify against the server you actually run —
+  undetected. Diagnostic: `work` reporting ~zero applied while the server is up means the
+  wire format, not the model. Verify against the server you actually run —
   `test_request_constrains_output_and_is_deterministic` pins the request shape, but only
-  a live call proves the server honours it.
-- **`resolve` is a pure read** (2026-08-02). `check` caches the description for every
+  a live call proves the server honours it. Demonstrated again 2026-08-13 against the
+  router's *mock* backend, which ignores the schema: every prefill question-match came
+  back unparseable and every field became a gap. Right answer, and a good reminder.
+- **The `level` task is a pure read** (2026-08-02). `check` caches the description for every
   match/uncertain posting, so this pass opens no ATS connection at all — it lost its
   `fetcher`/`store_mod`/`conn` parameters and its lazy fetch-and-cache block. A throttled
   board can no longer shrink the queue it considers.
@@ -490,9 +546,13 @@ because adapters are pure and one source dates relatively.
 
 ## The ranking pass
 
-`jobtracker rank` and `jobtracker today`, documented in `docs/ranking.md`. Where `resolve`
+`jobtracker rank` and `jobtracker today`, documented in `docs/ranking.md`. Where `level`
 decides whether a posting is *on-target*, this decides which of those is *urgent*. It is
 the model's second bounded role, and the smaller one.
+
+Judging is the `judge` task now. **Scoring deliberately is not a task** — it needs no
+model, must run whether or not one is reachable, and is arithmetic over rows the task
+already wrote. Keep it in `cmd_rank`.
 
 - **The model judges one posting; Python does the ordering.** It returns three labelled
   ordinals (`backend_fit`, `growth`, `entry_risk`) plus a sentence, never a score and
@@ -517,6 +577,57 @@ the model's second bounded role, and the smaller one.
   judging and still scores from stored judgments; yesterday's order beats nothing.
 - **`rank` can only judge what `check` cached.** A large "still unranked" count while the
   model is up usually means the description backfill is still draining, not a model fault.
+
+## Prefilled applications
+
+`jobtracker work --task prefill` and `jobtracker apply-to`, documented in
+`docs/prefill.md`. Added 2026-08-13. Two halves: an offline task that builds a plan and
+names what is missing, and an on-demand browser that carries the plan to the page.
+
+- **A cookie cannot carry prefill state, and neither can a URL.** Greenhouse, Ashby and
+  Lever hold no server-side draft for an anonymous candidate, only Lever honours
+  query-parameter prefill, and no URL of any kind attaches a file. What fills a
+  third-party form is code running on the page. Do not re-propose the link.
+- **The browser never submits.** There is no click path in `browser.py` at all and a
+  test asserts it against the source (no `.click(`, `.press(`, `requestSubmit`,
+  `dispatchEvent`). An application is irreversible and goes out under the user's name.
+- **The model may only point, never write.** Its schema is an enum of answer keys the
+  user already wrote plus `none`. There must be no code path by which a sentence the
+  model composed reaches a form field — free text with no stored answer is a gap, the
+  same as an unanswered dropdown. It is the fourth bounded role in DESIGN.md §8, and the
+  narrowest.
+- **A dropdown that does not offer our answer is a gap, not a fill.** Picking the nearest
+  option puts an answer the candidate did not give onto a submitted application.
+- **`answers.yaml` is gitignored** — it is personal data. `answers.example.yaml` is the
+  tracked file. Everything above the `# ===== unanswered questions` marker is the user's
+  and is never parsed or rewritten; the block below it is regenerated wholesale from
+  `prefill_gaps` on every run. Writes go through `safewrite.py` (candidate → parse →
+  `.bak` → atomic swap), extracted from `server._api_rule`, which had it inline.
+- **Adding an answer is text surgery, not a YAML round trip.** A round trip deletes every
+  comment in the file, including the stubs the user is working through.
+- **Only Greenhouse publishes its form** (`?questions=true`, keyless, complete — 47 of 62
+  api boards). Ashby's per-job posting-api is 401 and its GraphQL introspection is off;
+  Lever exposes no custom questions. Verified 2026-08-13. Their forms are learned from
+  the DOM on the first `apply-to` visit and cached per company, which is what puts every
+  ATS in the same gap loop. A company whose form is neither held nor fetchable is **not**
+  counted as pending work — it is waiting on a browser, not a model.
+
+Three things learned from live forms; all are handled and none is obvious:
+
+- **Greenhouse's current board UI sets no `name` attributes** — everything is keyed off
+  `id`, including `id="resume"`. Reading only `name` silently failed to attach the
+  resume, which is the single most valuable field. Field keys are `name` → `id` → a slug
+  of the label.
+- **One visible question can be several inputs.** A combobox renders as a text input plus
+  a hidden select; "Resume/CV" is a file input plus a textarea, either of which satisfies
+  it. Once any sibling holds the answer the question is answered and the rest are not
+  gaps.
+- **Some employers redirect the hosted board to their own careers site.** Stripe's
+  `absolute_url` is a search page with no form on it, and `job-boards.greenhouse.io`
+  redirects there too. Greenhouse gets the canonical board URL when the slug and job id
+  are known, and **zero fields discovered is reported as "no application form found",
+  never as "0/0 filled, nothing left to do"** — absence read as success is the failure
+  DESIGN.md §3.4 exists to prevent.
 
 ## Aggregator sources
 

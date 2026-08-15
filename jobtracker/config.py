@@ -21,6 +21,20 @@ COMPANIES_YAML = Path(os.environ.get("JOBTRACKER_COMPANIES", ROOT / "companies.y
 CRITERIA_YAML = Path(os.environ.get("JOBTRACKER_CRITERIA", ROOT / "criteria.yaml"))
 PROFILE_YAML = Path(os.environ.get("JOBTRACKER_PROFILE", ROOT / "profile.yaml"))
 
+# Curated like the three above, but gitignored: it holds your name, email, phone, and
+# whatever else an application form asks for. `answers.example.yaml` is the tracked
+# file that documents its shape. Absent is a normal state — prefill reports itself
+# unavailable and nothing else notices.
+ANSWERS_YAML = Path(os.environ.get("JOBTRACKER_ANSWERS", ROOT / "answers.yaml"))
+
+# Where the browser keeps its profile between runs. Persistent so that candidate-account
+# logins survive, which is the only thing that could ever make the `manual` Workday
+# companies tractable. Gitignored, and it is not used for prefill state — see
+# docs/prefill.md on why a cookie cannot carry that.
+BROWSER_PROFILE = Path(
+    os.environ.get("JOBTRACKER_BROWSER_PROFILE", ROOT / "data" / "browser")
+)
+
 _DEFAULT_DB = ROOT / "data" / "state.db"
 DB_PATH = Path(os.environ.get("JOBTRACKER_DB", _DEFAULT_DB))
 

@@ -135,15 +135,16 @@ def test_regressions_are_surfaced(criteria):
 # _readiness is the meaningful health logic (liveness is a constant), and like
 # render_tuning it needs no socket: a Handler carries only the paths off .server.
 class _FakeServer:
-    def __init__(self, db_path, criteria_path):
+    def __init__(self, db_path, criteria_path, answers_path=None):
         self.db_path = db_path
         self.criteria_path = criteria_path
         self.companies_path = None
+        self.answers_path = answers_path or config.ANSWERS_YAML
 
 
-def _handler_for(db_path, criteria_path):
+def _handler_for(db_path, criteria_path, answers_path=None):
     h = server.Handler.__new__(server.Handler)
-    h.server = _FakeServer(db_path, criteria_path)
+    h.server = _FakeServer(db_path, criteria_path, answers_path)
     return h
 
 
@@ -185,7 +186,7 @@ def _handler_over(db_path):
 
 
 def _seed_ranked(db_path, jid="1", score=90.0):
-    from jobtracker.llm.client import RankJudgment
+    from jobtracker.tasks.judge import RankJudgment
     from jobtracker.models import Decision, Posting, Verdict
 
     conn = store.connect(db_path)
@@ -270,3 +271,166 @@ def test_csp_allows_the_fetch_the_buttons_depend_on():
     src = inspect.getsource(server.Handler._send)
     assert "connect-src 'self'" in src
     assert "default-src 'none'" in src
+
+
+# -- settings ------------------------------------------------------------------------
+# The other half of the prefill loop: prefill names a question it cannot answer, and
+# this is where the answer gets written back. Same conventions as the tuning page —
+# a pure-read renderer plus dict-in/dict-out write methods, both testable with no socket.
+ANSWERS = """\
+identity:
+  first_name: Dylan
+  last_name: D
+  email: d@example.edu
+
+answers:
+  work_authorization: "Yes"
+"""
+
+
+def _answers_file(tmp_path, body=ANSWERS):
+    path = tmp_path / "answers.yaml"
+    path.write_text(body)
+    return path
+
+
+def _gap(conn, key="current_employer", ask="Who is your current employer?",
+         company="Stripe", field_type="text", options=None):
+    store.record_gap(conn, key, ask, field_type, company, "2026-08-02", options)
+    conn.commit()
+
+
+def test_settings_lists_the_open_gaps_and_the_answers_you_have(tmp_path):
+    conn = store.connect(":memory:")
+    _gap(conn)
+    page = server.render_settings(conn, _answers_file(tmp_path))
+    assert "Who is your current employer?" in page
+    assert "asked by Stripe" in page
+    assert "work_authorization" in page          # the answers you already wrote
+    conn.close()
+
+
+def test_settings_says_so_when_there_is_no_answer_bank(tmp_path):
+    conn = store.connect(":memory:")
+    page = server.render_settings(conn, tmp_path / "nope.yaml")
+    assert "No answer bank yet" in page
+    conn.close()
+
+
+def test_a_broken_answer_bank_is_a_page_not_a_500(tmp_path):
+    conn = store.connect(":memory:")
+    page = server.render_settings(conn, _answers_file(tmp_path, "identity:\n  email: x\n"))
+    assert "banner bad" in page
+    assert "missing" in page
+    conn.close()
+
+
+def test_settings_rendering_never_writes(tmp_path):
+    """Opening a view of your data must not mutate it — the dashboard's rule, here too.
+
+    Compared by rows rather than by file bytes, the same way `test_rendering_never_writes`
+    does it: the WAL checkpoints on close, so the file differs even when nothing did.
+    """
+    conn = store.connect(":memory:")
+    _gap(conn)
+    path = _answers_file(tmp_path)
+    before = [tuple(r) for r in conn.execute("SELECT * FROM prefill_gaps")]
+    server.render_settings(conn, path)
+    server.render_settings(conn, path)
+    after = [tuple(r) for r in conn.execute("SELECT * FROM prefill_gaps")]
+    assert before == after
+    assert path.read_text() == ANSWERS      # nor does it touch the file it renders
+    conn.close()
+
+
+def test_a_hostile_question_cannot_break_out_of_the_input_attribute(tmp_path):
+    """Question text comes from a third-party ATS, like every title and location here."""
+    conn = store.connect(":memory:")
+    _gap(conn, key='x" onfocus="alert(1)', ask='<img src=x onerror=alert(1)>')
+    page = server.render_settings(conn, _answers_file(tmp_path))
+    assert 'onfocus="alert(1)' not in page
+    assert "<img src=x" not in page
+    assert "&lt;img" in page
+    conn.close()
+
+
+def test_answering_a_gap_writes_the_file_and_closes_the_gap(tmp_path):
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    _gap(conn)
+    conn.close()
+
+    path = _answers_file(tmp_path)
+    res = _handler_for(db, config.CRITERIA_YAML, path)._api_answer(
+        {"question_key": "current_employer", "value": "New York University"})
+    assert res["ok"] and res["remaining"] == 0
+
+    from jobtracker.answers import load_answers
+
+    reloaded = load_answers(path)
+    assert reloaded.get("current_employer") == "New York University"
+    # The question text is stored as an alias, so every other company that asks it the
+    # same way is answered from now on with no model call.
+    assert "who is your current employer" in reloaded.by_alias
+
+    conn = store.connect(db)
+    assert store.open_gaps(conn) == []
+    conn.close()
+
+
+def test_answering_leaves_a_backup(tmp_path):
+    db = tmp_path / "s.db"
+    store.connect(db).close()
+    path = _answers_file(tmp_path)
+    _handler_for(db, config.CRITERIA_YAML, path)._api_answer(
+        {"question_key": "why_us", "value": "Because."})
+    assert (tmp_path / "answers.yaml.bak").exists()
+
+
+def test_an_empty_answer_is_refused_without_writing(tmp_path):
+    db = tmp_path / "s.db"
+    store.connect(db).close()
+    path = _answers_file(tmp_path)
+    before = path.read_text()
+    res = _handler_for(db, config.CRITERIA_YAML, path)._api_answer(
+        {"question_key": "why_us", "value": "   "})
+    assert res["ok"] is False
+    assert path.read_text() == before
+
+
+def test_a_write_that_would_not_parse_is_refused_and_the_file_survives(tmp_path):
+    """The candidate is parsed before it replaces anything, so a bad write cannot land.
+
+    Same guarantee criteria.yaml has had, now shared through safewrite.py — this file is
+    loaded by the next prefill run, so a broken write would surface as a broken pass
+    rather than as an error now.
+    """
+    db = tmp_path / "s.db"
+    store.connect(db).close()
+    path = _answers_file(tmp_path)
+    before = path.read_text()
+
+    # A key the strict loader rejects: `identity` is a closed set, and inserting into
+    # `answers:` a value that re-opens the mapping would not survive validation.
+    res = _handler_for(db, config.CRITERIA_YAML, path)._api_answer(
+        {"question_key": "value:\n  nope", "value": "x"})
+    assert res["ok"] is False
+    assert path.read_text() == before
+    assert not (tmp_path / "answers.yaml.candidate").exists()
+
+
+def test_apply_to_refuses_an_unknown_posting(tmp_path):
+    """It must not start a browser for a posting that is not there."""
+    db = tmp_path / "s.db"
+    store.connect(db).close()
+    res = _handler_for(db, config.CRITERIA_YAML, _answers_file(tmp_path))._api_apply_to(
+        {"company": "Nope", "ats_job_id": "999"})
+    assert res["ok"] is False and "no such posting" in res["error"]
+
+
+def test_apply_to_refuses_without_an_answer_bank(tmp_path):
+    db = tmp_path / "s.db"
+    _seed_ranked(db, "1")
+    res = _handler_for(db, config.CRITERIA_YAML, tmp_path / "nope.yaml")._api_apply_to(
+        {"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is False

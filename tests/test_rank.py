@@ -10,7 +10,7 @@ import pytest
 
 from jobtracker import config, rank, store
 from jobtracker.criteria import load_criteria
-from jobtracker.llm.client import RankJudgment
+from jobtracker.tasks.judge import RankJudgment
 from jobtracker.models import Decision, Posting, Verdict
 from jobtracker.profile import load_profile
 
@@ -226,20 +226,47 @@ def test_snooze_without_a_date_is_rejected():
         store.set_deferral(conn, "Acme", "1", "snoozed", "2026-08-02")
 
 
-def test_unreadable_postings_are_counted_not_defaulted():
-    """A fabricated 'moderate' is worse than a visible gap."""
+def test_unreadable_postings_are_counted_not_defaulted(tmp_path):
+    """A fabricated 'moderate' is worse than a visible gap.
+
+    The judging loop moved into `tasks/judge.py`, so this now exercises the runner:
+    a client that answers nothing must leave the posting unjudged, write no ranking
+    row, and be counted as `no_answer` rather than as an applied unit.
+    """
+    import asyncio
+
+    from jobtracker.tasks import TaskContext, get_task, run_task
+
+    db = str(tmp_path / "s.db")
+    _seed_unjudged(db)
+    conn = store.connect(db)
+    ctx = TaskContext(today="2026-08-02", profile=load_profile(config.PROFILE_YAML))
+
     class _Silent:
-        def judge_posting(self, *_a):
+        async def complete(self, *_a, **_k):
             return None
 
-    rows = [{"company": "Acme", "ats_job_id": "1", "title": "SWE",
-             "description": "d"}]
-    out, stats = rank.judge_matches(rows, _Silent(), load_profile(config.PROFILE_YAML))
-    assert out == []
-    assert stats.considered == 1 and stats.unreadable == 1 and stats.judged == 0
+    report = asyncio.run(run_task(conn, get_task("judge"), _Silent(), ctx))
+    assert report.attempted == 1
+    assert report.applied == 0
+    assert report.no_answer == 1
+    assert store.ranked_matches(conn)[0]["backend_fit"] is None
+    conn.close()
 
 
 # -- the CLI disposition loop ------------------------------------------------------
+def _seed_unjudged(db, jid="1"):
+    """A match with a description and no judgment — one unit of the `judge` queue."""
+    conn = store.connect(db)
+    store.sync_postings(conn, "Acme", [Posting("Acme", jid, "SWE", f"https://x/{jid}")],
+                        "2026-08-02")
+    store.set_description(conn, "Acme", jid, "a description")
+    store.record_verdict(conn, Verdict("Acme", jid, Decision.MATCH, "r", "rules"),
+                         "2026-08-02")
+    conn.commit()
+    conn.close()
+
+
 def _seed(db, jid="1", score=90.0):
     conn = store.connect(db)
     store.sync_postings(conn, "Acme", [Posting("Acme", jid, "SWE", f"https://x/{jid}")],
@@ -273,7 +300,11 @@ def test_today_snooze_returns_the_posting_after_the_window(tmp_path):
 
     db = str(tmp_path / "s.db")
     _seed(db)
-    assert main(["today", "--db", db, "--snooze", "Acme", "1", "--days", "7"]) == 0
+    # `--since` pins "today", so the snooze lands on a known date. Without it the
+    # deadline came off the real clock while the assertions below were hardcoded, and
+    # the test passed until the day the two drifted apart.
+    assert main(["today", "--db", db, "--since", "2026-08-02",
+                 "--snooze", "Acme", "1", "--days", "7"]) == 0
 
     conn = store.connect(db)
     rows = store.ranked_matches(conn)
