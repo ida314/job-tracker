@@ -10,7 +10,14 @@ wrote (`prefill`). In all four it may read and propose, never decide.
 
 import os
 
-__version__ = "0.1.0"
+# Keep in step with `version` in pyproject.toml — test_version_matches_pyproject holds
+# them together, because two numbers that can disagree eventually do, and the whole
+# point of this string is that you can trust it.
+#
+# 0.2.0 (2026-08-16) — applications: the outer loop got a page, a history and manual
+# entry. Minor rather than patch because it adds a surface and a table, and because a
+# version that never moves cannot answer "is this the build with the new thing in it".
+__version__ = "0.2.0"
 
 
 def build_version() -> str:

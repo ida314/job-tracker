@@ -1,6 +1,6 @@
 [project]
 name = "jobtracker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Deterministic backend new-grad job-discovery pipeline (Design A)."
 # 3.12 is the floor sir-client sets, and it is the model transport now.
 requires-python = ">=3.12"

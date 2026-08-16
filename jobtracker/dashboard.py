@@ -34,6 +34,7 @@ from datetime import date
 from typing import Optional
 
 from . import applications as apps_mod, rank as rank_mod, store
+from . import build_version
 from .criteria import Criteria
 from .match import location_label, location_rank
 from .models import Company
@@ -320,6 +321,17 @@ h2 .sub { font-size: 12.5px; font-weight: 400; color: var(--muted); margin-left:
    the dashboard page, which loads _CSS alone. */
 .note { font-size: 12.5px; color: var(--ink-2); }
 .note a { color: var(--accent); }
+
+/* -- the build stamp ---------------------------------------------------------------- */
+/* Small, monospaced, and always in the same place on every surface, so two tabs can be
+   compared without hunting. Never the loudest thing in the header — it answers a
+   question you only ask occasionally. */
+.ver { font-size: 11.5px; font-weight: 500; color: var(--muted); vertical-align: 3px;
+       white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ver .rev { color: var(--ink-2); }
+/* A working-tree render is a different kind of thing from a published build, not a
+   lesser one — but it must be impossible to mistake for a sha at a glance. */
+.ver .rev.tree { font-style: italic; font-family: inherit; }
 """
 
 _JS = """
@@ -731,8 +743,35 @@ def _prefill_line(parts, row, plans) -> None:
     )
 
 
+def version_chip() -> str:
+    """The build this page was rendered by, as a chip.
+
+    Public rather than underscored because `server.py` puts the same chip on the pages
+    it renders itself — the point is that every surface answers the version question the
+    same way, so two tabs can be compared at a glance.
+
+    Absence stays meaningful, exactly as `build_version()` intends. An image run stamps
+    `JOBTRACKER_REVISION` and reads `v0.2.0 · 7b41744f`; a working-tree run has no single
+    commit to name and says so in words. It must never invent a sha here: this chip's
+    only job is to prove which build you are looking at, and a guessed one would make it
+    worthless precisely when it matters. On gx10 the two are genuinely different
+    substrates — the nightly pipeline runs the published image, `serve` runs the repo
+    venv because the image ships no browser — so "working tree" is the correct and
+    useful answer there, not a degraded one.
+    """
+    version = build_version()
+    if "+" in version:
+        base, _, rev = version.partition("+")
+        detail = f'<span class="rev">{html.escape(rev)}</span>'
+    else:
+        base, detail = version, '<span class="rev tree">working tree</span>'
+    return f'<span class="ver">v{html.escape(base)} · {detail}</span>'
+
+
 def _header(parts, today, run, companies) -> None:
-    parts.append(f"<h1>Job tracker — {html.escape(today)}</h1>")
+    parts.append(
+        f"<h1>Job tracker — {html.escape(today)} {version_chip()}</h1>"
+    )
     if run is None:
         parts.append('<p class="sub">No run recorded yet. Run <code>jobtracker check</code>.</p>')
         return

@@ -94,7 +94,7 @@ def render_tuning(conn: sqlite3.Connection, criteria) -> str:
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         "<title>Tuning — job tracker</title>",
         f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}</style></head><body><div class=wrap>",
-        "<h1>Tuning</h1>",
+        f"<h1>Tuning {dashboard_mod.version_chip()}</h1>",
         _NAV,
     ]
 
@@ -176,7 +176,8 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     p = [
         "<!doctype html><meta charset=utf-8><title>Settings</title>",
         f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_SETTINGS_CSS}</style>",
-        "<body><div class=wrap><h1>Settings</h1>", _NAV,
+        "<body><div class=wrap>"
+        f"<h1>Settings {dashboard_mod.version_chip()}</h1>", _NAV,
         f"<p class=note>Answer bank: <code>{html.escape(str(answers_path))}</code>"
         " — git-ignored, and the source of truth. This page edits it in place.</p>",
     ]
@@ -255,7 +256,8 @@ def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
     p = [
         "<!doctype html><meta charset=utf-8><title>Applications</title>",
         f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_APPS_CSS}</style>",
-        "<body><div class=wrap><h1>Applications</h1>", _NAV,
+        "<body><div class=wrap>"
+        f"<h1>Applications {dashboard_mod.version_chip()}</h1>", _NAV,
     ]
     p.extend(_add_application_card(today))
 
