@@ -9,6 +9,8 @@ fetch, because absence during a failure or drift is not evidence a posting close
 
 from __future__ import annotations
 
+import hashlib
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -103,15 +105,38 @@ CREATE TABLE IF NOT EXISTS overrides (
 -- `title` is denormalized for the same reason as `decisions` — a req closes and gets
 -- pruned, but "I applied here and got an interview" stays true and worth keeping.
 -- `applied_at` is set once; `status`/`updated_at` move as the application progresses.
+--
+-- `url` and `location` are denormalized for a second reason on top of that one: a
+-- manually-entered application has no `postings` row at all, so there is nothing to
+-- join to. See `manual_job_id` for how those rows are keyed. `url`, `location`,
+-- `source`, `next_action` and `next_action_note` arrive via _ADDED_COLUMNS below.
 CREATE TABLE IF NOT EXISTS applications (
     company     TEXT NOT NULL,
     ats_job_id  TEXT NOT NULL,
     title       TEXT NOT NULL,
-    status      TEXT NOT NULL,   -- applied | interviewing | offer | rejected | withdrawn
+    status      TEXT NOT NULL,   -- see APPLICATION_STATUSES
     note        TEXT,
     applied_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (company, ats_job_id)
+);
+
+-- Every stage an application has passed through, in order. `applications.status` is
+-- the current-state cache; this is how it got there.
+--
+-- Deliberately no primary key. It is a log, and (company, ats_job_id, status) really
+-- does repeat — that is the whole `interview ×3` case, one row per round. The implicit
+-- rowid is the tiebreaker for two events stamped on the same day.
+--
+-- Also deliberately no index: this table has no indexes anywhere in the schema to be
+-- consistent with, it is read once per page render, and a job search is a few hundred
+-- rows. Do not add one without a measurement.
+CREATE TABLE IF NOT EXISTS application_events (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    at          TEXT NOT NULL
 );
 
 -- What the local model made of one posting, read against profile.yaml. NOT a score:
@@ -292,6 +317,29 @@ _ADDED_COLUMNS = [
     # that has never been healthy, so "failed for three nights" and "failed since day
     # one" read identically. Reset by every non-failing outcome, so it is a streak.
     ("board_health", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0"),
+    # Where the application can be reopened, and where the job is. Denormalized off
+    # `postings` rather than joined because a manual entry has no posting row, and
+    # because a tracked one loses its row when the req closes — which is exactly when
+    # "where did I apply?" is still worth answering.
+    ("applications", "url", "TEXT"),
+    ("applications", "location", "TEXT"),
+    # 'tracked' (surfaced by the pipeline) | 'manual' (typed in by hand). Stored rather
+    # than sniffed off the `manual:` id prefix: the prefix is how the row is *keyed*,
+    # and reading a key as a flag couples two things that can drift.
+    #
+    # Nullable, and read through COALESCE(source, 'tracked') instead of carrying a NOT
+    # NULL DEFAULT. A column default only fires when the INSERT omits the column, and
+    # this one is always bound — so `NOT NULL DEFAULT 'tracked'` rejected every caller
+    # that passed None rather than defaulting it. NULL reading as 'tracked' is also
+    # exactly right for rows written before manual entry existed: they all came from
+    # the pipeline.
+    ("applications", "source", "TEXT"),
+    # The next thing you owe this application, as an ISO day, plus what it is. Not an
+    # apply-by deadline: every row in this table exists because you already applied, so
+    # a closing date has nothing left to inform. NULL means nothing is scheduled, which
+    # is the normal state and never means "overdue".
+    ("applications", "next_action", "TEXT"),
+    ("applications", "next_action_note", "TEXT"),
 ]
 
 
@@ -719,9 +767,54 @@ def decision_count(conn: sqlite3.Connection) -> int:
 
 
 # -- applications: the outer loop (which roles you applied to, and the outcome) --------
-# The lifecycle of one application. Ordered, but not enforced as a state machine — you
-# can jump straight to `rejected`, and `withdrawn` is a terminal you reach from anywhere.
-APPLICATION_STATUSES = ("applied", "interviewing", "offer", "rejected", "withdrawn")
+# The lifecycle of one application, in funnel order. Not enforced as a state machine —
+# you can jump straight to `rejected`, and `withdrawn` is a terminal you reach from
+# anywhere.
+#
+# `interview` is deliberately ONE status and is repeatable rather than being split into
+# round_1/round_2/onsite. A numbered enum is capped at however many rounds you guessed,
+# and a fourth round has nowhere to go; a repeated event with a free-text note says
+# "round 2 — system design" without a schema change. Counting the events is what
+# renders as `interview ×3`.
+#
+# There is no `ghosted`. Silence is derived from `updated_at` (see `is_stale`) because
+# a status only you can set is one you will not remember to set, and an unset status
+# that means "no reply" is indistinguishable from an application going well.
+APPLICATION_STATUSES = (
+    "applied", "oa", "screen", "interview", "offer", "rejected", "withdrawn",
+)
+# Still in play — these are what "active" means on the page and in the counts.
+ACTIVE_STATUSES = ("applied", "oa", "screen", "interview")
+# Terminal. `offer` sits here because the application is over, not because it went badly.
+CLOSED_STATUSES = ("offer", "rejected", "withdrawn")
+
+# An active application nobody has touched in this many days is shown as stale. Not a
+# status and not stored — see the note above APPLICATION_STATUSES.
+STALE_AFTER_DAYS = 30
+
+# Manual entries have no ATS and therefore no vendor id, so one is minted. The prefix
+# guarantees a hand-typed row can never collide with a real (company, ats_job_id) even
+# if that company is later added to companies.yaml and fetched for real.
+MANUAL_PREFIX = "manual:"
+
+
+def manual_job_id(title: str) -> str:
+    """Mint a stable id for a hand-entered application.
+
+    Deterministic on the title, so re-adding the same role at the same company updates
+    the row you already have instead of silently creating a second one — the same
+    stable-id rule the aggregator adapter follows for postings it has no vendor id for.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "-", title.strip().lower()).strip("-")
+    # A title of pure punctuation would slug to nothing, which would make every such
+    # entry at one company the same row. Fall back to a digest of the raw text.
+    if not slug:
+        slug = hashlib.sha1(title.encode("utf-8")).hexdigest()[:12]
+    return MANUAL_PREFIX + slug[:80]
+
+
+def is_manual(ats_job_id: str) -> bool:
+    return ats_job_id.startswith(MANUAL_PREFIX)
 
 
 def record_application(
@@ -732,9 +825,27 @@ def record_application(
     status: str,
     now: str,
     note: str = "",
+    *,
+    url: Optional[str] = None,
+    location: Optional[str] = None,
+    source: Optional[str] = None,
+    next_action: Optional[str] = None,
+    next_action_note: Optional[str] = None,
 ) -> None:
-    """Record (or advance) an application. First write sets applied_at; later writes
-    move status/note/updated_at and leave applied_at untouched."""
+    """Set an application's current state. First write sets applied_at; later writes
+    move status/note/updated_at and leave applied_at untouched.
+
+    Logs nothing. Callers that mean "something happened to this application" want
+    `advance_application`, which also appends to the event log. The split is what makes
+    a repeated `interview` legible: folding the append in here would either duplicate an
+    event every time a note was edited, or suppress the second interview round — and
+    from inside an upsert those two cases look identical.
+
+    Every optional field updates through COALESCE, so passing None means "leave it
+    alone" rather than "clear it". Without that, `jobtracker apply`, which passes none
+    of them, would blank a URL set from the web page on the next status change. Same
+    rule as `sync_postings` writing `posted_on`. To actually clear a field, pass "".
+    """
     if status not in APPLICATION_STATUSES:
         raise ValueError(
             f"status must be one of {APPLICATION_STATUSES}, got {status!r}"
@@ -742,23 +853,134 @@ def record_application(
     conn.execute(
         """
         INSERT INTO applications
-            (company, ats_job_id, title, status, note, applied_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (company, ats_job_id, title, status, note, applied_at, updated_at,
+             url, location, source, next_action, next_action_note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company, ats_job_id) DO UPDATE SET
             title=excluded.title, status=excluded.status,
-            note=excluded.note, updated_at=excluded.updated_at
+            note=excluded.note, updated_at=excluded.updated_at,
+            url=COALESCE(excluded.url, applications.url),
+            location=COALESCE(excluded.location, applications.location),
+            source=COALESCE(excluded.source, applications.source),
+            next_action=COALESCE(excluded.next_action, applications.next_action),
+            next_action_note=COALESCE(excluded.next_action_note,
+                                      applications.next_action_note)
         """,
-        (company, ats_job_id, title, status, note, now, now),
+        (company, ats_job_id, title, status, note, now, now,
+         url, location, source, next_action, next_action_note),
     )
 
 
+def add_application_event(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    status: str,
+    at: str,
+    note: str = "",
+) -> None:
+    """Append one stage to an application's history. Never updates, never deduplicates —
+    three `interview` events in a row is the point, not a bug."""
+    if status not in APPLICATION_STATUSES:
+        raise ValueError(
+            f"status must be one of {APPLICATION_STATUSES}, got {status!r}"
+        )
+    conn.execute(
+        "INSERT INTO application_events (company, ats_job_id, status, note, at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        # Coerced rather than left to the caller: `note` reaches here from argparse
+        # defaults and JSON payloads alike, and several of those are None. The column is
+        # NOT NULL because "no note" is the empty string, not an unknown.
+        (company, ats_job_id, status, note or "", at),
+    )
+
+
+def advance_application(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    title: str,
+    status: str,
+    now: str,
+    note: str = "",
+    **meta,
+) -> None:
+    """Record that something happened: set the current state *and* log the event.
+
+    This is what every caller who means "I applied" / "they moved me to an OA" / "that
+    was round 2" should use. Editing a reminder is not something happening — that calls
+    `record_application` alone.
+    """
+    record_application(conn, company, ats_job_id, title, status, now, note, **meta)
+    add_application_event(conn, company, ats_job_id, status, now, note)
+
+
+_APPLICATION_COLUMNS = (
+    "company, ats_job_id, title, status, note, applied_at, updated_at, "
+    "url, location, COALESCE(source, 'tracked') AS source, "
+    "next_action, next_action_note"
+)
+
+
 def all_applications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Every application, most-recently-updated first."""
+    """Every application, most-recently-updated first.
+
+    Reads `applications` directly rather than joining through `postings`, which is what
+    lets a manual entry — a job with no board, no verdict and no posting row — appear at
+    all. Ordering here is only a stable default; the page re-groups by urgency.
+    """
     return list(
         conn.execute(
-            "SELECT company, ats_job_id, title, status, note, applied_at, updated_at "
+            f"SELECT {_APPLICATION_COLUMNS} "
             "FROM applications ORDER BY updated_at DESC, company, title"
         )
+    )
+
+
+def get_application(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        f"SELECT {_APPLICATION_COLUMNS} "
+        "FROM applications WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+
+
+def events_by_application(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], list[sqlite3.Row]]:
+    """Every event, keyed by the application it belongs to, oldest first.
+
+    One query returning a keyed dict — same idiom as `load_overrides` and
+    `plans_by_posting` — so a page with N applications renders in two queries and not
+    N+1. `rowid` breaks the tie when two events share a day.
+    """
+    out: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in conn.execute(
+        "SELECT company, ats_job_id, status, note, at FROM application_events "
+        "ORDER BY at, rowid"
+    ):
+        out.setdefault((row["company"], row["ats_job_id"]), []).append(row)
+    return out
+
+
+def delete_application(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> None:
+    """Remove an application and its whole history — for a mistyped manual entry.
+
+    Deletes the events too. Leaving them orphaned would make the row reappear with a
+    history the moment the same title was entered again, since `manual_job_id` is
+    deterministic and would mint the identical key.
+    """
+    conn.execute(
+        "DELETE FROM applications WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    )
+    conn.execute(
+        "DELETE FROM application_events WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
     )
 
 

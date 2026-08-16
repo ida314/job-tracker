@@ -124,11 +124,11 @@ def test_application_advances_but_keeps_applied_at():
     conn = _conn()
     store.record_application(conn, "Acme", "1", "SWE, New Grad", "applied", "2026-07-01")
     store.record_application(
-        conn, "Acme", "1", "SWE, New Grad", "interviewing", "2026-07-10", note="phone screen"
+        conn, "Acme", "1", "SWE, New Grad", "screen", "2026-07-10", note="phone screen"
     )
     rows = store.all_applications(conn)
     assert len(rows) == 1  # same posting, advanced in place
-    assert rows[0]["status"] == "interviewing"
+    assert rows[0]["status"] == "screen"
     assert rows[0]["applied_at"] == "2026-07-01"  # set once, preserved on update
     assert rows[0]["updated_at"] == "2026-07-10"  # moves on every change
     assert rows[0]["note"] == "phone screen"
@@ -217,3 +217,101 @@ def test_re_proposing_after_an_apply_reopens_the_claim():
     store.mark_proposal_applied(conn, "HubSpot", "2026-08-03")
     store.record_proposal(conn, _Proposal(), "2026-09-01")
     assert [r["company"] for r in store.open_proposals(conn)] == ["HubSpot"]
+
+
+# -- applications: the outer loop ----------------------------------------------------
+def test_all_seven_statuses_are_accepted_and_others_are_not():
+    conn = _conn()
+    for status in store.APPLICATION_STATUSES:
+        store.record_application(conn, "Acme", status, "SWE", status, "2026-08-01")
+    assert store.application_count(conn) == len(store.APPLICATION_STATUSES)
+    # `interviewing` was the old name for what is now three separate stages. It must
+    # fail like any other unknown word rather than being quietly accepted.
+    for bad in ("interviewing", "ghosted", ""):
+        try:
+            store.record_application(conn, "Acme", "x", "SWE", bad, "2026-08-01")
+            assert False, f"expected ValueError for {bad!r}"
+        except ValueError:
+            pass
+
+
+def test_optional_fields_survive_a_later_status_only_write():
+    """The COALESCE rule. `jobtracker apply` passes none of the new fields, so without
+    it a status change would blank a URL set from the web page."""
+    conn = _conn()
+    store.record_application(
+        conn, "Acme", "1", "SWE", "applied", "2026-08-01",
+        url="https://acme.example/jobs/1", location="NYC", source="manual",
+        next_action="2026-08-10", next_action_note="follow up",
+    )
+    store.record_application(conn, "Acme", "1", "SWE", "screen", "2026-08-05")
+    row = store.get_application(conn, "Acme", "1")
+    assert row["status"] == "screen"
+    assert row["url"] == "https://acme.example/jobs/1"
+    assert row["location"] == "NYC"
+    assert row["source"] == "manual"          # not reset to 'tracked'
+    assert row["next_action"] == "2026-08-10"
+    assert row["next_action_note"] == "follow up"
+
+
+def test_an_empty_string_clears_a_field_but_none_leaves_it():
+    conn = _conn()
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-08-01",
+                             next_action="2026-08-10")
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-08-02",
+                             next_action="")
+    assert store.get_application(conn, "Acme", "1")["next_action"] == ""
+
+
+def test_source_defaults_to_tracked_when_never_set():
+    """Rows written before manual entry existed all came from the pipeline, and the
+    column is nullable, so NULL has to read as 'tracked' rather than as None."""
+    conn = _conn()
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-08-01")
+    assert store.get_application(conn, "Acme", "1")["source"] == "tracked"
+
+
+def test_repeated_interviews_are_separate_events_on_one_application():
+    conn = _conn()
+    store.advance_application(conn, "Acme", "1", "SWE", "applied", "2026-08-01")
+    store.advance_application(conn, "Acme", "1", "SWE", "oa", "2026-08-04", note="HR")
+    store.advance_application(conn, "Acme", "1", "SWE", "interview", "2026-08-11",
+                              note="round 1")
+    store.advance_application(conn, "Acme", "1", "SWE", "interview", "2026-08-18",
+                              note="round 2")
+    assert store.application_count(conn) == 1
+    events = store.events_by_application(conn)[("Acme", "1")]
+    assert [e["status"] for e in events] == ["applied", "oa", "interview", "interview"]
+    assert [e["note"] for e in events] == ["", "HR", "round 1", "round 2"]
+    assert store.get_application(conn, "Acme", "1")["applied_at"] == "2026-08-01"
+
+
+def test_record_application_logs_nothing_on_its_own():
+    """The split that makes a repeated interview legible: editing a note must not append
+    an event, or the history fills with entries recording that you edited a note."""
+    conn = _conn()
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-08-01")
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-08-02",
+                             note="edited")
+    assert store.events_by_application(conn) == {}
+
+
+def test_manual_ids_are_deterministic_and_namespaced():
+    a = store.manual_job_id("Backend Engineer, New Grad")
+    assert a == store.manual_job_id("  Backend Engineer, New Grad  ")
+    assert a.startswith(store.MANUAL_PREFIX) and store.is_manual(a)
+    assert a != store.manual_job_id("Backend Engineer, Senior")
+    # A title of pure punctuation still has to produce a distinguishing id, or every
+    # such entry at one company would collapse onto the same row.
+    assert store.manual_job_id("!!!") != store.manual_job_id("???")
+
+
+def test_deleting_an_application_takes_its_history_with_it():
+    """Orphaned events would reattach the moment the same title was entered again,
+    because manual_job_id mints the identical key."""
+    conn = _conn()
+    store.advance_application(conn, "Acme", "1", "SWE", "applied", "2026-08-01")
+    store.advance_application(conn, "Acme", "1", "SWE", "screen", "2026-08-05")
+    store.delete_application(conn, "Acme", "1")
+    assert store.application_count(conn) == 0
+    assert store.events_by_application(conn) == {}

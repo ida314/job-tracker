@@ -361,3 +361,22 @@ def test_the_resolve_queue_puts_readable_postings_first():
 
     # And without the limit, both are present — nothing is dropped from the queue.
     assert len(store.uncertain_for_resolution(conn)) == 2
+
+
+def test_no_application_status_returns_a_posting_to_the_queue():
+    """Every one of the seven, including the terminal ones. A rejection especially must
+    not put the job back in tomorrow's top 3 — `is_available` excludes on the presence
+    of a status, not on which one it is, and that is deliberate."""
+    for status in store.APPLICATION_STATUSES:
+        conn = store.connect(":memory:")
+        store.sync_postings(conn, "Acme", [Posting("Acme", "1", "SWE", "https://x/1")],
+                            "2026-08-02")
+        store.record_verdict(conn, Verdict("Acme", "1", Decision.MATCH, "r", "rules"),
+                             "2026-08-02")
+        store.record_judgment(conn, "Acme", "1",
+                              RankJudgment("strong", "strong", "low", "w"), "h",
+                              "2026-08-02")
+        store.set_score(conn, "Acme", "1", 90.0, "2026-08-02")
+        store.advance_application(conn, "Acme", "1", "SWE", status, "2026-08-02T09:00:00")
+        assert rank.top_n(store.ranked_matches(conn), 3, "2026-08-02") == [], status
+        conn.close()
