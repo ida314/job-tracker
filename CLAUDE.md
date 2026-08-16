@@ -372,10 +372,12 @@ the reasoning changes.
 *pipeline*, this watches the *job search* — open matches, the uncertain backlog, flagged
 boards, and the manual companies that are never scraped.
 
-**Three tabs, and Today is the landing screen** (2026-08-02). The page opens on the three
-jobs to apply to, each with the model's one-line reasoning and an Apply link; the old
-front page moved to "All postings" and board health to "Boards". The point is to shorten
-the distance between opening the page and applying to something.
+**Four tabs, and Today is the landing screen** (2026-08-02; Applications added
+2026-08-16). The page opens on the three jobs to apply to, each with the model's one-line
+reasoning and an Apply link; the old front page moved to "All postings" and board health
+to "Boards". The point is to shorten the distance between opening the page and applying
+to something. "Applications" sits second — the outer loop is work already committed to,
+which outranks the raw corpus. See "Applications: the outer loop" below.
 
 - **Panels are server-rendered; the script only toggles `[hidden]`.** `.tabs` is
   `display:none` until JS confirms it is running, so with JS off every panel shows
@@ -448,6 +450,59 @@ the distance between opening the page and applying to something.
 - **Location sorts, never filters.** Rows come out NYC-first (`match.location_rank()`),
   NYC rows carry a pin, and there is a location dropdown that defaults to "Anywhere".
   A location filter the user did not choose would silently hide roles they asked to see.
+
+## Applications: the outer loop
+
+`jobtracker applications`, `/applications` under `serve`, and a read-only fourth tab in
+the static dashboard. Full guide in `docs/applications.md`. Added 2026-08-16.
+
+The table was already there and had **three writers and no reader** — `all_applications`
+had no production caller — while all three writers began with `SELECT ... FROM postings`
+and bailed when there was no row, so a referral could not be recorded at all. What is new
+is the reading, the history, and manual entry.
+
+- **Two writers, deliberately.** `record_application` sets state and logs nothing;
+  `add_application_event` appends and changes nothing; `advance_application` does both
+  and is what "something happened" calls. Folding the append into the upsert is wrong in
+  both directions — editing a note would duplicate an event, *or* a second interview
+  round would be suppressed as a no-op, and from inside an upsert those look identical.
+  Rescheduling a reminder is `record_application` alone.
+- **`interview` is one repeatable status, not numbered rounds.** `round_1/round_2/onsite`
+  caps the enum at however many rounds you guessed. Rounds are repeated events with
+  notes; counting them is what renders `interview ×3`. `interviewing` is gone — the live
+  table had zero rows, so there was nothing to migrate.
+- **There is no `ghosted`.** Silence is derived from `updated_at` (30 days). A status only
+  the user can set is one they will not remember to set, and an unset "no reply" is
+  indistinguishable from an application going well.
+- **Optional columns update through `COALESCE(excluded.col, applications.col)`.** Not
+  style — `jobtracker apply` passes none of them, so a plain assignment blanks a URL set
+  from the web page on the next status change. Same rule as `sync_postings` and
+  `posted_on`. At the API layer: absent/null = leave it, `""` = clear it.
+- **`source` is nullable and read as `COALESCE(source, 'tracked')`.** A `NOT NULL DEFAULT`
+  fires only when the INSERT *omits* the column, and this one is always bound — so it
+  rejected every caller passing None. Measured, not theorized; it failed five tests.
+- **Manual ids are minted and deterministic** (`manual:<slug of title>`), so re-adding the
+  same role updates rather than duplicating — the aggregator's stable-id rule. The prefix
+  makes collision with a real `ats_job_id` impossible. Manual rows have no `postings` row,
+  which is why `all_applications` reads the table directly; join it and they vanish.
+- **The static tab has no buttons and no `interactive` flag.** Every control is emitted by
+  `server.render_applications`, every handler is a branch in `server._JS` — the
+  button-and-handler-in-the-same-file rule, applied up front this time. A test asserts the
+  rendered button set and the handler set match exactly.
+- **The applications panel is never a `table[data-filterable]`** — same trap as the picks,
+  and it has its own test.
+- **A refused write writes nothing.** Bad status, unparseable date, `javascript:` URL,
+  missing title: `{"ok": false}` at HTTP 200, both tables untouched. A date that does not
+  parse is a refusal, never stored raw — text collated against ISO dates would simply
+  never come due, which is failure-as-absence inside the one feature whose job is to
+  remind you.
+- **`rank.is_available` excludes on the presence of a status, not on which one**, and must
+  stay that way: a rejection does not put the job back in tomorrow's top 3. A test walks
+  all seven.
+- **`applied_at`/`updated_at` are timestamps; `next_action` is a day.**
+  `date.fromisoformat` rejects a timestamp outright and *silently* — the row just reports
+  no age — so every comparison goes through `applications.day_of`. `days_since` returns
+  None, never 0, and an unreadable `updated_at` sorts last rather than first.
 
 ## The tuning loop
 

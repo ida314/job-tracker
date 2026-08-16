@@ -70,6 +70,11 @@ python -m jobtracker.cli today                        # the three to apply to
 python -m jobtracker.cli today --applied Stripe 7966029
 python -m jobtracker.cli today --snooze  Stripe 7966029 --days 14
 
+# applications, the outer loop — see docs/applications.md
+python -m jobtracker.cli applications                 # what you applied to, and what it needs
+python -m jobtracker.cli apply Stripe 7966029 --status interview --note "round 2"
+python -m jobtracker.cli apply "Some Startup" --manual --title "Backend Eng (Referral)"
+
 # prefilled applications — see docs/prefill.md
 cp answers.example.yaml answers.yaml                  # gitignored; holds your details
 python -m jobtracker.cli prepare                      # make tomorrow's picks ready
@@ -105,24 +110,27 @@ They answer different questions and are independent — each works without the o
 
 | | `jobtracker dashboard` | `jobtracker serve` | Grafana (`otel/grafana-dashboard.json`) |
 |---|---|---|---|
-| Question | *What should I apply to today?* | *Why did this match, and how do I fix it?* | *Did last night's run work?* |
+| Question | *What should I apply to today?* | *Why did this match, and how do I fix it? What came of what I sent?* | *Did last night's run work?* |
 | Source | `state.db` | `state.db` + `criteria.yaml` | Prometheus metrics |
 | Needs | nothing — one HTML file | a local process | the tier-3 stack up |
 | Writes | never | only on POST | — |
 
 `serve` does not replace `dashboard`. The static file is a snapshot you can mail to
 yourself and open offline years from now; that property is worth keeping, so `serve` is
-a second surface for the one thing a static file cannot do — write back.
+a second surface for the one thing a static file cannot do — write back. It has four
+pages: the dashboard, `/applications` (add a job by hand, move a stage, set a reminder),
+`/tuning`, and `/settings`.
 
 ```bash
 python -m jobtracker.cli dashboard      # -> data/dashboard.html, open it with file://
 ```
 
-Three tabs. **Today** is the landing screen: the three jobs to apply to, each with the
-model's one-line reasoning, its fit/growth/risk breakdown, and an Apply link. **All
-postings** holds the full open-match and uncertain lists, filterable by tier / ATS /
-location / text. **Boards** holds flagged boards and the manual companies that are never
-scraped.
+Four tabs. **Today** is the landing screen: the three jobs to apply to, each with the
+model's one-line reasoning, its fit/growth/risk breakdown, and an Apply link.
+**Applications** is what came of the ones you sent — stages, history, and what needs
+following up. **All postings** holds the full open-match and uncertain lists, filterable
+by tier / ATS / location / text. **Boards** holds flagged boards and the manual companies
+that are never scraped.
 
 Self-contained: no server, no network at view time, works offline, and readable with
 JavaScript disabled — every panel is rendered server-side and the script only hides the
