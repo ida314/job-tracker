@@ -35,6 +35,13 @@ BROWSER_PROFILE = Path(
     os.environ.get("JOBTRACKER_BROWSER_PROFILE", ROOT / "data" / "browser")
 )
 
+# Where to watch the browser the button opens, when it opens somewhere you cannot see.
+# Playwright drives a browser on the machine running `serve`, so on a headless host the
+# window exists and has no screen; pointing this at a remote-desktop viewer for that
+# host's display puts it back in front of you. Empty means the window is local and needs
+# no link. The app neither starts nor knows anything about the viewer — it is a URL.
+BROWSER_VIEW_URL = os.environ.get("JOBTRACKER_BROWSER_VIEW_URL", "")
+
 _DEFAULT_DB = ROOT / "data" / "state.db"
 DB_PATH = Path(os.environ.get("JOBTRACKER_DB", _DEFAULT_DB))
 

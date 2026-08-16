@@ -111,6 +111,8 @@ is a fact about the company.
 | `JOBTRACKER_PROFILE` | No | Defaults to the copy baked into the image. Mount it to tune the ranking without rebuilding |
 | `JOBTRACKER_ANSWERS` | For `prefill`/`apply-to` | Your answer bank. Not in the image — it is personal data. Absent → the `prefill` task reports itself unavailable and nothing else notices |
 | `JOBTRACKER_BROWSER_PROFILE` | For `apply-to` | Persistent browser profile. Put it on a volume or every run starts logged out |
+| `DISPLAY` | For `apply-to`/`serve`'s button | Not ours, but load-bearing: Playwright draws a real window on the host running the command. A headless host needs an X display (`Xvfb :100`) or the launch fails |
+| `JOBTRACKER_BROWSER_VIEW_URL` | No | A viewer for that display, linked from the Today card as "View window". A link and nothing more — the app never starts or checks it. Unset → no link |
 
 Every run logs the resolved `companies=`/`criteria=`/`db=` paths as its first line. When
 something behaves as though your config changed nothing, read that line first.

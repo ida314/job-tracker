@@ -50,6 +50,31 @@ class BrowserUnavailable(RuntimeError):
     """Playwright is not installed, or has no browser to drive."""
 
 
+NO_PLAYWRIGHT = (
+    "playwright is not installed. `pip install 'jobtracker[browser]'` "
+    "then `playwright install chrome`."
+)
+
+
+def unavailable_reason() -> Optional[str]:
+    """Why no browser can be driven right now, or None if one can.
+
+    Exists for callers that cannot see an exception. `serve` starts the fill on a daemon
+    thread, so anything raised in `fill_application` reaches the log and nothing else —
+    a missing Playwright would show up in the page as a button that says "Opening…" over
+    a browser that never opens, which is the absence-read-as-success shape this project
+    keeps out of its other loops.
+
+    Only the import is checked. Whether a browser *binary* is installed is a question
+    `_launch` can only answer by launching one, which is seconds, not milliseconds.
+    """
+    try:
+        import playwright.sync_api  # noqa: F401
+    except ImportError:
+        return NO_PLAYWRIGHT
+    return None
+
+
 # Reads every field on the page, tags each with a stable handle, and reports what it
 # found. Runs in the page rather than through locators because the label for an input is
 # a DOM-shaped question — four different conventions, tried in order of reliability —
@@ -287,20 +312,25 @@ def fill_application(
     plan_json: Optional[str] = None,
     headless: bool = False,
     wait: bool = True,
+    hold: bool = False,
 ) -> FillReport:
     """Open the application, fill what we know, record what we do not, and stop.
 
     Writes to `conn` — the form it read and any question it could not answer — because
     a visit that taught us an employer's form must not have to be repeated. It never
     writes an application anywhere, and it never clicks anything.
+
+    The window lives exactly as long as this call does, because the context is closed on
+    the way out — so a caller that wants to hand the window to a human has to say which
+    kind of waiting it can do. `wait` is the CLI's: print the gaps and block on Enter.
+    `hold` is `serve`'s: no terminal to prompt at, so block until the browser is closed.
+    Neither is the same as "return quickly and leave it up" — there is no such mode, and
+    asking for one is how the served button came to open a window that vanished.
     """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover - depends on the optional extra
-        raise BrowserUnavailable(
-            "playwright is not installed. `pip install 'jobtracker[browser]'` "
-            "then `playwright install chrome`."
-        ) from exc
+        raise BrowserUnavailable(NO_PLAYWRIGHT) from exc
 
     target = apply_url_for(
         url, getattr(company, "ats", ""), getattr(company, "slug", ""), ats_job_id
@@ -388,10 +418,44 @@ def fill_application(
                     input("Press Enter here when you are done to close the browser… ")
                 except (EOFError, KeyboardInterrupt):
                     pass
+            elif hold and not headless:
+                _hold_until_closed(report, context)
         finally:
             context.close()
 
     return report
+
+
+HOLD_POLL_MS = 500
+
+
+def _hold_until_closed(report: FillReport, context) -> None:
+    """Block until the window is gone. For a caller with no terminal to prompt at.
+
+    **The wait has to happen inside a Playwright call.** The sync API only dispatches
+    driver events while you are in one, so a loop of `time.sleep` plus a look at
+    `context.pages` sees a frozen snapshot: measured 2026-08-16, a browser killed
+    outright still read as one open page, forever, and the thread never returned. Half a
+    second inside `wait_for_timeout` is a round trip to the driver, and that is what lets
+    the close arrive.
+
+    Both endings then land in the same place. Close the window and the page list empties
+    or the next call raises `TargetClosedError`; kill the browser and it raises too. Any
+    exception here means the browser is gone, which is the exit condition, not an error.
+
+    The summary goes to the log because that is the only place a served run has to speak.
+    """
+    log.info("%s — the window is yours; it closes when you close it", report.summary())
+    for field_ in report.gaps:
+        log.info("  needs you: %s", field_.label[:80])
+    while True:
+        try:
+            pages = context.pages
+            if not pages:
+                return
+            pages[0].wait_for_timeout(HOLD_POLL_MS)
+        except Exception:  # noqa: BLE001 — the browser is gone, which is the exit
+            return
 
 
 def _write(page, raw: dict, value: str) -> bool:

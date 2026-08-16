@@ -216,6 +216,37 @@ window stayed open. Playwright's sync API is fine on a plain thread; what it mus
 is run inside an asyncio loop, which is why the task runner (async) and the browser
 (sync) are separate modules.
 
+That thread cannot report back to the click, so the endpoint answers everything knowable
+first — is there a posting, an answer bank, a Playwright to import, a window already
+open — and the card prints what came back. Only once those pass does the thread start,
+and it then **blocks until you close the browser** (`hold=True`). Both halves are there
+because both were missing: the click had no handler at all on the dashboard page, and
+the thread it should have started closed the window as soon as the last field was
+filled. Either one alone looks identical from the outside — a button that does nothing.
+
+The window needs the optional extra: `pip install 'jobtracker[browser]'` and
+`playwright install chrome`. Without it the button says so rather than pretending.
+
+**The window opens where `serve` runs.** Not where the page is being viewed — Playwright
+drives a browser on the server's own display. That is also why holding the window open
+has to wait *inside* a Playwright call: the sync API dispatches events only while one is
+in flight, so a plain sleep loop never learns that the window closed.
+
+On a headless host that leaves a window nobody can see. Two ways out, and the app
+supports the first with one variable:
+
+- **Give the host a display and watch it.** Point `$DISPLAY` at an X server that is not
+  attached to a monitor (`Xvfb :100`), carry it to a viewer (VNC → noVNC, xpra's HTML5
+  client, whatever you like), and set **`JOBTRACKER_BROWSER_VIEW_URL`** to that viewer.
+  The Today card then shows a "View window" link beside the button. It is only a link:
+  the app never starts the viewer, never checks it, and does not care what is on the
+  other end — a dashboard that believed it managed a remote desktop would be a second
+  thing to debug at 2am. Keep the viewer on loopback and put the authentication in front
+  of it (`tailscale serve`, an SSH tunnel, a reverse proxy); noVNC on 0.0.0.0 is a
+  keyboard on your machine for anyone who finds the port.
+- **Run `serve` where the screen is.** Then none of the above exists, which is the
+  better answer whenever it is available.
+
 The static dashboard shows the prefill counts — `prefill 13/16 fields · 3 need you` —
 and **no button**. The counts are useful offline; a button that cannot drive a browser is
 worse than no button, the same rule the disposition buttons follow.

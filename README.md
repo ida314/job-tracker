@@ -147,6 +147,18 @@ pytest -q
 JOBTRACKER_DB=data/state.db python -m jobtracker.cli check
 ```
 
+Filling application forms is an optional extra, because it pulls a browser:
+
+```bash
+pip install 'jobtracker[browser]' && playwright install chrome
+```
+
+Without it, `apply-to` and `serve`'s "Open prefilled" button say so; everything else
+works unchanged, and the `browser`-marked tests skip. The window opens **on the machine
+running the command**, so a headless host needs a display (`Xvfb :100`) and, if you want
+to watch it from elsewhere, a viewer named by `JOBTRACKER_BROWSER_VIEW_URL`. See
+`docs/prefill.md`.
+
 ## Container
 
 State lives on a mounted volume, so the image is disposable.

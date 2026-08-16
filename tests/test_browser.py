@@ -110,6 +110,85 @@ def test_the_module_never_navigates_anywhere_but_the_apply_url():
     assert source.count("page.goto(") == 1
 
 
+# -- how long the window lives ---------------------------------------------------------
+# The context is closed on the way out of `fill_application`, so a caller that wants to
+# hand the window to a human has to block until they are done with it. `serve` has no
+# terminal to prompt at, which is why it needs a second way of waiting.
+class _FakePage:
+    def __init__(self, context):
+        self.context = context
+
+    def wait_for_timeout(self, ms):
+        self.context.waits += 1
+        if self.context.waits >= self.context.closes_after:
+            self.context.open = False
+
+
+class _FakeContext:
+    """A context whose window closes after `closes_after` waits."""
+
+    def __init__(self, closes_after=3):
+        self.waits = 0
+        self.closes_after = closes_after
+        self.open = True
+
+    @property
+    def pages(self):
+        return [_FakePage(self)] if self.open else []
+
+
+def test_the_hold_returns_only_once_the_window_is_gone():
+    context = _FakeContext(closes_after=3)
+    browser._hold_until_closed(browser.FillReport(url="x", discovered=1), context)
+    assert context.waits == 3          # it waited, rather than returning immediately
+
+
+def test_the_hold_waits_inside_playwright_so_the_close_can_reach_it():
+    """The bug this replaced: `time.sleep` plus a look at `context.pages`.
+
+    The sync API only dispatches driver events while a call is in flight, so a wait held
+    outside one sees a frozen page list — a browser killed outright still read as one
+    open page and the thread never returned, pinning the one-window lock until `serve`
+    itself was restarted. Measured against a real browser, 2026-08-16.
+    """
+    source = inspect.getsource(browser._hold_until_closed)
+    assert "wait_for_timeout" in source
+    assert "time.sleep(" not in source     # the call, not the docstring naming it
+
+
+def test_the_hold_ends_when_the_browser_is_gone_rather_than_raising():
+    """A killed browser raises `TargetClosedError` from the next call. That is the exit."""
+    class _Dead:
+        @property
+        def pages(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    browser._hold_until_closed(browser.FillReport(url="x"), _Dead())
+
+    class _DiesMidWait:
+        @property
+        def pages(self):
+            class _P:
+                def wait_for_timeout(self, ms):
+                    raise RuntimeError("Target page, context or browser has been closed")
+            return [_P()]
+
+    browser._hold_until_closed(browser.FillReport(url="x"), _DiesMidWait())
+
+
+def test_serve_holds_the_window_open():
+    """The bug this replaced: `wait=False` alone fills the form and closes the browser.
+
+    Asserted against the source because the alternative is standing up a real browser
+    from a real HTTP request. The symptom — a window that flashes and vanishes — reads
+    as "the button does not work", the same as no handler at all.
+    """
+    from jobtracker import server
+
+    source = inspect.getsource(server.Handler._api_apply_to)
+    assert "hold=True" in source
+
+
 # -- apply URLs ----------------------------------------------------------------------
 @pytest.mark.parametrize("ats, url, expected", [
     ("greenhouse", "https://job-boards.greenhouse.io/stripe/jobs/1",

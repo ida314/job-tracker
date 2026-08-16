@@ -436,6 +436,52 @@ def test_apply_to_refuses_without_an_answer_bank(tmp_path):
     assert res["ok"] is False
 
 
+def _apply_handler(tmp_path, monkeypatch):
+    """A handler whose posting, company and answer bank all check out.
+
+    Everything up to the browser is made to succeed, so the tests below are about the
+    browser and nothing else.
+    """
+    from jobtracker.models import Company
+
+    db = tmp_path / "s.db"
+    _seed_ranked(db, "1")
+    monkeypatch.setattr(
+        server.config, "load_companies",
+        lambda _p: [Company(name="Acme", ats="greenhouse", slug="acme", tier=1)])
+    return _handler_for(db, config.CRITERIA_YAML, _answers_file(tmp_path))
+
+
+def test_apply_to_says_so_when_there_is_no_browser_to_drive(tmp_path, monkeypatch):
+    """The fill runs on a daemon thread, which cannot report to the click that made it.
+
+    So anything knowable beforehand has to be answered synchronously. Without this the
+    page shows "Opening…" and a browser never opens — indistinguishable from a hang.
+    """
+    from jobtracker import browser
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: browser.NO_PLAYWRIGHT)
+    res = _apply_handler(tmp_path, monkeypatch)._api_apply_to(
+        {"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is False
+    assert "playwright is not installed" in res["error"]
+
+
+def test_apply_to_refuses_a_second_window_while_one_is_open(tmp_path, monkeypatch):
+    """One browser profile directory, which Chromium locks. Two at once cannot work."""
+    from jobtracker import browser
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    handler = _apply_handler(tmp_path, monkeypatch)
+
+    assert server._APPLY_LOCK.acquire(blocking=False)   # a window is open
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+    finally:
+        server._APPLY_LOCK.release()
+    assert res["ok"] is False and "already open" in res["error"]
+
+
 # -- the answer bank, collected from the page ---------------------------------------
 #
 # The bootstrap that did not exist before: with no `answers.yaml` at all, saving your

@@ -295,3 +295,60 @@ def test_the_open_prefilled_button_exists_only_under_serve():
     assert 'class="apply-to"' in served
     # The counts are useful offline and appear in both.
     assert "prefill 13/16 fields" in static and "prefill 13/16 fields" in served
+
+
+def test_the_view_window_link_appears_only_with_a_viewer_configured():
+    """`serve` on a headless host opens a window nobody can see; this is where to see it.
+
+    A link, not a managed thing: the app never starts the viewer and never checks it, so
+    the only states are "configured" and "not configured".
+    """
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+    conn.commit()
+
+    plain = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
+    with_view = dashboard.build_dashboard(
+        conn, companies, "2026-07-22", interactive=True,
+        view_url="https://gx10.example.ts.net/vnc.html")
+    static = dashboard.build_dashboard(
+        conn, companies, "2026-07-22", view_url="https://gx10.example.ts.net/vnc.html")
+
+    # The element, not the word — the stylesheet names the class either way.
+    assert 'class="viewwin"' not in plain
+    assert 'class="viewwin"' in with_view
+    assert "https://gx10.example.ts.net/vnc.html" in with_view
+    # The mailable file has no button, so a link to a screen it cannot drive is noise.
+    assert 'class="viewwin"' not in static
+
+
+def test_a_hostile_viewer_url_cannot_smuggle_a_scheme():
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+    conn.commit()
+
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True,
+                                    view_url="javascript:alert(1)")
+    assert "javascript:alert" not in doc
+
+
+def test_the_open_prefilled_button_has_a_handler_on_the_page_that_renders_it():
+    """The regression: it did not, and the click did nothing at all.
+
+    The handler used to live in `server._JS`, which only the tuning and settings pages
+    emit — so the one page carrying the button never loaded the code that answers it.
+    Nothing failed, nothing logged, the button just sat there. Asserted structurally,
+    because "the button is rendered" and "something listens for it" are two claims and
+    only the first was ever checked.
+    """
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    _ranked(conn, "Acme", "1", 88.5)
+    conn.commit()
+
+    served = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
+    script = served[served.rindex("<script>"):served.rindex("</script>")]
+    assert "button.apply-to" in script
+    assert "/api/apply-to" in script

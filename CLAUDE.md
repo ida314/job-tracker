@@ -389,12 +389,45 @@ the distance between opening the page and applying to something.
   and for a stronger reason: it drives a browser, which only a live process can do. The
   *counts* (`prefill 13/16 fields · 3 need you`) render in both, because they are useful
   offline — they say whether opening a job takes thirty seconds or ten minutes.
+- **A button's handler lives in the file that renders the button.** "Open prefilled" was
+  emitted by `dashboard.py` while its click handler sat in `server._JS`, which only
+  `/tuning` and `/settings` emit — so the dashboard never loaded it and every click did
+  nothing at all, silently (fixed 2026-08-15). `server._JS` and `dashboard._JS` are two
+  scripts on three pages; keep each handler with its markup. Tests assert the button
+  exists *and* that the page's script listens for it — the first without the second is
+  what shipped.
 - **`serve` has a third page, `/settings`** — who you are, your resume, the answer bank,
   and every question prefill could not answer. `render_settings` is
   connection-in/string-out like `render_tuning`, and `POST /api/answer`, `/api/identity`
   and `/api/resume` all write through `safewrite`. `POST /api/apply-to` starts the
   browser **on a daemon thread**: `server.py` is `HTTPServer`, not `ThreadingHTTPServer`,
   so driving it inline would freeze the page for as long as the window stayed open.
+- **Nothing on that daemon thread can answer the click that started it,** so everything
+  knowable first — the posting, the answer bank, whether Playwright imports, whether a
+  window is already open — is checked *before* the endpoint returns, and the card shows
+  what came back. An exception on the thread reaches the log and nowhere else, which on
+  a box with no Playwright is a button stuck on "Opening…" over a browser that never
+  opens: failure-is-absence again, in the UI this time. One window at a time, because
+  Chromium locks the one profile directory (`_APPLY_LOCK`).
+- **The window has to be waited on, or it vanishes.** `fill_application` closes the
+  context on the way out, so `wait=True` (the CLI's Enter prompt) and `hold=True`
+  (`serve`'s block-until-closed) are the only two ways a human ever gets the window.
+  `wait=False` alone fills the form and shuts the browser — which is what `serve` did
+  until 2026-08-15, and it reads as "the button does not work".
+- **Waiting on a browser means waiting *inside* a Playwright call.** The sync API only
+  dispatches driver events while one is in flight, so `time.sleep` plus a look at
+  `context.pages` reads a frozen snapshot: a browser closed or killed still showed one
+  open page forever, and the hold thread never returned — pinning `_APPLY_LOCK` until
+  `serve` restarted. `_hold_until_closed` waits in `page.wait_for_timeout(500)`; both
+  endings then arrive as an empty page list or `TargetClosedError`. Measured against a
+  real browser 2026-08-16, and there is a test asserting the call is still there.
+- **The browser opens on the machine running `serve`, not the machine viewing the page.**
+  On a headless host (gx10) that means no window at all, or an invisible one under
+  `xvfb-run`. `JOBTRACKER_BROWSER_VIEW_URL` puts a "View window" link on the Today card
+  pointing at whatever shows that host's display (noVNC, xpra, …) — **a link and nothing
+  more.** The app must never start, probe, or manage the viewer: it is deployment, it
+  lives on the machine, and a dashboard that thought it owned a remote desktop would be a
+  second system to debug. Unset, the link does not render.
 - **The resume upload is base64 inside JSON, not multipart.** It reuses the one POST path
   this server has and keeps `form-action 'none'` in the CSP meaningful — the page never
   submits a form, it fetches. `MAX_UPLOAD` is applied per-route, so a decision POST still

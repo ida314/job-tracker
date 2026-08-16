@@ -65,6 +65,11 @@ MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
 # 6 MB of body is comfortably over any real resume and still bounded.
 MAX_UPLOAD = 6 * 1024 * 1024
 
+# Held for as long as a prefilled window is open. One browser profile directory, which
+# Chromium locks, so two at once is not a thing that can work — and the second failure
+# would happen on a worker thread where nothing can report it back to the click.
+_APPLY_LOCK = threading.Lock()
+
 # What a resume may be. An allowlist rather than a blocklist, and checked before anything
 # reaches disk: this file is written into a directory the pipeline reads on every run.
 RESUME_TYPES = {
@@ -460,7 +465,8 @@ class Handler(BaseHTTPRequestHandler):
             # interactive=True: only the served page gets the disposition buttons,
             # because only here is there something for them to POST to.
             page = dashboard_mod.build_dashboard(
-                conn, companies, _today(), criteria, interactive=True
+                conn, companies, _today(), criteria, interactive=True,
+                view_url=config.BROWSER_VIEW_URL,
             )
         finally:
             conn.close()
@@ -762,6 +768,13 @@ class Handler(BaseHTTPRequestHandler):
 
         Playwright's sync API is used on that thread, which is fine; what it must not do
         is run inside an asyncio loop, and nothing here has one.
+
+        Everything that can be known before the thread starts is checked here and
+        returned to the page: the posting, the answer bank, whether there is a browser
+        to drive at all, and whether one is already open. Nothing on that thread can
+        report to the click that started it — an exception there reaches the log and
+        nowhere else — so a failure this method could have seen would show up as a
+        button sitting on "Opening…" forever.
         """
         company_name = str(payload.get("company") or "")
         job_id = str(payload.get("ats_job_id") or "")
@@ -789,11 +802,27 @@ class Handler(BaseHTTPRequestHandler):
 
         answers, error = _load_answers_quietly(Path(self.server.answers_path))
         if answers is None:
-            return {"ok": False, "error": error or "no usable answer bank"}
+            # Named, with the way out of it: on a fresh box there is no answer bank at
+            # all, and "no usable answer bank" on a card reads as a defect rather than
+            # as the one setup step nobody has done yet.
+            return {"ok": False, "error": error or (
+                f"no answer bank at {self.server.answers_path} — add your name and "
+                "email on the Settings tab to create one")}
+
+        from . import browser as browser_mod
+
+        reason = browser_mod.unavailable_reason()
+        if reason:
+            return {"ok": False, "error": reason}
+
+        # One window at a time. The browser profile is a single directory and Chromium
+        # locks it, so a second launch while the first window is open fails — on the
+        # worker thread, where nobody sees it. Saying so is the honest answer.
+        if not _APPLY_LOCK.acquire(blocking=False):
+            return {"ok": False,
+                    "error": "a prefilled window is already open — close it first"}
 
         def _run() -> None:
-            from . import browser as browser_mod
-
             worker_conn = store.connect(self.server.db_path)
             try:
                 browser_mod.fill_application(
@@ -806,15 +835,18 @@ class Handler(BaseHTTPRequestHandler):
                     user_data_dir=config.BROWSER_PROFILE,
                     plan_json=plan_json,
                     headless=False,
-                    # Nothing is watching a terminal here, so there is no prompt to
-                    # wait on. The window stays open because the context is closed
-                    # only when the thread ends, and it ends when the fill is done.
+                    # No terminal here, so there is no Enter to wait on — but the
+                    # window still has to outlive the fill, and closing the context is
+                    # what ends it. `hold` blocks this thread until you close the
+                    # browser yourself; without it the window opens and vanishes.
                     wait=False,
+                    hold=True,
                 )
             except Exception:  # noqa: BLE001 — a browser failure must not kill serve
                 log.exception("apply-to %s/%s failed", company_name, job_id)
             finally:
                 worker_conn.close()
+                _APPLY_LOCK.release()
 
         threading.Thread(
             target=_run, name=f"jobtracker-apply-{job_id}", daemon=True
@@ -951,14 +983,10 @@ document.addEventListener('click', async (e) => {
     location.reload();
     return;
   }
-  const ap = e.target.closest('button.apply-to');
-  if (ap) {
-    ap.disabled = true;
-    const res = await post('/api/apply-to', {company: ap.dataset.company,
-                                             ats_job_id: ap.dataset.job});
-    if (!res.ok) { alert(res.error); ap.disabled = false; return; }
-    ap.textContent = 'Opening…';
-  }
+  // No `button.apply-to` branch here on purpose. This script is emitted by the tuning
+  // and settings pages only; the button is rendered by the dashboard, whose script is
+  // dashboard._JS. A handler here never ran, which is exactly how the button came to
+  // do nothing at all.
 });
 """
 

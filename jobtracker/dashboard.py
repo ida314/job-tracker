@@ -253,11 +253,19 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
                      line-height: 1.4; white-space: nowrap; }
 .pick .act a.apply { background: var(--accent); color: #fcfcfb; text-decoration: none;
                      padding-inline: 14px; font-size: 13px; font-weight: 600; }
+/* Reads as one of the buttons, not as a second Apply — it goes to a screen, not a job. */
+.pick .act a.viewwin { color: var(--ink-2); border-color: var(--rule); font-size: 12.5px;
+                       text-decoration: none; }
+.pick .act a.viewwin:hover { color: var(--ink); border-color: var(--ink-2); }
 .pick .act button { appearance: none; background: var(--page); color: var(--ink-2);
                     border-color: var(--rule); font: inherit;
                     font-size: 12.5px; line-height: 1.4; cursor: pointer; }
 .pick .act button:hover { color: var(--ink); border-color: var(--ink-2); }
 .pick .act button[disabled] { opacity: .5; cursor: default; }
+/* Whatever came back from /api/apply-to. Written by JS into an empty server-rendered
+   node, so a page with JS off never shows a stray empty line. */
+.pick .applymsg { font-size: 12px; color: var(--serious); margin-top: 8px; }
+.pick .applymsg:empty { display: none; }
 .pick .score { font-variant-numeric: tabular-nums; }
 .gap { color: var(--serious); font-size: 12.5px; margin: -14px 0 24px; }
 """
@@ -324,6 +332,53 @@ _JS = """
   });
 })();
 
+// "Open prefilled". Same rule as the disposition buttons — present only under `serve`.
+// The handler belongs in this file, beside the markup that emits the button: it used to
+// live in the tuning page's script, which the dashboard never loads, so every click did
+// nothing whatsoever. A button whose handler is on another page is indistinguishable
+// from a broken browser.
+(function () {
+  var buttons = Array.prototype.slice.call(
+    document.querySelectorAll('.pick button.apply-to'));
+  if (!buttons.length) return;
+
+  buttons.forEach(function (b) {
+    var label = b.textContent;
+    var card = b.closest('.pick');
+    var note = card.querySelector('.applymsg');
+    var view = card.querySelector('a.viewwin');
+
+    b.addEventListener('click', function () {
+      b.disabled = true;
+      b.textContent = 'Opening…';
+      if (note) note.textContent = '';
+      fetch('/api/apply-to', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({company: b.dataset.company, ats_job_id: b.dataset.job})
+      }).then(function (r) { return r.json(); }).then(function (res) {
+        if (res.ok) {
+          // Not opened for you automatically: a window.open() after an await has lost
+          // the user gesture and dies in a popup blocker, which would read as another
+          // dead button. The link is right there and it is yours to click.
+          b.textContent = view ? 'Opened — see View window →' : 'Opened — the window is yours';
+          return;
+        }
+        fail(res.error || 'failed');
+      }).catch(function () { fail('the server did not answer'); });
+    });
+
+    // Every reason this can fail is something only you can fix — no answer bank, no
+    // browser installed, a window already open. Saying so on the card beats a button
+    // that sits on "Opening…" over a browser that never opens.
+    function fail(message) {
+      b.disabled = false;
+      b.textContent = label;
+      if (note) note.textContent = message;
+    }
+  });
+})();
+
 (function () {
   var q = document.getElementById('q');
   if (!q) return;
@@ -381,6 +436,7 @@ def build_dashboard(
     today: str,
     criteria: Criteria | None = None,
     interactive: bool = False,
+    view_url: str = "",
 ) -> str:
     """Return a complete HTML document. Pure read — never writes to `conn`.
 
@@ -392,6 +448,10 @@ def build_dashboard(
     ever True when rendered by `serve`, because those buttons POST — the file written
     by `jobtracker dashboard` must stay a self-contained, offline, read-only artifact,
     and dead buttons in it would be worse than no buttons.
+
+    `view_url` points at wherever the browser this host opens can be watched — set when
+    `serve` runs somewhere with no screen. It is only a link, and only alongside the
+    button, so the static file never carries it.
     """
     by_name = {c.name: c for c in companies}
     matches = _by_location(store.open_postings_by_verdict(conn, "match"), criteria)
@@ -420,7 +480,8 @@ def build_dashboard(
     # Today first, and by itself: the point of the page is to shorten the distance
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
-    _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans)
+    _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
+           view_url)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="all" hidden>')
@@ -468,7 +529,7 @@ def _tabs(parts, picks, matches, uncertain, unhealthy) -> None:
 
 
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
-           plans=None) -> None:
+           plans=None, view_url="") -> None:
     """The three to apply to today.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -484,7 +545,8 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
     else:
         parts.append('<div class="picks">')
         for i, row in enumerate(picks, 1):
-            _pick(parts, i, row, by_name, today, interactive, criteria, plans)
+            _pick(parts, i, row, by_name, today, interactive, criteria, plans,
+                  view_url)
         parts.append("</div>")
 
     if unranked:
@@ -497,7 +559,8 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         )
 
 
-def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None) -> None:
+def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
+          view_url="") -> None:
     tier = _tier_of(row["company"], by_name)
     var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
@@ -545,6 +608,16 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None)
             f'<button class="apply-to" data-company="{c}" data-job="{j}">'
             "Open prefilled</button>"
         )
+        if view_url:
+            # `serve` is running where you cannot see its screen, so the window it opens
+            # needs somewhere to be watched. Deliberately a plain link to a viewer this
+            # app does not run, start, or check: a dead link is legible, whereas a
+            # dashboard that thinks it manages a remote desktop is a second thing to
+            # debug at 2am. _safe_url keeps a javascript: scheme out of the href.
+            parts.append(
+                f'<a class="viewwin" href="{_safe_url(view_url)}" target="_blank" '
+                'rel="noopener">View window</a>'
+            )
         for action, label in (
             ("applied", "I applied"), ("skipped", "Skip"), ("snoozed", "Snooze 7d"),
         ):
@@ -553,6 +626,11 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None)
                 f"{label}</button>"
             )
     parts.append("</div>")
+    if interactive:
+        # Where the apply-to handler writes what came back. Empty and invisible until
+        # something has to be said; rendered here rather than created in JS so the
+        # script only ever sets text, never markup.
+        parts.append('<div class="applymsg"></div>')
     parts.append("</article>")
 
 
