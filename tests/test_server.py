@@ -597,3 +597,213 @@ def test_the_settings_page_says_when_no_resume_is_attached(tmp_path):
     page = server.render_settings(conn, _answers_file(tmp_path))
     assert "No resume attached" in page
     conn.close()
+
+
+# -- the applications page and its endpoints -----------------------------------------
+def _apps_handler(db_path):
+    return _handler_for(db_path, config.CRITERIA_YAML)
+
+
+def _fresh(tmp_path):
+    db = tmp_path / "apps.db"
+    store.connect(db).close()
+    return db
+
+
+def test_a_manual_application_mints_an_id_and_is_marked_manual(tmp_path):
+    """The reason this page exists: a referral has no board, no verdict and no posting
+    row, and every pre-existing write path refuses it."""
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    res = h._api_application({"company": "Some Startup",
+                              "title": "Backend Engineer (Referral)",
+                              "note": "referred by Alex"})
+    assert res["ok"] is True
+    assert res["ats_job_id"] == store.manual_job_id("Backend Engineer (Referral)")
+
+    conn = store.connect(db)
+    row = store.get_application(conn, "Some Startup", res["ats_job_id"])
+    assert row["source"] == "manual"
+    assert row["status"] == "applied"
+    # Applying is the first event in the history, not a state set silently.
+    assert [e["status"] for e in
+            store.events_by_application(conn)[("Some Startup", res["ats_job_id"])]] \
+        == ["applied"]
+    conn.close()
+
+
+def test_the_same_manual_title_updates_rather_than_duplicating(tmp_path):
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    h._api_application({"company": "Some Startup", "title": "Backend Engineer"})
+    h._api_application({"company": "Some Startup", "title": "Backend Engineer",
+                        "status": "screen"})
+    conn = store.connect(db)
+    assert store.application_count(conn) == 1
+    assert len(store.all_applications(conn)) == 1
+    conn.close()
+
+
+def test_a_refused_application_writes_nothing(tmp_path):
+    """A half-recorded application is worse than a refused one — you would believe it
+    saved. Every one of these must leave both tables empty."""
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    refusals = [
+        {"company": "", "title": "SWE"},                       # no company
+        {"company": "Acme"},                                    # no title
+        {"company": "Acme", "title": "SWE", "status": "ghosted"},
+        {"company": "Acme", "title": "SWE", "status": "interviewing"},  # the old name
+        {"company": "Acme", "title": "SWE", "next_action": "next tuesday"},
+        {"company": "Acme", "title": "SWE", "url": "javascript:alert(1)"},
+        {"company": "Acme", "title": "SWE", "ats_job_id": "999"},  # no such posting
+    ]
+    for payload in refusals:
+        res = h._api_application(payload)
+        assert res["ok"] is False, payload
+        assert res["error"]
+
+    conn = store.connect(db)
+    assert conn.execute("SELECT COUNT(*) n FROM applications").fetchone()["n"] == 0
+    assert conn.execute("SELECT COUNT(*) n FROM application_events").fetchone()["n"] == 0
+    conn.close()
+
+
+def test_advancing_a_stage_appends_an_event_but_a_reminder_does_not(tmp_path):
+    """The split that keeps the timeline readable: rescheduling a call is not a thing
+    that happened to the application."""
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    jid = h._api_application({"company": "Acme", "title": "SWE"})["ats_job_id"]
+
+    h._api_application({"company": "Acme", "ats_job_id": jid, "status": "interview",
+                        "note": "round 1"})
+    h._api_application({"company": "Acme", "ats_job_id": jid, "status": "interview",
+                        "note": "round 2"})
+    conn = store.connect(db)
+    events = store.events_by_application(conn)[("Acme", jid)]
+    assert [e["status"] for e in events] == ["applied", "interview", "interview"]
+    conn.close()
+
+    res = h._api_application_meta({"company": "Acme", "ats_job_id": jid,
+                                   "next_action": "2026-09-01",
+                                   "next_action_note": "chase recruiter"})
+    assert res["ok"] is True
+    conn = store.connect(db)
+    assert len(store.events_by_application(conn)[("Acme", jid)]) == 3   # unchanged
+    row = store.get_application(conn, "Acme", jid)
+    assert row["next_action"] == "2026-09-01"
+    assert row["status"] == "interview"      # a reminder does not move the stage
+    conn.close()
+
+
+def test_a_bad_reminder_date_changes_nothing(tmp_path):
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    jid = h._api_application({"company": "Acme", "title": "SWE",
+                              "next_action": "2026-09-01"})["ats_job_id"]
+    res = h._api_application_meta({"company": "Acme", "ats_job_id": jid,
+                                   "next_action": "whenever"})
+    assert res["ok"] is False
+    conn = store.connect(db)
+    assert store.get_application(conn, "Acme", jid)["next_action"] == "2026-09-01"
+    conn.close()
+
+
+def test_meta_on_a_missing_application_is_refused(tmp_path):
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    assert h._api_application_meta({"company": "Nope", "ats_job_id": "x"})["ok"] is False
+    assert h._api_application_delete({"company": "Nope", "ats_job_id": "x"})["ok"] is False
+
+
+def test_deleting_removes_the_row_and_its_history(tmp_path):
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    jid = h._api_application({"company": "Acme", "title": "SWE"})["ats_job_id"]
+    h._api_application({"company": "Acme", "ats_job_id": jid, "status": "screen"})
+    assert h._api_application_delete({"company": "Acme", "ats_job_id": jid})["ok"] is True
+    conn = store.connect(db)
+    assert store.application_count(conn) == 0
+    assert store.events_by_application(conn) == {}
+    conn.close()
+
+
+def test_applying_from_a_pick_carries_the_posting_url_across(tmp_path):
+    """The posting row is pruned when the req closes, which is exactly when 'where did
+    I apply?' still needs answering."""
+    db = tmp_path / "s.db"
+    _seed_ranked(db)
+    h = _handler_over(db)
+    assert h._api_disposition({"company": "Acme", "ats_job_id": "1",
+                               "action": "applied"})["ok"] is True
+    conn = store.connect(db)
+    row = store.get_application(conn, "Acme", "1")
+    assert row["url"] == "https://x/1"
+    assert row["source"] == "tracked"
+    assert row["next_action"]          # a follow-up is scheduled, not left empty
+    assert [e["status"] for e in store.events_by_application(conn)[("Acme", "1")]] \
+        == ["applied"]
+    conn.close()
+
+
+def test_applications_page_renders_and_escapes(tmp_path):
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    h._api_application({"company": EVIL_TITLE, "title": QUOTE_TITLE,
+                        "note": "<b>hi</b>"})
+    conn = store.connect(db)
+    page = server.render_applications(conn, [], "2026-08-16")
+    conn.close()
+    assert page.startswith("<!doctype html>")
+    assert "<b>hi</b>" not in page
+    assert "<script>alert" not in page
+    assert page.count("<script>") == 1
+
+
+def test_applications_page_opens_with_nothing_recorded(tmp_path):
+    db = _fresh(tmp_path)
+    conn = store.connect(db)
+    page = server.render_applications(conn, [], "2026-08-16")
+    conn.close()
+    assert "Nothing recorded yet" in page
+    assert "button class=app-add" in page or "class=app-add" in page
+
+
+def test_every_button_on_the_page_has_a_handler_in_its_own_script(tmp_path):
+    """The regression this repo already shipped once: a button rendered by one file
+    while its handler sat in another file's script, so every click did nothing at all,
+    silently. Asserting the button exists without asserting the handler is what let it
+    through."""
+    import re
+
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    h._api_application({"company": "Acme", "title": "SWE"})
+    conn = store.connect(db)
+    page = server.render_applications(conn, [], "2026-08-16")
+    conn.close()
+
+    script = page[page.rindex("<script>"):]
+    classes = set(re.findall(r"class=[\"']?(app-[a-z]+)", page))
+    assert classes == {"app-add", "app-save", "app-meta", "app-delete"}
+    for cls in classes:
+        assert f"button.{cls}" in script, cls
+    for endpoint in ("/api/application", "/api/application/meta",
+                     "/api/application/delete"):
+        assert endpoint in script
+
+
+def test_the_page_is_a_pure_read(tmp_path):
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    h._api_application({"company": "Acme", "title": "SWE"})
+    conn = store.connect(db)
+    before = [dict(r) for r in store.all_applications(conn)]
+    server.render_applications(conn, [], "2026-08-16")
+    assert [dict(r) for r in store.all_applications(conn)] == before
+    conn.close()
+
+
+def test_nav_reaches_the_applications_page():
+    assert 'href="/applications"' in server._NAV

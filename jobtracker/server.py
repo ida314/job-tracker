@@ -46,6 +46,7 @@ from typing import Optional
 import yaml
 
 from . import (
+    applications as apps_mod,
     config,
     dashboard as dashboard_mod,
     rank as rank_mod,
@@ -235,6 +236,224 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     return "\n".join(p)
 
 
+def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
+    """Everything you applied to, and every control for changing it. Pure read.
+
+    Connection-in / string-out like `render_tuning` and `render_settings`, so it is
+    testable against a fixture DB with no socket in sight.
+
+    This is the editable half of the applications surface; the static dashboard renders
+    the same data read-only through `dashboard._applications`. The split is the rule
+    this repo already follows for the picks: buttons exist only where a live process can
+    answer them, and a button's handler ships in the file that renders the button — so
+    every control here has its branch in `_JS` below, not in `dashboard._JS`.
+    """
+    by_name = {c.name: c for c in (companies or [])}
+    apps = store.all_applications(conn)
+    events_by = store.events_by_application(conn)
+
+    p = [
+        "<!doctype html><meta charset=utf-8><title>Applications</title>",
+        f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_APPS_CSS}</style>",
+        "<body><div class=wrap><h1>Applications</h1>", _NAV,
+    ]
+    p.extend(_add_application_card(today))
+
+    if not apps:
+        p.append(
+            "<div class=empty>Nothing recorded yet. Add one above, or press "
+            "<strong>I applied</strong> on a pick on the dashboard.</div>"
+        )
+    else:
+        stats = apps_mod.summary(apps, events_by)
+        p.append('<div class="tiles">')
+        for k, v, n in (
+            ("Total", str(stats["total"]), "applications recorded"),
+            ("Active", str(stats["active"]), "still in play"),
+            ("Interviewing", str(stats["interviewing"]), "at an interview stage"),
+            ("Offers", str(stats["offers"]), "reached an offer"),
+            ("Response rate", f'{stats["response_rate"]}%',
+             f'{stats["responded"]} ever replied'),
+        ):
+            p.append(
+                f'<div class="tile"><div class="k">{html.escape(k)}</div>'
+                f'<div class="v">{html.escape(v)}</div>'
+                f'<div class="n">{html.escape(n)}</div></div>'
+            )
+        p.append("</div>")
+
+        groups = apps_mod.group(apps, events_by, today)
+        for key, heading, blurb in (
+            ("needs_action", "Needs action",
+             "a date has come due, or nobody has moved in "
+             f"{store.STALE_AFTER_DAYS} days"),
+            ("active", "Active", "applied, waiting"),
+            ("closed", "Closed", "offer, rejection, or withdrawn"),
+        ):
+            rows = groups[key]
+            if not rows:
+                continue
+            p.append(
+                f"<h2>{html.escape(heading)} <span class=count>{len(rows)}</span>"
+                f'<span class="sub">{html.escape(blurb)}</span></h2>'
+            )
+            p.append('<div class="apps">')
+            for app in rows:
+                p.extend(_application_card(app, events_by, today, by_name))
+            p.append("</div>")
+
+    p.append(f"<script>{_JS}</script></div></body></html>")
+    return "\n".join(p)
+
+
+def _add_application_card(today: str) -> list:
+    """Record a job the pipeline never surfaced — a referral, a LinkedIn post, a company
+    that is not on the target list at all.
+
+    Only company and title are required. Everything else is optional because the moment
+    you want to record an application is the moment right after you sent it, and a form
+    that demands six fields then is a form you will skip.
+    """
+    p = ["<div class=addapp>",
+         "<strong>Add an application</strong>",
+         "<p class=note>For anything you applied to outside the tracker. Company and "
+         "title are required; the date applied is today.</p>",
+         "<div class=grid>"]
+    for key, label, kind, placeholder in (
+        ("company", "Company", "text", "Ramp"),
+        ("title", "Title", "text", "Backend Engineer, New Grad"),
+        ("url", "Link (optional)", "url", "https://…"),
+        ("location", "Location (optional)", "text", "New York, NY"),
+        ("next_action_note", "Next action (optional)", "text", "follow up"),
+    ):
+        p.append(
+            f"<label>{html.escape(label)}"
+            f'<input class=newapp data-key="{html.escape(key, quote=True)}" '
+            f'type={kind} placeholder="{html.escape(placeholder, quote=True)}"></label>'
+        )
+    p.append("<label>Stage" + _status_select("newapp", "applied") + "</label>")
+    p.append(
+        '<label>Follow up on<input class=newapp data-key="next_action" type=date '
+        f'value="{html.escape(apps_mod.default_next_action(today), quote=True)}"></label>'
+    )
+    p.append("</div>")
+    p.append("<div class=row style='margin-top:.8rem'>"
+             "<button class=app-add>Add application</button></div>")
+    p.append("</div>")
+    return p
+
+
+def _status_select(cls: str, current: str, key: str = "status") -> str:
+    options = "".join(
+        f'<option value="{html.escape(s, quote=True)}"'
+        f'{" selected" if s == current else ""}>{html.escape(s)}</option>'
+        for s in store.APPLICATION_STATUSES
+    )
+    return (f'<select class={cls} data-key="{html.escape(key, quote=True)}">'
+            f"{options}</select>")
+
+
+def _application_card(app, events_by, today: str, by_name) -> list:
+    """One application, with its controls.
+
+    Mirrors `dashboard._application` for everything above the form — deliberately, so
+    the two surfaces read the same — and adds the row of inputs that can change it.
+
+    The identity travels in `data-company` / `data-job` attributes rather than being
+    interpolated into a handler, for the same reason the picks do it: a manual entry's
+    company name is text the user typed, and a quote in it would otherwise break out.
+    """
+    events = events_by.get((app["company"], app["ats_job_id"]), [])
+    state = apps_mod.action_state(app, today)
+    stale = apps_mod.is_stale(app, today)
+
+    cls = "app"
+    if state in ("overdue", "today", "soon"):
+        cls += " urgent"
+    elif stale:
+        cls += " stale"
+    if apps_mod.is_closed(app):
+        cls += " done"
+
+    c = html.escape(app["company"], quote=True)
+    j = html.escape(app["ats_job_id"], quote=True)
+    p = [f'<article class="{cls}" data-company="{c}" data-job="{j}">']
+
+    title = html.escape(app["title"])
+    href = dashboard_mod._safe_url(app["url"])
+    heading = (
+        f'<a href="{href}" target="_blank" rel="noopener">{title}</a>'
+        if href != "#" else title
+    )
+    p.append(f'<h3>{heading} <span class="co">· {html.escape(app["company"])}</span></h3>')
+
+    meta = []
+    repeats = apps_mod.round_counts(events).get(app["status"], 0)
+    times = f" ×{repeats}" if repeats > 1 else ""
+    meta.append(
+        f'<span class="st st-{html.escape(app["status"], quote=True)}">'
+        f'{html.escape(app["status"])}{html.escape(times)}</span>'
+    )
+    tier = dashboard_mod._tier_of(app["company"], by_name)
+    if tier != "—":
+        var = dashboard_mod._band_var(tier)
+        meta.append(
+            f'<span class="tier" style="background:var({var});color:var({var}-ink)">'
+            f"T{html.escape(str(tier))}</span>"
+        )
+    if app["location"]:
+        meta.append(html.escape(app["location"]))
+    applied_days = apps_mod.days_since(app["applied_at"], today)
+    if applied_days is not None:
+        meta.append(f"applied {dashboard_mod._ago(applied_days)}")
+    moved = apps_mod.days_since(app["updated_at"], today)
+    if stale and moved is not None:
+        meta.append(f'<span class="quiet">no movement in {moved}d</span>')
+    if state:
+        meta.append(dashboard_mod._due_label(app, today, state))
+    if app["source"] == "manual":
+        meta.append('<span class="src">manual</span>')
+    p.append(f'<div class="meta">{" · ".join(meta)}</div>')
+
+    if len(events) > 1:
+        p.append(f"<details><summary>History ({len(events)})</summary><div class='tl'>")
+        for event in events:
+            p.append(
+                f'<span class="d">{html.escape(apps_mod.day_of(event["at"]) or "")}</span>'
+                f'<span class="s">{html.escape(event["status"])}</span>'
+                f'<span class="n">{html.escape(event["note"] or "")}</span>'
+            )
+        p.append("</div></details>")
+
+    # Two separate writes, because they mean different things. Moving the stage is an
+    # event and joins the history; changing a reminder is not and must not, or the
+    # timeline fills with entries recording that you rescheduled a phone call.
+    p.append("<div class=appform>")
+    p.append("<label>Stage" + _status_select("appstatus", app["status"]) + "</label>")
+    p.append(
+        '<label>What happened<input class=appnote type=text placeholder="round 2 — '
+        'system design"></label>'
+    )
+    p.append('<div class=acts><button class=app-save>Log stage</button></div>')
+    p.append(
+        '<label>Follow up on<input class=appnext type=date value="'
+        f'{html.escape(app["next_action"] or "", quote=True)}"></label>'
+    )
+    p.append(
+        '<label>On what<input class=appnextnote type=text value="'
+        f'{html.escape(app["next_action_note"] or "", quote=True)}" '
+        'placeholder="follow up"></label>'
+    )
+    p.append('<div class=acts><button class=app-meta>Set reminder</button>'
+             '<button class="app-delete danger">Delete</button></div>')
+    p.append("</div>")
+
+    if app["note"]:
+        p.append(f'<div class="note">{html.escape(app["note"])}</div>')
+    p.append("</article>")
+    return p
+
+
 def _identity_card(answers) -> list:
     """The fields every application asks for, as a form.
 
@@ -398,6 +617,13 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._send(page)
+            elif path == "/applications":
+                conn = self._conn()
+                try:
+                    page = render_applications(conn, self._companies(), _today())
+                finally:
+                    conn.close()
+                self._send(page)
             else:
                 self._send("<h1>404</h1>", 404)
         except Exception:  # noqa: BLE001
@@ -426,6 +652,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_resume(payload))
             elif path == "/api/apply-to":
                 self._send_json(self._api_apply_to(payload))
+            elif path == "/api/application":
+                self._send_json(self._api_application(payload))
+            elif path == "/api/application/meta":
+                self._send_json(self._api_application_meta(payload))
+            elif path == "/api/application/delete":
+                self._send_json(self._api_application_delete(payload))
             else:
                 self._send_json({"ok": False, "error": "unknown endpoint"}, 404)
         except Exception as exc:  # noqa: BLE001
@@ -455,6 +687,19 @@ class Handler(BaseHTTPRequestHandler):
             checks["criteria"] = f"error: {exc}"
             ok = False
         return {"status": "ready" if ok else "unready", "checks": checks}, (200 if ok else 503)
+
+    def _companies(self):
+        """companies.yaml, for the tier chips. Never fatal.
+
+        The applications page must open for someone who applied to five companies none
+        of which are on the target list — that is the whole point of manual entry. A
+        missing or unreadable file costs the tier badge and nothing else.
+        """
+        try:
+            return config.load_companies(self.server.companies_path)
+        except Exception:  # noqa: BLE001
+            log.warning("could not load companies.yaml; tier chips will be omitted")
+            return []
 
     def _render_dashboard(self) -> str:
         """The existing dashboard, regenerated live. Unchanged code, unchanged output."""
@@ -549,7 +794,8 @@ class Handler(BaseHTTPRequestHandler):
         conn = self._conn()
         try:
             row = conn.execute(
-                "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
+                "SELECT title, url, location FROM postings "
+                "WHERE company=? AND ats_job_id=?",
                 (company, job_id),
             ).fetchone()
             if row is None:
@@ -558,8 +804,16 @@ class Handler(BaseHTTPRequestHandler):
             now = datetime.now().isoformat(timespec="seconds")
             note = str(payload.get("note") or "")
             if action == "applied":
-                store.record_application(
-                    conn, company, job_id, row["title"], "applied", now, note=note
+                # advance_, not record_: this is the first thing that happened to the
+                # application, and it belongs in the history like every later stage.
+                # url/location are copied across now because the posting row is pruned
+                # when the req closes, which is exactly when "where did I apply?" still
+                # needs answering.
+                store.advance_application(
+                    conn, company, job_id, row["title"], "applied", now, note=note,
+                    url=row["url"], location=row["location"], source="tracked",
+                    next_action=apps_mod.default_next_action(_today()),
+                    next_action_note="follow up",
                 )
                 from .cli import applications_total
 
@@ -587,6 +841,136 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         log.info("%s %s/%s", detail, company, job_id)
         return {"ok": True, "detail": detail, "top": nxt}
+
+    def _api_application(self, payload: dict) -> dict:
+        """Create an application, or move one to a new stage. Always logs an event.
+
+        Two modes, told apart by whether an `ats_job_id` arrives:
+
+        * **Tracked** — an id is given, and the posting must exist, the same check
+          `_api_disposition` makes. This is the path the dashboard's "I applied" button
+          and any later edit of that row take.
+        * **Manual** — no id, so one is minted from the title. This is the whole reason
+          the page exists: a referral or a job off LinkedIn has no board, no verdict and
+          no posting row, and every existing write path refuses it.
+
+        Nothing is written unless every field validates. A half-recorded application is
+        worse than a refused one — you would believe it was saved.
+        """
+        company = str(payload.get("company") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        job_id = str(payload.get("ats_job_id") or "").strip()
+        status = str(payload.get("status") or "applied").strip()
+        note = str(payload.get("note") or "").strip()
+
+        if not company:
+            return {"ok": False, "error": "company is required"}
+        if status not in store.APPLICATION_STATUSES:
+            return {"ok": False, "error":
+                    f"status must be one of {', '.join(store.APPLICATION_STATUSES)}"}
+
+        # An empty string means "clear it"; absent means "leave it alone". A date that
+        # does not parse is a refusal, never stored raw — text sorted against real dates
+        # would silently never come due.
+        next_action, err = _optional_day(payload, "next_action")
+        if err:
+            return {"ok": False, "error": err}
+        next_action_note = _optional_text(payload, "next_action_note")
+        url = _optional_text(payload, "url")
+        location = _optional_text(payload, "location")
+        if url and dashboard_mod._safe_url(url) == "#":
+            return {"ok": False, "error": "link must be an http(s) URL"}
+
+        conn = self._conn()
+        try:
+            if job_id:
+                existing = store.get_application(conn, company, job_id)
+                row = conn.execute(
+                    "SELECT title, url, location FROM postings "
+                    "WHERE company=? AND ats_job_id=?",
+                    (company, job_id),
+                ).fetchone()
+                if row is None and existing is None:
+                    return {"ok": False, "error": "no such posting"}
+                if not title:
+                    title = (existing or row)["title"]
+                source = existing["source"] if existing else "tracked"
+                # Carry the posting's own link and location across on first record, so
+                # the row still resolves after the req closes and the posting is pruned.
+                if row is not None:
+                    url = url if url is not None else row["url"]
+                    location = location if location is not None else row["location"]
+            else:
+                if not title:
+                    return {"ok": False, "error": "title is required"}
+                job_id = store.manual_job_id(title)
+                source = "manual"
+
+            now = datetime.now().isoformat(timespec="seconds")
+            store.advance_application(
+                conn, company, job_id, title, status, now, note=note,
+                url=url, location=location, source=source,
+                next_action=next_action, next_action_note=next_action_note,
+            )
+            conn.commit()
+            from .cli import applications_total
+
+            applications_total.add(1, {"status": status})
+        finally:
+            conn.close()
+        log.info("application %s %s/%s", status, company, job_id)
+        return {"ok": True, "detail": f"{company} — {status}", "ats_job_id": job_id}
+
+    def _api_application_meta(self, payload: dict) -> dict:
+        """Change the reminder or the note, without logging an event.
+
+        Rescheduling a phone call is not a thing that happened to the application, and
+        an event log that records every reschedule stops being a readable history of the
+        stages — which is the only thing it is for.
+        """
+        company = str(payload.get("company") or "").strip()
+        job_id = str(payload.get("ats_job_id") or "").strip()
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+
+        next_action, err = _optional_day(payload, "next_action")
+        if err:
+            return {"ok": False, "error": err}
+        next_action_note = _optional_text(payload, "next_action_note")
+
+        conn = self._conn()
+        try:
+            app = store.get_application(conn, company, job_id)
+            if app is None:
+                return {"ok": False, "error": "no such application"}
+            note = payload.get("note")
+            store.record_application(
+                conn, company, job_id, app["title"], app["status"],
+                datetime.now().isoformat(timespec="seconds"),
+                note=str(note) if note is not None else (app["note"] or ""),
+                next_action=next_action, next_action_note=next_action_note,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "detail": "reminder updated"}
+
+    def _api_application_delete(self, payload: dict) -> dict:
+        """Remove an application and its history — for a mistyped manual entry."""
+        company = str(payload.get("company") or "").strip()
+        job_id = str(payload.get("ats_job_id") or "").strip()
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+        conn = self._conn()
+        try:
+            if store.get_application(conn, company, job_id) is None:
+                return {"ok": False, "error": "no such application"}
+            store.delete_application(conn, company, job_id)
+            conn.commit()
+        finally:
+            conn.close()
+        log.info("deleted application %s/%s", company, job_id)
+        return {"ok": True, "detail": "deleted"}
 
     def _api_rule(self, payload: dict) -> dict:
         phrase = str(payload.get("phrase") or "").strip()
@@ -882,9 +1266,32 @@ def _today() -> str:
     return date.today().isoformat()
 
 
+def _optional_text(payload: dict, key: str) -> Optional[str]:
+    """None when the field is absent, the stripped string when it is present.
+
+    The distinction is load-bearing: `record_application` writes optional fields through
+    COALESCE, so None means "leave what is stored" and "" means "clear it". Collapsing
+    the two would make every partial edit wipe the fields it did not mention.
+    """
+    if key not in payload or payload[key] is None:
+        return None
+    return str(payload[key]).strip()
+
+
+def _optional_day(payload: dict, key: str) -> tuple[Optional[str], Optional[str]]:
+    """(value, error). An absent key is None; a blank clears; anything else must parse."""
+    raw = _optional_text(payload, key)
+    if raw is None or raw == "":
+        return raw, None
+    parsed = apps_mod.parse_day(raw)
+    if parsed is None:
+        return None, f"{key.replace('_', ' ')} must be a date like 2026-08-16"
+    return parsed, None
+
+
 _NAV = (
-    '<nav class=nav><a href="/">Dashboard</a> · <a href="/tuning">Tuning</a>'
-    ' · <a href="/settings">Settings</a></nav>'
+    '<nav class=nav><a href="/">Dashboard</a> · <a href="/applications">Applications</a>'
+    ' · <a href="/tuning">Tuning</a> · <a href="/settings">Settings</a></nav>'
 )
 
 _SETTINGS_CSS = """
@@ -900,6 +1307,26 @@ border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 .field input{flex:1;padding:.3rem .5rem;border-radius:5px;
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 .req{color:#d97706;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
+"""
+
+# Only the editable half. Everything that decides how an application *looks* — the
+# status pills, the timeline grid, the urgency rules — lives in dashboard._CSS, which
+# this page also loads, so the read-only tab and this page cannot drift apart.
+_APPS_CSS = """
+.addapp{padding:.9rem 1rem;margin:.6rem 0 1.4rem;border:1px solid rgba(127,127,127,.35);
+border-radius:8px}
+.addapp .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+gap:.6rem;margin-top:.7rem}
+.addapp label{display:flex;flex-direction:column;gap:.25rem;font-size:.82rem;opacity:.85}
+.appform input,.appform select,.addapp input,.addapp select{padding:.35rem .5rem;
+border-radius:5px;border:1px solid currentColor;background:transparent;color:inherit;
+font:inherit;font-size:.88rem;min-width:0}
+.appform{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+gap:.5rem;margin-top:.75rem;align-items:end}
+.appform label{display:flex;flex-direction:column;gap:.25rem;font-size:.78rem;opacity:.8}
+.appform .acts{display:flex;gap:.4rem;align-items:end}
+.app .danger{border-color:rgba(220,53,69,.6);opacity:.75}
+.app .danger:hover{opacity:1;color:#dc3545}
 """
 
 _EXTRA_CSS = """
@@ -983,10 +1410,58 @@ document.addEventListener('click', async (e) => {
     location.reload();
     return;
   }
-  // No `button.apply-to` branch here on purpose. This script is emitted by the tuning
-  // and settings pages only; the button is rendered by the dashboard, whose script is
-  // dashboard._JS. A handler here never ran, which is exactly how the button came to
-  // do nothing at all.
+  // -- applications ----------------------------------------------------------------
+  // These three branches belong here because render_applications, in this file, is what
+  // emits the buttons. Same rule the apply-to note below records.
+  const addapp = e.target.closest('button.app-add');
+  if (addapp) {
+    const body = {};
+    document.querySelectorAll('.addapp .newapp').forEach(i => body[i.dataset.key] = i.value);
+    if (!body.company || !body.title) { alert('Company and title are required.'); return; }
+    addapp.disabled = true;
+    const res = await post('/api/application', body);
+    addapp.disabled = false;
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const stage = e.target.closest('button.app-save');
+  if (stage) {
+    const card = stage.closest('.app');
+    const res = await post('/api/application', {
+      company: card.dataset.company, ats_job_id: card.dataset.job,
+      status: card.querySelector('select.appstatus').value,
+      note: card.querySelector('input.appnote').value});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const meta = e.target.closest('button.app-meta');
+  if (meta) {
+    const card = meta.closest('.app');
+    const res = await post('/api/application/meta', {
+      company: card.dataset.company, ats_job_id: card.dataset.job,
+      next_action: card.querySelector('input.appnext').value,
+      next_action_note: card.querySelector('input.appnextnote').value});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const del = e.target.closest('button.app-delete');
+  if (del) {
+    const card = del.closest('.app');
+    // The one destructive control on any of these pages, and the history goes with it.
+    if (!confirm('Delete this application and its history?')) return;
+    const res = await post('/api/application/delete', {
+      company: card.dataset.company, ats_job_id: card.dataset.job});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  // No `button.apply-to` branch here on purpose. This script is emitted by the tuning,
+  // settings and applications pages only; that button is rendered by the dashboard,
+  // whose script is dashboard._JS. A handler here never ran, which is exactly how the
+  // button came to do nothing at all.
 });
 """
 
