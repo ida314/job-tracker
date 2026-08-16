@@ -19,7 +19,8 @@ Subcommands:
   rematch       re-apply criteria to stored postings without fetching
   eval          replay criteria against your recorded judgments
   decide        record a judgment on one posting; --pin makes it an override
-  apply         record an application and its outcome
+  apply         record an application and its outcome; --manual for an untracked job
+  applications  list what you applied to, grouped by what needs doing
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
   repair        read careers pages for broken boards' new slugs; --write applies
   add-company   append a curated entry to companies.yaml
@@ -46,7 +47,7 @@ from typing import Optional
 import yaml
 from opentelemetry import metrics
 
-from . import build_version, config, health as health_mod, report as report_mod, store, telemetry, tuning
+from . import applications as apps_mod, build_version, config, health as health_mod, report as report_mod, store, telemetry, tuning
 from .criteria import load_criteria
 from .tuning import apply_override
 from .fetch import Fetcher
@@ -1342,7 +1343,8 @@ def cmd_today(args: argparse.Namespace) -> int:
     if action:
         company, job_id = action
         row = conn.execute(
-            "SELECT company, ats_job_id, title FROM postings WHERE company=? AND ats_job_id=?",
+            "SELECT company, ats_job_id, title, url, location FROM postings "
+            "WHERE company=? AND ats_job_id=?",
             (company, job_id),
         ).fetchone()
         if row is None:
@@ -1351,9 +1353,15 @@ def cmd_today(args: argparse.Namespace) -> int:
             return 1
         now = _now()
         if args.applied:
-            store.record_application(
+            # advance_, not record_: applying is the first event in the application's
+            # history. url/location are copied across because the posting row goes away
+            # when the req closes.
+            store.advance_application(
                 conn, row["company"], row["ats_job_id"], row["title"], "applied",
-                now, note=args.note,
+                now, note=args.note, url=row["url"], location=row["location"],
+                source="tracked",
+                next_action=apps_mod.default_next_action(today),
+                next_action_note="follow up",
             )
             applications_total.add(1)
             what = "applied"
@@ -1444,33 +1452,114 @@ def cmd_decide(args: argparse.Namespace) -> int:
 
 # -- apply -------------------------------------------------------------------------
 def cmd_apply(args: argparse.Namespace) -> int:
-    """Record or advance an application to a surfaced posting — the outer loop.
+    """Record or advance an application — the outer loop.
 
     `check`/`resolve` find roles; this records which ones you acted on and what came
     of them, so tiers can eventually be re-ranked by what actually converts rather
-    than by prior. Re-running with a new --status advances the same application.
+    than by prior. Re-running with a new --status advances the same application, and
+    every run appends to its history.
+
+    `--manual` records a job the pipeline never surfaced — a referral, or something off
+    LinkedIn. Those have no posting row, so the id is minted from the title; giving the
+    same title twice updates the same application rather than creating a second one.
     """
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
-    row = conn.execute(
-        "SELECT company, ats_job_id, title FROM postings WHERE company=? AND ats_job_id=?",
-        (args.company, args.job_id),
-    ).fetchone()
-    if row is None:
-        print(f"error: no posting {args.company}/{args.job_id}", file=sys.stderr)
-        conn.close()
-        return 1
+    next_action = None
+    if args.next_action:
+        next_action = apps_mod.parse_day(args.next_action)
+        if next_action is None:
+            print(f"error: --next-action must be a date like {_today()}", file=sys.stderr)
+            conn.close()
+            return 1
 
-    store.record_application(
-        conn, row["company"], row["ats_job_id"], row["title"],
-        args.status, _now(), note=args.note,
+    if args.manual:
+        if not args.title:
+            print("error: --manual needs --title", file=sys.stderr)
+            conn.close()
+            return 1
+        company, job_id, title = args.company, store.manual_job_id(args.title), args.title
+        url, location, source = args.url, args.location, "manual"
+    else:
+        if not args.job_id:
+            print("error: job_id is required (or use --manual --title)", file=sys.stderr)
+            conn.close()
+            return 1
+        row = conn.execute(
+            "SELECT company, ats_job_id, title, url, location FROM postings "
+            "WHERE company=? AND ats_job_id=?",
+            (args.company, args.job_id),
+        ).fetchone()
+        if row is None:
+            print(f"error: no posting {args.company}/{args.job_id}", file=sys.stderr)
+            conn.close()
+            return 1
+        company, job_id, title = row["company"], row["ats_job_id"], row["title"]
+        # An explicit flag wins; otherwise inherit the posting's own values, which are
+        # the ones that disappear when the req closes.
+        url = args.url or row["url"]
+        location = args.location or row["location"]
+        source = "tracked"
+
+    store.advance_application(
+        conn, company, job_id, title, args.status, _now(), note=args.note,
+        url=url, location=location, source=source,
+        next_action=next_action, next_action_note=args.next_action_note or None,
     )
     conn.commit()
-    # status is a 5-value bounded set — safe as a metric attribute (CLAUDE.md).
+    # status is a 7-value bounded set — safe as a metric attribute (CLAUDE.md).
     applications_total.add(1, {"status": args.status})
     n = store.application_count(conn)
     conn.close()
-    print(f"recorded {args.status}: {row['title']}")
+    print(f"recorded {args.status}: {title}")
     print(f"tracking {n} application(s)")
+    return 0
+
+
+def cmd_applications(args: argparse.Namespace) -> int:
+    """List what you applied to, grouped the way the page groups it.
+
+    The terminal mirror of `/applications`. Read-only, and it reads `applications`
+    directly rather than joining through `postings`, so manual entries appear.
+    """
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = _today()
+    apps = store.all_applications(conn)
+    events_by = store.events_by_application(conn)
+    conn.close()
+
+    if not apps:
+        print("no applications recorded yet")
+        print("record one with `jobtracker apply --manual COMPANY --title TITLE`")
+        return 0
+
+    stats = apps_mod.summary(apps, events_by)
+    print(f"{stats['total']} application(s) · {stats['active']} active · "
+          f"{stats['interviewing']} interviewing · {stats['offers']} offer(s) · "
+          f"{stats['response_rate']}% response rate")
+
+    groups = apps_mod.group(apps, events_by, today)
+    for key, heading in (("needs_action", "NEEDS ACTION"), ("active", "ACTIVE"),
+                         ("closed", "CLOSED")):
+        rows = groups[key]
+        if not rows:
+            continue
+        print(f"\n{heading} ({len(rows)})")
+        for app in rows:
+            events = events_by.get((app["company"], app["ats_job_id"]), [])
+            repeats = apps_mod.round_counts(events).get(app["status"], 0)
+            times = f"x{repeats}" if repeats > 1 else ""
+            bits = [f"{app['status']}{times}"]
+            since = apps_mod.days_since(app["applied_at"], today)
+            if since is not None:
+                bits.append("applied today" if since <= 0 else f"applied {since}d ago")
+            if apps_mod.is_stale(app, today):
+                bits.append("NO MOVEMENT")
+            until = apps_mod.days_until(app["next_action"], today)
+            if until is not None and apps_mod.is_active(app):
+                what = app["next_action_note"] or "follow up"
+                bits.append(f"{what} {'overdue by ' + str(-until) if until < 0 else 'in ' + str(until)}d")
+            print(f"  {app['company']} · {app['title']}")
+            print(f"    {' · '.join(bits)}")
     return 0
 
 
@@ -1746,14 +1835,26 @@ def build_parser() -> argparse.ArgumentParser:
     d2.add_argument("--db", default=None)
     d2.set_defaults(func=cmd_decide)
 
-    ap = sub.add_parser("apply", help="record or advance an application to a posting")
+    ap = sub.add_parser("apply", help="record or advance an application")
     ap.add_argument("company")
-    ap.add_argument("job_id")
+    # Optional, because --manual mints one from the title instead.
+    ap.add_argument("job_id", nargs="?", default=None)
+    ap.add_argument("--manual", action="store_true",
+                    help="a job the pipeline never surfaced; needs --title")
+    ap.add_argument("--title", default="", help="role title, with --manual")
     ap.add_argument("--status", choices=store.APPLICATION_STATUSES, default="applied",
                     help="application state (default: applied); re-run to advance it")
-    ap.add_argument("--note", default="")
+    ap.add_argument("--note", default="", help="what happened, e.g. 'round 2 — sys design'")
+    ap.add_argument("--url", default="", help="where to reopen it")
+    ap.add_argument("--location", default="")
+    ap.add_argument("--next-action", default="", help="ISO date to follow up on")
+    ap.add_argument("--next-action-note", default="", help="what that follow-up is")
     ap.add_argument("--db", default=None)
     ap.set_defaults(func=cmd_apply)
+
+    apps_p = sub.add_parser("applications", help="list what you applied to")
+    apps_p.add_argument("--db", default=None)
+    apps_p.set_defaults(func=cmd_applications)
 
     r = sub.add_parser("report", help="re-render state.db without fetching")
     r.add_argument("--criteria", default=str(config.CRITERIA_YAML))
