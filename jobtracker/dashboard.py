@@ -33,7 +33,7 @@ from collections import Counter
 from datetime import date
 from typing import Optional
 
-from . import rank as rank_mod, store
+from . import applications as apps_mod, rank as rank_mod, store
 from .criteria import Criteria
 from .match import location_label, location_rank
 from .models import Company
@@ -268,6 +268,58 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .applymsg:empty { display: none; }
 .pick .score { font-variant-numeric: tabular-nums; }
 .gap { color: var(--serious); font-size: 12.5px; margin: -14px 0 24px; }
+
+/* -- applications ------------------------------------------------------------------ */
+/* Lives here rather than in server.py because both surfaces render it: the read-only
+   tab in the static file and the editable page under `serve`, which concatenates this
+   stylesheet. One definition means the two cannot drift apart visually. */
+.apps { display: grid; gap: 10px; margin: 6px 0 26px; }
+.app { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+       padding: 13px 16px; }
+/* The left rule is the section's urgency, carried onto every row in it. */
+.app.urgent { border-left: 3px solid var(--serious); }
+.app.stale  { border-left: 3px solid var(--warning); }
+.app.done   { opacity: .78; }
+.app h3 { margin: 0 0 3px; font-size: 15.5px; line-height: 1.35; font-weight: 550; }
+.app h3 a { color: var(--ink); text-decoration: none; }
+.app h3 a:hover { text-decoration: underline; }
+.app .co { color: var(--ink-2); font-weight: 400; }
+.app .meta { color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap;
+             gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+.app .note { font-size: 13px; color: var(--ink-2); margin-top: 7px;
+             border-left: 2px solid var(--grid); padding-left: 10px; }
+/* Status pills. One hue per stage of the funnel, and the word is always present — the
+   color is reinforcement, never the encoding, same rule as the tier chips. */
+.st { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px;
+      font-weight: 600; letter-spacing: .01em; white-space: nowrap;
+      border: 1px solid transparent; }
+.st-applied   { background: var(--grid);    color: var(--ink-2); }
+.st-oa        { background: var(--band-research); color: var(--band-research-ink); }
+.st-screen    { background: var(--band-applied);  color: var(--band-applied-ink); }
+.st-interview { background: var(--band-anchor);   color: var(--band-anchor-ink); }
+.st-offer     { background: var(--good);    color: var(--page); }
+.st-rejected  { background: transparent;    color: var(--muted); border-color: var(--rule); }
+.st-withdrawn { background: transparent;    color: var(--muted); border-color: var(--rule); }
+.app .due        { color: var(--ink-2); }
+.app .due.overdue{ color: var(--critical); font-weight: 600; }
+.app .due.today  { color: var(--serious); font-weight: 600; }
+.app .due.soon   { color: var(--warning); }
+.app .quiet { color: var(--warning); }
+.app .src { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em;
+            color: var(--muted); border: 1px solid var(--rule); border-radius: 4px;
+            padding: 0 4px; }
+/* The event log. Two columns so the dates line up into a readable timeline. */
+.tl { margin: 8px 0 0; display: grid; grid-template-columns: max-content max-content 1fr;
+      gap: 2px 12px; font-size: 12.5px; }
+.tl .d { color: var(--muted); font-variant-numeric: tabular-nums; }
+.tl .s { color: var(--ink-2); }
+.tl .n { color: var(--muted); }
+h2 .sub { font-size: 12.5px; font-weight: 400; color: var(--muted); margin-left: 8px; }
+/* Also defined in server._EXTRA_CSS, which is emitted after this sheet and therefore
+   wins on /tuning, /settings and /applications. This rule is what styles the class on
+   the dashboard page, which loads _CSS alone. */
+.note { font-size: 12.5px; color: var(--ink-2); }
+.note a { color: var(--accent); }
 """
 
 _JS = """
@@ -466,6 +518,12 @@ def build_dashboard(
     unranked = sum(1 for r in ranked if r["score"] is None)
     plans = store.plans_by_posting(conn)
 
+    # Read straight off `applications` rather than joining through `postings`, which is
+    # what lets a hand-entered job — no board, no verdict, no posting row — show up here
+    # at all. Two queries, not N+1: the events arrive keyed by application.
+    apps = store.all_applications(conn)
+    events_by = store.events_by_application(conn)
+
     parts: list[str] = []
     parts.append("<!doctype html>")
     parts.append('<html lang="en"><head><meta charset="utf-8">')
@@ -475,13 +533,24 @@ def build_dashboard(
     parts.append('</head><body><div class="wrap">')
 
     _header(parts, today, run, companies)
-    _tabs(parts, picks, matches, uncertain, unhealthy)
+    _tabs(parts, picks, apps, matches, uncertain, unhealthy)
 
     # Today first, and by itself: the point of the page is to shorten the distance
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
            view_url)
+    parts.append("</section>")
+
+    parts.append('<section data-panel-body="applications" hidden>')
+    _applications(parts, apps, events_by, today, by_name)
+    if interactive:
+        # Under `serve` there is somewhere to send you. The static file gets no link,
+        # because a file:// page pointing at a server that is not running is worse than
+        # no link at all.
+        parts.append(
+            '<p class="note"><a href="/applications">Add or update an application →</a></p>'
+        )
     parts.append("</section>")
 
     parts.append('<section data-panel-body="all" hidden>')
@@ -509,14 +578,17 @@ def build_dashboard(
 
 
 # -- sections ----------------------------------------------------------------------
-def _tabs(parts, picks, matches, uncertain, unhealthy) -> None:
-    """Three tabs. Hidden until JS confirms it is running — see the CSS note.
+def _tabs(parts, picks, applications, matches, uncertain, unhealthy) -> None:
+    """Four tabs. Hidden until JS confirms it is running — see the CSS note.
 
-    Order is the priority order: what to do now, then everything, then plumbing.
+    Order is the priority order: what to do now, what you already did and still owe
+    something to, then everything, then plumbing. Applications sits second because the
+    outer loop is work you have already committed to, which outranks the raw corpus.
     """
     parts.append('<nav class="tabs" role="tablist">')
     for name, label, count in (
         ("today", "Today", len(picks)),
+        ("applications", "Applications", len(applications)),
         ("all", "All postings", len(matches) + len(uncertain)),
         ("boards", "Boards", len(unhealthy)),
     ):
@@ -863,6 +935,177 @@ _STATUS_STYLE = {
     "fetch_failed": ("serious", "×", "could not fetch"),
     "identity_drift": ("critical", "⚠", "wrong company's board"),
 }
+
+
+def _applications(parts, apps, events_by, today, by_name) -> None:
+    """Everything you applied to, grouped by what needs doing.
+
+    **Read-only, and deliberately without an `interactive` flag.** Every control lives on
+    `/applications` under `serve`. Two reasons, both of them existing rules here: the
+    static file must stay an offline artifact where a button could not work, and a
+    button's handler belongs in the file that renders the button — this module ships no
+    application handlers, so it must ship no application buttons.
+
+    Also deliberately not a `table[data-filterable]`. The filter JS selects those, so a
+    tier or location filter left set on the All postings tab would silently empty the
+    list of things you actually did — the same trap `_picks` documents.
+    """
+    stats = apps_mod.summary(apps, events_by)
+    parts.append('<h2>Applications <span class="count">' f'{stats["total"]}</span></h2>')
+
+    if not apps:
+        parts.append(
+            '<div class="empty">Nothing recorded yet. Apply to one of today\'s picks, '
+            "or add a job by hand from the Applications page under "
+            "<code>jobtracker serve</code>.</div>"
+        )
+        return
+
+    parts.append('<div class="tiles">')
+    for k, v, n in (
+        ("Total", str(stats["total"]), "applications recorded"),
+        ("Active", str(stats["active"]), "still in play"),
+        ("Interviewing", str(stats["interviewing"]), "at an interview stage"),
+        ("Offers", str(stats["offers"]), "reached an offer"),
+        ("Response rate", f'{stats["response_rate"]}%',
+         f'{stats["responded"]} ever replied'),
+    ):
+        parts.append(
+            f'<div class="tile"><div class="k">{html.escape(k)}</div>'
+            f'<div class="v">{html.escape(v)}</div>'
+            f'<div class="n">{html.escape(n)}</div></div>'
+        )
+    parts.append("</div>")
+
+    groups = apps_mod.group(apps, events_by, today)
+    for key, heading, blurb in (
+        ("needs_action", "Needs action", "a date has come due, or nobody has moved in "
+                                         f"{store.STALE_AFTER_DAYS} days"),
+        ("active", "Active", "applied, waiting"),
+        ("closed", "Closed", "offer, rejection, or withdrawn"),
+    ):
+        rows = groups[key]
+        if not rows:
+            continue
+        parts.append(
+            f"<h2>{html.escape(heading)} "
+            f'<span class="count">{len(rows)}</span>'
+            f'<span class="sub">{html.escape(blurb)}</span></h2>'
+        )
+        parts.append('<div class="apps">')
+        for app in rows:
+            _application(parts, app, events_by, today, by_name)
+        parts.append("</div>")
+
+
+def _application(parts, app, events_by, today, by_name) -> None:
+    events = events_by.get((app["company"], app["ats_job_id"]), [])
+    state = apps_mod.action_state(app, today)
+    stale = apps_mod.is_stale(app, today)
+
+    cls = "app"
+    if state in ("overdue", "today", "soon"):
+        cls += " urgent"
+    elif stale:
+        cls += " stale"
+    if apps_mod.is_closed(app):
+        cls += " done"
+    parts.append(f'<article class="{cls}">')
+
+    title = html.escape(app["title"])
+    href = _safe_url(app["url"])
+    # A manual entry often has no URL at all, so the title is plain text rather than a
+    # dead '#' anchor that looks clickable and is not.
+    heading = (
+        f'<a href="{href}" target="_blank" rel="noopener">{title}</a>'
+        if href != "#" else title
+    )
+    parts.append(
+        f'<h3>{heading} <span class="co">· {html.escape(app["company"])}</span></h3>'
+    )
+
+    meta: list[str] = []
+    status = app["status"]
+    repeats = apps_mod.round_counts(events).get(status, 0)
+    times = f" ×{repeats}" if repeats > 1 else ""
+    meta.append(
+        f'<span class="st st-{html.escape(status, quote=True)}">'
+        f"{html.escape(status)}{html.escape(times)}</span>"
+    )
+
+    tier = _tier_of(app["company"], by_name)
+    if tier != "—":
+        var = _band_var(tier)
+        meta.append(
+            f'<span class="tier" style="background:var({var});color:var({var}-ink)">'
+            f"T{html.escape(str(tier))}</span>"
+        )
+    if app["location"]:
+        meta.append(html.escape(app["location"]))
+
+    applied_days = apps_mod.days_since(app["applied_at"], today)
+    if applied_days is not None:
+        meta.append(f"applied {_ago(applied_days)}")
+    moved = apps_mod.days_since(app["updated_at"], today)
+    if stale and moved is not None:
+        meta.append(f'<span class="quiet">no movement in {moved}d</span>')
+
+    if state:
+        meta.append(_due_label(app, today, state))
+    if app["source"] == "manual":
+        meta.append('<span class="src">manual</span>')
+    parts.append(f'<div class="meta">{" · ".join(meta)}</div>')
+
+    if app["note"]:
+        parts.append(f'<div class="note">{html.escape(app["note"])}</div>')
+
+    # More than the one creation event is the only case where a timeline says anything
+    # the status pill did not already say.
+    if len(events) > 1:
+        parts.append(
+            f"<details><summary>History ({len(events)})</summary>"
+            '<div class="tl">'
+        )
+        for event in events:
+            parts.append(
+                f'<span class="d">{html.escape(apps_mod.day_of(event["at"]) or "")}</span>'
+                f'<span class="s">{html.escape(event["status"])}</span>'
+                f'<span class="n">{html.escape(event["note"] or "")}</span>'
+            )
+        parts.append("</div></details>")
+    parts.append("</article>")
+
+
+def _ago(days: int) -> str:
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    return f"{days}d ago"
+
+
+def _due_label(app, today: str, state: str) -> str:
+    """The next-action cell: what is owed, and when.
+
+    The note is shown alongside the date because a bare date is not a reminder — "2 days
+    overdue" does not tell you what you were supposed to do.
+    """
+    until = apps_mod.days_until(app["next_action"], today)
+    if until is None:
+        return ""
+    if until < 0:
+        when = f"{-until}d overdue"
+    elif until == 0:
+        when = "due today"
+    elif until == 1:
+        when = "due tomorrow"
+    else:
+        when = f"due in {until}d"
+    what = app["next_action_note"] or "follow up"
+    return (
+        f'<span class="due {html.escape(state, quote=True)}">'
+        f"{html.escape(what)} — {html.escape(when)}</span>"
+    )
 
 
 def _boards(parts, unhealthy, by_name, proposals=None) -> None:

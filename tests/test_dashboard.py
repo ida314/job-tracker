@@ -352,3 +352,105 @@ def test_the_open_prefilled_button_has_a_handler_on_the_page_that_renders_it():
     script = served[served.rindex("<script>"):served.rindex("</script>")]
     assert "button.apply-to" in script
     assert "/api/apply-to" in script
+
+
+# -- the Applications tab ------------------------------------------------------------
+# The read-only mirror of /applications. Its whole value is that the mailed snapshot
+# still carries the record, so the assertions here are about what must NOT be in it.
+def _applied(conn, company="Acme", jid="1", title="SWE", status="applied",
+             at="2026-07-22T09:00:00", **kw):
+    store.advance_application(conn, company, jid, title, status, at, **kw)
+
+
+def test_applications_panel_renders_server_side():
+    conn, companies = _setup([], [_company("Acme", 1)])
+    _applied(conn, url="https://acme.example/1", location="New York, NY")
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert 'data-panel-body="applications"' in doc
+    assert "New York, NY" in doc
+    # And it is a real tab, counted like the others.
+    assert 'data-panel="applications"' in doc
+
+
+def test_applications_panel_is_not_filterable():
+    """The filter JS selects table[data-filterable]. A tier or location filter left set
+    on the All postings tab would otherwise silently empty the list of things you
+    actually did — the same trap the picks are protected from."""
+    conn, companies = _setup([], [_company("Acme", 1)])
+    _applied(conn)
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    panel = doc[doc.index('data-panel-body="applications"'):
+                doc.index('data-panel-body="all"')]
+    assert "data-filterable" not in panel
+
+
+def test_static_file_carries_no_application_controls():
+    """A button in a file:// page has nothing to POST to. Editing lives at
+    /applications, which only `serve` can answer."""
+    conn, companies = _setup([], [_company("Acme", 1)])
+    _applied(conn)
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "/api/application" not in doc
+    for cls in ("app-add", "app-save", "app-meta", "app-delete"):
+        assert cls not in doc
+    # Under serve there IS somewhere to send you, and only then.
+    live = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
+    assert 'href="/applications"' in live
+    assert 'href="/applications"' not in doc
+
+
+def test_a_manual_entry_is_escaped_everywhere():
+    """Unlike a posting, this text was typed by a human into a form — but it lands in
+    the same HTML, so it gets the same treatment."""
+    conn, companies = _setup([], [])
+    _applied(conn, company='<script>alert("x")</script>', jid="manual:evil",
+             title='"><img src=x onerror=alert(1)>', note="<b>note</b>",
+             url="javascript:alert(1)", source="manual")
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "<script>alert" not in doc
+    assert "onerror=alert(1)>" not in doc
+    assert "<b>note</b>" not in doc
+    assert doc.count("<script>") == 1  # only the page's own
+
+
+def test_a_manual_entry_with_no_link_is_not_a_dead_anchor():
+    conn, companies = _setup([], [])
+    _applied(conn, jid="manual:x", title="Referral Role", source="manual")
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    panel = doc[doc.index('data-panel-body="applications"'):
+                doc.index('data-panel-body="all"')]
+    assert "Referral Role" in panel
+    assert 'href="#"' not in panel
+
+
+def test_repeated_interviews_show_a_count_and_a_history():
+    conn, companies = _setup([], [_company("Acme", 1)])
+    for at, note in (("2026-07-01T09:00:00", ""), ("2026-07-10T09:00:00", "round 1"),
+                     ("2026-07-18T09:00:00", "round 2")):
+        status = "applied" if not note else "interview"
+        store.advance_application(conn, "Acme", "1", "SWE", status, at, note=note)
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "interview ×2" in doc
+    assert "History (3)" in doc
+    assert "round 2" in doc
+
+
+def test_an_empty_tracker_still_renders_the_tab():
+    conn, companies = _setup([], [_company("Acme", 1)])
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert 'data-panel-body="applications"' in doc
+    assert "Nothing recorded yet" in doc
+
+
+def test_rendering_applications_writes_nothing():
+    """Same rule as the rest of the page: opening a view of your data must not mutate
+    it. `report` marks manual companies as surfaced; this must not."""
+    conn, companies = _setup([], [_company("Acme", 1)])
+    _applied(conn)
+    before = (conn.execute("SELECT * FROM applications").fetchall(),
+              conn.execute("SELECT COUNT(*) n FROM application_events").fetchone()["n"])
+    dashboard.build_dashboard(conn, companies, "2026-07-22")
+    after = (conn.execute("SELECT * FROM applications").fetchall(),
+             conn.execute("SELECT COUNT(*) n FROM application_events").fetchone()["n"])
+    assert [dict(r) for r in before[0]] == [dict(r) for r in after[0]]
+    assert before[1] == after[1]
