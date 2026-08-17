@@ -270,6 +270,61 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .score { font-variant-numeric: tabular-nums; }
 .gap { color: var(--serious); font-size: 12.5px; margin: -14px 0 24px; }
 
+/* Which resume this posting attaches. The name renders in both modes; only the controls
+   are gated on `serve`, because only a live server has anywhere to POST them. */
+.pick .resume { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                margin-top: 6px; font-size: 12px; color: var(--muted); }
+.pick .resume .rname.own { color: var(--ink-2); }
+.pick .resume input[type=file] { font: inherit; font-size: 11.5px; max-width: 210px; }
+.pick .resume button { appearance: none; background: var(--page); color: var(--ink-2);
+                       border: 1px solid var(--rule); border-radius: 6px;
+                       padding: 3px 9px; font: inherit; font-size: 11.5px;
+                       cursor: pointer; }
+.pick .resume button:hover { color: var(--ink); border-color: var(--ink-2); }
+.pick .resume button[disabled] { opacity: .5; cursor: default; }
+
+/* The rest of the ranking. A <details>, so it opens with no script at all — and not a
+   table, so the filter JS can never reach into the Today tab. */
+.rest { margin: 0 0 26px; }
+.rest > summary { cursor: pointer; font-size: 13px; color: var(--ink-2);
+                  padding: 8px 0; }
+.rest > summary:hover { color: var(--ink); }
+.restco { margin: 10px 0 4px; }
+.restco h3 { display: flex; align-items: center; gap: 8px; font-size: 13px;
+             margin: 14px 0 6px; }
+.restco h3 .n { color: var(--muted); font-weight: 400; font-size: 12px; }
+.restlist { list-style: none; margin: 0; padding: 0; }
+.restlist li { display: flex; align-items: baseline; gap: 9px; padding: 4px 0;
+               border-top: 1px solid var(--grid); font-size: 13px; }
+.restlist .rn { color: var(--muted); font-size: 11.5px; min-width: 22px;
+                font-variant-numeric: tabular-nums; }
+.restlist .meta { color: var(--muted); font-size: 11.5px; }
+
+/* -- grouped tables ------------------------------------------------------------------
+   Rows render visible and JS collapses them on load — the `.tabs` rule applied to
+   groups. Filtering owns `hidden`; collapsing owns `.closed`. Two owners of one property
+   is how they would drift, so they are two properties that compose. */
+tbody[hidden], tr[hidden] { display: none; }
+tbody.grp.closed tr[data-search] { display: none; }
+tr.cohead th { text-transform: none; letter-spacing: 0; color: var(--ink);
+               font-size: 12.5px; font-weight: 600; padding: 7px 12px;
+               background: var(--grid); }
+tr.cohead .coname { margin-left: 2px; }
+tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
+               font-variant-numeric: tabular-nums; }
+/* Hidden until JS confirms it is running, exactly like .tabs. With JS off the company
+   name is a caption and every row under it is already on screen, so a button that could
+   not collapse anything would be a dead control in a mailed file. */
+.cotoggle { display: none; }
+.js-groups .cotoggle { display: inline-block; appearance: none; background: none;
+                       border: 0; padding: 0 0 0 10px; color: var(--accent);
+                       font: inherit; font-size: 12.5px; cursor: pointer; }
+
+/* "Your inbox says something happened." Only rendered when there is something. */
+.banner.mail { background: var(--surface); border: 1px solid var(--border);
+               border-left: 3px solid var(--accent); border-radius: 8px;
+               padding: 9px 13px; font-size: 13px; margin: 10px 0 14px; }
+
 /* -- applications ------------------------------------------------------------------ */
 /* Lives here rather than in server.py because both surfaces render it: the read-only
    tab in the static file and the editable page under `serve`, which concatenates this
@@ -443,13 +498,127 @@ _JS = """
   });
 })();
 
+// "Rebuild prefill", and this posting's own resume. Handled here because they are
+// rendered here — the same rule the block above records the hard way. The base64 read is
+// duplicated from server._JS deliberately: sharing it would put this handler in a script
+// only the settings, tuning and applications pages emit, and a handler on a page that is
+// never loaded is exactly the bug that rule exists to prevent.
 (function () {
+  var buttons = Array.prototype.slice.call(document.querySelectorAll(
+    '.pick button.pick-rebuild, .pick button.pick-attach, .pick button.pick-detach'));
+  if (!buttons.length) return;
+
+  // Text into nodes the server rendered. Never markup: the escaping lives in Python.
+  function paint(card, res) {
+    var line = card.querySelector('.prefill');
+    if (line && typeof res.fields === 'number') {
+      var counts = line.querySelector('.counts');
+      var tail = line.querySelector('.tail');
+      if (counts) counts.textContent =
+        'prefill ' + (res.fields - res.gaps) + '/' + res.fields + ' fields';
+      if (tail) {
+        tail.textContent = res.gaps ? ' · ' + res.gaps + ' need you'
+                                    : ' · nothing left to type';
+        tail.classList.toggle('need', res.gaps > 0);
+      }
+      line.className = res.gaps ? 'prefill' : 'prefill full';
+    }
+    var name = card.querySelector('.resume .rname');
+    if (name && res.filename) {
+      name.textContent = 'resume for this posting: ' + res.filename;
+      name.classList.add('own');
+    }
+  }
+
+  function post(url, body, b, card, label) {
+    var note = card.querySelector('.applymsg');
+    if (note) note.textContent = '';
+    b.disabled = true;
+    b.textContent = 'Working…';
+    fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      b.disabled = false;
+      b.textContent = label;
+      if (!res.ok) { if (note) note.textContent = res.error || 'failed'; return; }
+      paint(card, res);
+      // Attaching or clearing changes which buttons belong on the card, and that is the
+      // server's call to make, not this script's.
+      if (url.indexOf('posting-resume') !== -1) location.reload();
+    }).catch(function () {
+      b.disabled = false;
+      b.textContent = label;
+      if (note) note.textContent = 'the server did not answer';
+    });
+  }
+
+  buttons.forEach(function (b) {
+    var card = b.closest('.pick');
+    var label = b.textContent;
+    var ident = {company: b.dataset.company, ats_job_id: b.dataset.job};
+
+    b.addEventListener('click', function () {
+      if (b.classList.contains('pick-rebuild')) {
+        post('/api/prefill', ident, b, card, label);
+        return;
+      }
+      if (b.classList.contains('pick-detach')) {
+        post('/api/posting-resume/clear', ident, b, card, label);
+        return;
+      }
+      // The file input is scoped to this card, not looked up by id: there are three
+      // cards on the page and an id would be three elements sharing one name.
+      var input = card.querySelector('input.pickfile');
+      var file = input && input.files && input.files[0];
+      var note = card.querySelector('.applymsg');
+      if (!file) { if (note) note.textContent = 'choose a file first'; return; }
+      var reader = new FileReader();
+      reader.onload = function () {
+        post('/api/posting-resume', {
+          company: ident.company, ats_job_id: ident.ats_job_id,
+          filename: file.name, content_b64: reader.result.split(',')[1]
+        }, b, card, label);
+      };
+      reader.readAsDataURL(file);
+    });
+  });
+})();
+
+// Grouping and filtering in one block, because both decide whether a row is on screen.
+// Splitting them would give two owners to `hidden`, which is how they would drift.
+(function () {
+  var tables = Array.prototype.slice.call(
+    document.querySelectorAll('table[data-filterable]'));
+  if (!tables.length) return;
+
+  // A data row is one carrying data-search. Group heads do not, which is what keeps them
+  // out of "N of M shown" — that number means postings, and it must not move.
+  function rowsOf(node) {
+    return Array.prototype.slice.call(node.querySelectorAll('tr[data-search]'));
+  }
+
+  // Collapse on load; never expand on click. With JS off every row is already rendered
+  // visible, so this direction is the only one that degrades to a working page.
+  tables.forEach(function (t) {
+    t.classList.add('js-groups');
+    Array.prototype.forEach.call(t.tBodies, function (b) {
+      if (b.classList.contains('grp')) b.dataset.closed = '1';
+    });
+    t.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('.cotoggle') : null;
+      if (!btn) return;
+      var body = btn.closest('tbody');
+      body.dataset.closed = body.dataset.closed === '1' ? '0' : '1';
+      apply();
+    });
+  });
+
   var q = document.getElementById('q');
-  if (!q) return;
   var atsSel = document.getElementById('ats');
   var locSel = document.getElementById('loc');   // absent when no criteria were passed
   var chips = Array.prototype.slice.call(document.querySelectorAll('.chip[data-tier]'));
-  var tables = Array.prototype.slice.call(document.querySelectorAll('table[data-filterable]'));
 
   function activeTiers() {
     var on = chips.filter(function (c) { return c.getAttribute('aria-pressed') === 'true'; });
@@ -457,15 +626,20 @@ _JS = """
   }
 
   function apply() {
-    var text = (q.value || '').toLowerCase().trim();
-    var ats = atsSel.value;
+    var text = q ? (q.value || '').toLowerCase().trim() : '';
+    var ats = atsSel ? atsSel.value : '';
     var tiers = activeTiers();
     // "" = anywhere; otherwise a '|'-separated set of rank names, so "US (incl. NYC)"
     // is expressed as "nyc|us" rather than needing its own comparison.
     var locs = locSel && locSel.value ? locSel.value.split('|') : null;
+    // Any active filter forces the matching groups open. A collapsed page under a typed
+    // search reads as "nothing found", which is the one thing this page may never say
+    // while it is holding rows that match.
+    var filtering = !!(text || ats || locs || tiers);
+
     tables.forEach(function (t) {
-      var shown = 0;
-      Array.prototype.forEach.call(t.tBodies[0].rows, function (row) {
+      var rows = rowsOf(t), shown = 0;
+      rows.forEach(function (row) {
         var ok = (!text || row.dataset.search.indexOf(text) !== -1)
               && (!ats || row.dataset.ats === ats)
               && (!locs || locs.indexOf(row.dataset.loc) !== -1)
@@ -473,8 +647,25 @@ _JS = """
         row.hidden = !ok;
         if (ok) shown++;
       });
+      Array.prototype.forEach.call(t.tBodies, function (b) {
+        if (!b.classList.contains('grp')) return;
+        var mine = rowsOf(b);
+        var vis = mine.filter(function (r) { return !r.hidden; }).length;
+        b.hidden = vis === 0;                      // an empty group is not a heading
+        b.classList.toggle('closed', b.dataset.closed === '1' && !filtering);
+        var open = !b.classList.contains('closed');
+        var n = b.querySelector('.cohead .n');
+        if (n) n.textContent = (vis === mine.length)
+          ? mine.length + (mine.length === 1 ? ' role' : ' roles')
+          : vis + ' of ' + mine.length;
+        var btn = b.querySelector('.cotoggle');
+        if (btn) {
+          btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+          btn.textContent = open ? 'Hide' : 'Show';
+        }
+      });
       var out = document.getElementById(t.dataset.countTarget);
-      if (out) out.textContent = shown + ' of ' + t.tBodies[0].rows.length + ' shown';
+      if (out) out.textContent = shown + ' of ' + rows.length + ' shown';
       var none = document.getElementById(t.dataset.emptyTarget);
       if (none) none.hidden = shown !== 0;
     });
@@ -486,8 +677,8 @@ _JS = """
       apply();
     });
   });
-  q.addEventListener('input', apply);
-  atsSel.addEventListener('change', apply);
+  if (q) q.addEventListener('input', apply);
+  if (atsSel) atsSel.addEventListener('change', apply);
   if (locSel) locSel.addEventListener('change', apply);
   apply();
 })();
@@ -526,9 +717,14 @@ def build_dashboard(
     proposals = {p["company"]: p for p in store.open_proposals(conn)}
 
     ranked = store.ranked_matches(conn)
-    picks = rank_mod.top_n(ranked, 3, today)
+    # One list, split — never two queries. The rest has to come out of the same filtered
+    # set the picks did, or a job you applied to this morning reappears below them.
+    ranked_open = rank_mod.available(ranked, today)
+    picks, rest = ranked_open[:3], ranked_open[3:]
     unranked = sum(1 for r in ranked if r["score"] is None)
     plans = store.plans_by_posting(conn)
+    overrides = store.posting_resumes(conn)
+    pending_mail = store.pending_mail_count(conn)
 
     # Read straight off `applications` rather than joining through `postings`, which is
     # what lets a hand-entered job — no board, no verdict, no posting row — show up here
@@ -544,14 +740,14 @@ def build_dashboard(
     parts.append(f"<style>{_CSS}</style>")
     parts.append('</head><body><div class="wrap">')
 
-    _header(parts, today, run, companies)
+    _header(parts, today, run, companies, pending_mail, interactive)
     _tabs(parts, picks, apps, matches, uncertain, unhealthy)
 
     # Today first, and by itself: the point of the page is to shorten the distance
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
-           view_url)
+           view_url, rest, overrides)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -613,7 +809,7 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy) -> None:
 
 
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
-           plans=None, view_url="") -> None:
+           plans=None, view_url="", rest=(), overrides=None) -> None:
     """The three to apply to today.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -630,7 +826,7 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         parts.append('<div class="picks">')
         for i, row in enumerate(picks, 1):
             _pick(parts, i, row, by_name, today, interactive, criteria, plans,
-                  view_url)
+                  view_url, overrides)
         parts.append("</div>")
 
     if unranked:
@@ -642,9 +838,72 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
             "the model has not read them yet. Run <code>jobtracker rank</code>.</p>"
         )
 
+    _rest_of_ranking(parts, rest, by_name, today, criteria, plans)
+
+
+def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None) -> None:
+    """Everything the ranker scored below today's three, grouped by company.
+
+    `<details>` rather than a JS drawer: it is native disclosure, it opens with no script
+    at all, and — unlike a table — it cannot be caught by the filter JS, which the today
+    panel must never be. Grouped in encounter order over the score-sorted list, so the
+    company with the best role comes first and nothing is re-sorted.
+
+    No buttons, in either mode. A rest row is a link and its numbers; the disposition and
+    prefill controls stay on the three cards above, which is what keeps
+    `.pick [data-act]` meaning exactly "one of today's picks".
+    """
+    if not rest:
+        return
+    # The number is carried alongside the row rather than looked up later: `sqlite3.Row`
+    # compares by value, so `rest.index(row)` would hand two identical rows the same
+    # position, and the ranking is the one thing this drawer is for.
+    groups: dict[str, list] = {}
+    for n, row in enumerate(rest, 4):
+        groups.setdefault(row["company"], []).append((n, row))
+
+    roles = "role" if len(rest) == 1 else "roles"
+    firms = "company" if len(groups) == 1 else "companies"
+    parts.append('<details class="rest">')
+    parts.append(
+        f"<summary>The rest of the ranking — {len(rest)} {roles} "
+        f"at {len(groups)} {firms}</summary>"
+    )
+    parts.append(
+        '<p class="note">Scored below today\'s three. A list, not a queue — the buttons '
+        "live on a pick.</p>"
+    )
+    for company, rows in groups.items():
+        tier = _tier_of(company, by_name)
+        var = _band_var(tier)
+        parts.append('<div class="restco">')
+        parts.append(
+            f'<h3><span class="tier" style="background:var({var});'
+            f'color:var({var}-ink)">T{tier if tier is not None else "?"}</span>'
+            f'{html.escape(company)} <span class="n">{len(rows)} '
+            f'{"role" if len(rows) == 1 else "roles"}</span></h3>'
+        )
+        parts.append('<ul class="restlist">')
+        for n, row in rows:
+            loc = row["location"] or "location unspecified"
+            is_nyc = criteria is not None and location_rank(row["location"], criteria) == 0
+            pin = '<span class="pin">NYC</span> ' if is_nyc else ""
+            bits = [f'{pin}{html.escape(loc)}', f'score {row["score"]:.1f}']
+            plan = (plans or {}).get((row["company"], row["ats_job_id"]))
+            if plan is not None and plan["fields"]:
+                bits.append(f'prefill {plan["fields"] - plan["gaps"]}/{plan["fields"]} fields')
+            parts.append(
+                f'<li><span class="rn">{n}</span>'
+                f'<a href="{_safe_url(row["url"])}" target="_blank" rel="noopener">'
+                f'{html.escape(row["title"])}</a>'
+                f'<span class="meta">{" · ".join(bits)}</span></li>'
+            )
+        parts.append("</ul></div>")
+    parts.append("</details>")
+
 
 def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
-          view_url="") -> None:
+          view_url="", overrides=None) -> None:
     tier = _tier_of(row["company"], by_name)
     var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
@@ -676,6 +935,7 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
     )
 
     _prefill_line(parts, row, plans)
+    _resume_line(parts, row, interactive, overrides)
 
     parts.append('<div class="act">')
     parts.append(
@@ -691,6 +951,12 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
         parts.append(
             f'<button class="apply-to" data-company="{c}" data-job="{j}">'
             "Open prefilled</button>"
+        )
+        # Re-plan this one posting against the answers and resume as they stand now.
+        # Rules only, no model and no network — see `server._rebuild_plan`.
+        parts.append(
+            f'<button class="pick-rebuild" data-company="{c}" data-job="{j}">'
+            "Rebuild prefill</button>"
         )
         if view_url:
             # `serve` is running where you cannot see its screen, so the window it opens
@@ -734,13 +1000,50 @@ def _prefill_line(parts, row, plans) -> None:
         return
     filled = plan["fields"] - plan["gaps"]
     cls = "prefill" if plan["gaps"] else "prefill full"
+    # Two spans, so the Rebuild handler only ever sets *text* into nodes that were
+    # rendered here. A script that writes markup into a card is a script that has to
+    # re-implement the escaping this file already does.
     tail = (
-        f' · <span class="need">{plan["gaps"]} need you</span>'
-        if plan["gaps"] else " · nothing left to type"
+        f'<span class="tail need"> · {plan["gaps"]} need you</span>'
+        if plan["gaps"] else '<span class="tail"> · nothing left to type</span>'
     )
     parts.append(
-        f'<div class="{cls}">prefill {filled}/{plan["fields"]} fields{tail}</div>'
+        f'<div class="{cls}"><span class="counts">prefill {filled}/{plan["fields"]}'
+        f" fields</span>{tail}</div>"
     )
+
+
+def _resume_line(parts, row, interactive, overrides=None) -> None:
+    """Which resume this posting will attach, and — under `serve` — how to change it.
+
+    The name renders in both modes for the same reason the prefill counts do: knowing
+    which PDF is about to go out under your name is useful offline. Only the controls are
+    gated on `interactive`, because only a live server has anywhere to POST them.
+    """
+    row_override = (overrides or {}).get((row["company"], row["ats_job_id"]))
+    parts.append('<div class="resume">')
+    if row_override is not None:
+        parts.append(
+            '<span class="rname own">resume for this posting: '
+            f'{html.escape(row_override["filename"])}</span>'
+        )
+    else:
+        parts.append('<span class="rname">resume: the one in Settings</span>')
+    if interactive:
+        c = html.escape(row["company"], quote=True)
+        j = html.escape(row["ats_job_id"], quote=True)
+        parts.append(
+            "<input type=\"file\" class=\"pickfile\" accept=\".pdf,.docx\" "
+            'aria-label="Resume for this posting">'
+            f'<button class="pick-attach" data-company="{c}" data-job="{j}">'
+            "Use for this posting</button>"
+        )
+        if row_override is not None:
+            parts.append(
+                f'<button class="pick-detach" data-company="{c}" data-job="{j}">'
+                "Use the default</button>"
+            )
+    parts.append("</div>")
 
 
 def version_chip() -> str:
@@ -768,10 +1071,11 @@ def version_chip() -> str:
     return f'<span class="ver">v{html.escape(base)} · {detail}</span>'
 
 
-def _header(parts, today, run, companies) -> None:
+def _header(parts, today, run, companies, pending_mail=0, interactive=False) -> None:
     parts.append(
         f"<h1>Job tracker — {html.escape(today)} {version_chip()}</h1>"
     )
+    _mail_banner(parts, pending_mail, interactive)
     if run is None:
         parts.append('<p class="sub">No run recorded yet. Run <code>jobtracker check</code>.</p>')
         return
@@ -786,6 +1090,36 @@ def _header(parts, today, run, companies) -> None:
         f'<p class="note">Coverage: {api} boards checked automatically, '
         f"{manual} manual-only companies that are never scraped (see below).</p>"
     )
+
+
+def _mail_banner(parts, pending: int, interactive: bool) -> None:
+    """"Your inbox says something happened" — a count, and where to go about it.
+
+    Derived from the pending proposals rather than from a stored "seen" flag. A flag
+    would have to be written by a GET, and rendering a page must not mutate what it
+    renders; a flag written by JS would never be written at all with JS off. So the
+    acknowledgement is accepting or dismissing a proposal, not glancing at the banner —
+    which is also the honest behaviour for the one feature meant to catch what you missed.
+
+    Nothing at all when there is nothing pending: a zero-state line here would be a
+    permanent fixture that stops being read long before it has something to say.
+    """
+    if not pending:
+        return
+    what = "email suggests" if pending == 1 else "emails suggest"
+    if interactive:
+        parts.append(
+            f'<p class="banner mail">{pending} {what} an application moved — '
+            '<a href="/applications">review</a>.</p>'
+        )
+    else:
+        # No link in the static file: a file:// page pointing at a server that may not be
+        # running is worse than no link. The count still earns its place offline — it
+        # says whether opening the app is worth it.
+        parts.append(
+            f'<p class="banner mail">{pending} {what} an application moved — '
+            "<code>jobtracker mail</code>.</p>"
+        )
 
 
 def _by_location(rows, criteria):
@@ -929,42 +1263,65 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None) ->
         f'<table data-filterable data-count-target="{ident}-count" '
         f'data-empty-target="{ident}-empty">'
     )
-    parts.append("<thead><tr><th>Tier</th><th>Company</th><th>Role</th>"
+    # Tier and company moved into the group head, which spans the row. `colspan` and the
+    # header come out of the same `reason` flag, in one place, so they cannot disagree.
+    cols = 4 if reason else 3
+    parts.append("<thead><tr><th>Role</th>"
                  "<th>Location</th>" + ("<th>Why uncertain</th>" if reason else "")
-                 + "<th>First seen</th></tr></thead><tbody>")
+                 + "<th>First seen</th></tr></thead>")
+
+    # Grouped by iterating the already location-sorted rows, so dict insertion order puts
+    # each company where its best-placed role already was. NYC-first survives grouping
+    # with no second comparator to keep in step with `_by_location`.
+    groups: dict[str, list] = {}
     for r in rows:
-        company = by_name.get(r["company"])
-        tier = _tier_of(r["company"], by_name)
+        groups.setdefault(r["company"], []).append(r)
+
+    for company_name, group in groups.items():
+        company = by_name.get(company_name)
+        tier = _tier_of(company_name, by_name)
         var = _band_var(tier)
         ats = company.ats if company else ""
-        loc = r["location"] or ""
-        rank = location_rank(loc, criteria) if criteria is not None else None
-        loc_key = location_label(rank) if rank is not None else ""
-        search = " ".join(
-            x.lower() for x in (r["company"], r["title"], loc, str(tier), ats) if x
-        )
+        parts.append('<tbody class="grp">')
         parts.append(
-            f'<tr data-tier="{html.escape(str(tier))}" data-ats="{html.escape(ats)}" '
-            f'data-loc="{html.escape(loc_key)}" '
-            f'data-search="{html.escape(search)}">'
+            f'<tr class="cohead"><th colspan="{cols}" scope="colgroup">'
+            f'<span class="tier" style="background:var({var});color:var({var}-ink)">'
+            f'{html.escape(str(tier))}</span>'
+            f'<span class="coname">{html.escape(company_name)}</span>'
+            f'<span class="n">{len(group)} '
+            f'{"role" if len(group) == 1 else "roles"}</span>'
+            '<button type="button" class="cotoggle" aria-expanded="true">Hide</button>'
+            "</th></tr>"
         )
-        parts.append(
-            f'<td><span class="tier" '
-            f'style="background:var({var});color:var({var}-ink)">'
-            f'{html.escape(str(tier))}</span></td>'
-        )
-        parts.append(f'<td class="co">{html.escape(r["company"])}</td>')
-        parts.append(f'<td><a href="{_safe_url(r["url"])}" target="_blank" '
-                     f'rel="noopener noreferrer">{html.escape(r["title"])}</a></td>')
-        # The NYC pin is a marker on the single most-preferred band, not a per-row
-        # colored scale — four location colors beside seven tier chips would be noise.
-        pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
-        parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
-        if reason:
-            parts.append(f'<td class="why">{html.escape(r["reason"] or "")}</td>')
-        parts.append(f'<td class="seen">{html.escape((r["first_seen"] or "")[:10])}</td>')
-        parts.append("</tr>")
-    parts.append("</tbody></table>")
+        for r in group:
+            loc = r["location"] or ""
+            rank = location_rank(loc, criteria) if criteria is not None else None
+            loc_key = location_label(rank) if rank is not None else ""
+            # Company, tier and ats stay in the search blob even though their cells moved
+            # into the head above — otherwise typing a company name would stop matching
+            # its own rows, which is the first thing anyone tries.
+            search = " ".join(
+                x.lower() for x in (r["company"], r["title"], loc, str(tier), ats) if x
+            )
+            parts.append(
+                f'<tr data-tier="{html.escape(str(tier))}" data-ats="{html.escape(ats)}" '
+                f'data-loc="{html.escape(loc_key)}" '
+                f'data-search="{html.escape(search)}">'
+            )
+            parts.append(f'<td><a href="{_safe_url(r["url"])}" target="_blank" '
+                         f'rel="noopener noreferrer">{html.escape(r["title"])}</a></td>')
+            # The NYC pin is a marker on the single most-preferred band, not a per-row
+            # colored scale — four location colors beside seven tier chips would be noise.
+            pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
+            parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
+            if reason:
+                parts.append(f'<td class="why">{html.escape(r["reason"] or "")}</td>')
+            parts.append(
+                f'<td class="seen">{html.escape((r["first_seen"] or "")[:10])}</td>'
+            )
+            parts.append("</tr>")
+        parts.append("</tbody>")
+    parts.append("</table>")
     parts.append(f'<div class="empty" id="{ident}-empty" hidden>No rows match the filters.</div>')
 
 

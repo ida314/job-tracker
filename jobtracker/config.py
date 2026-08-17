@@ -42,6 +42,18 @@ BROWSER_PROFILE = Path(
 # no link. The app neither starts nor knows anything about the viewer — it is a URL.
 BROWSER_VIEW_URL = os.environ.get("JOBTRACKER_BROWSER_VIEW_URL", "")
 
+# Resumes tailored to one posting each. The answer bank's `resume:` is the default and
+# lives beside answers.yaml; these are the exceptions, uploaded from the browser and
+# stored under a name this repo minted. Gitignored with the rest of ./data.
+RESUMES_DIR = Path(os.environ.get("JOBTRACKER_RESUMES", ROOT / "data" / "resumes"))
+
+# Your job-search mailbox, read only. Empty means not configured, which is a normal
+# state: `mail` says so and the `inbox` task reports itself unavailable rather than idle.
+# Never written, never marked read, never moved — your mail client owns that directory.
+# See docs/mail.md.
+_MAILDIR = os.environ.get("JOBTRACKER_MAILDIR", "").strip()
+MAILDIR = Path(_MAILDIR) if _MAILDIR else None
+
 _DEFAULT_DB = ROOT / "data" / "state.db"
 DB_PATH = Path(os.environ.get("JOBTRACKER_DB", _DEFAULT_DB))
 

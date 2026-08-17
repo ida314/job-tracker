@@ -1,5 +1,7 @@
 """Store semantics: first_seen stability, repost reopen, closure on disappearance."""
 
+import pytest
+
 from jobtracker import store
 from jobtracker.models import Decision, Posting, Verdict
 
@@ -315,3 +317,47 @@ def test_deleting_an_application_takes_its_history_with_it():
     store.delete_application(conn, "Acme", "1")
     assert store.application_count(conn) == 0
     assert store.events_by_application(conn) == {}
+
+
+# -- a resume for one posting -------------------------------------------------------
+def test_a_posting_resume_is_replaced_rather_than_duplicated():
+    conn = _conn()
+    store.set_posting_resume(conn, "Acme", "1", "first.pdf", 10, "2026-08-16")
+    store.set_posting_resume(conn, "Acme", "1", "second.pdf", 20, "2026-08-17")
+    row = store.get_posting_resume(conn, "Acme", "1")
+    assert (row["filename"], row["bytes"]) == ("second.pdf", 20)
+    assert len(store.posting_resumes(conn)) == 1
+    conn.close()
+
+
+def test_clearing_a_posting_resume_leaves_the_others_alone():
+    conn = _conn()
+    store.set_posting_resume(conn, "Acme", "1", "a.pdf", 10, "2026-08-16")
+    store.set_posting_resume(conn, "Acme", "2", "b.pdf", 10, "2026-08-16")
+    store.clear_posting_resume(conn, "Acme", "1")
+    assert store.get_posting_resume(conn, "Acme", "1") is None
+    assert store.get_posting_resume(conn, "Acme", "2")["filename"] == "b.pdf"
+    conn.close()
+
+
+# -- mail ---------------------------------------------------------------------------
+def test_a_proposal_must_name_a_status_that_exists():
+    """A status outside the enum would render as a pill nothing styles and, worse, be
+    written into an application on accept."""
+    conn = _conn()
+    with pytest.raises(ValueError):
+        store.record_mail_proposal(conn, "m1", "Acme", "1", "hired", "q", "2026-08-16")
+    with pytest.raises(ValueError):
+        store.resolve_mail_proposal(conn, "m1", "maybe", "2026-08-16")
+    conn.close()
+
+
+def test_a_gap_seen_on_list_has_one_definition_of_its_delimiter():
+    conn = _conn()
+    store.record_gap(conn, "k", "ask?", "text", "Acme", "2026-08-16")
+    store.record_gap(conn, "k", "ask?", "text", "Zeta", "2026-08-16")
+    row = store.open_gaps(conn)[0]
+    assert store.gap_companies(row) == ["Acme", "Zeta"]
+    assert store.gap_companies("") == []
+    assert store.gap_companies(None) == []
+    conn.close()

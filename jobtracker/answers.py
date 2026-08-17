@@ -216,12 +216,32 @@ def _resolve_file(value: Any, yaml_path: Path, label: str) -> Optional[Path]:
 
 
 # -- the machine-managed tail ---------------------------------------------------------
+def _ordered_gaps(gaps) -> list:
+    """Generic questions first, then each company's own — the Settings page's order.
+
+    Imported lazily because `tasks/prefill` imports this module: at module scope the two
+    would be a cycle. It is one function call on a file write, so the cost is nothing and
+    the alternative is a third definition of "generic" living here.
+    """
+    from .tasks.prefill import split_gaps
+
+    generic, per_company = split_gaps(list(gaps))
+    ordered = list(generic)
+    for _, rows in per_company:
+        ordered.extend(rows)
+    return ordered
+
+
 def render_gap_block(gaps) -> str:
     """The commented-out stubs for every question we cannot answer.
 
     Commented rather than live keys with empty values, because a live empty value would
     load as an answer and get typed into a form. You uncomment one, fill it in, and it
     becomes real — and the next prefill run stops listing it.
+
+    Ordered the way the Settings page orders it: the questions many employers ask first,
+    then each company's own. This block is a rendering of `prefill_gaps` and so is that
+    page; two renderings of one table should not disagree about what to do first.
     """
     lines = [
         GAP_MARKER,
@@ -230,12 +250,15 @@ def render_gap_block(gaps) -> str:
         "# Everything below this line is rewritten on every prefill run; everything",
         "# above it is yours and is never touched.",
         "#",
+        "# Most-asked first: answering one of those fills that field at every employer",
+        "# that asks it, forever.",
+        "#",
     ]
     if not gaps:
         lines.append("# (nothing outstanding)")
         return "\n".join(lines) + "\n"
 
-    for gap in gaps:
+    for gap in _ordered_gaps(gaps):
         options = gap["options"]
         lines.append("#")
         if gap["type"] == "file":

@@ -7,6 +7,7 @@ some of it, and commits each unit on its own.
 level   10   read a description for the level its title omitted   -> produces matches
 judge   20   judge a match against profile.yaml                   -> produces scores
 prefill 30   work out what goes in an application form            -> consumes scores
+inbox   40   read a reply from an employer                        -> proposes updates
 ```
 
 This repo still does not know about schedulers — it ships the command and the machine
@@ -32,6 +33,13 @@ preference — it is the dependency chain. `level` settles uncertain postings in
 `judge` scores those matches, `prefill` works down the scored ones. So "always work the
 earliest stage that has work" is the same instruction as "never starve a later stage",
 and there is only one knob to get wrong instead of three.
+
+**`inbox` is the exception, and it says so rather than pretending otherwise.** It is not
+in that chain: it consumes nothing the other three produce and produces nothing they
+consume, so the dependency rule does not decide its number. It is last on a starvation
+argument instead — its queue refills from an external stream on a schedule nothing here
+controls, and anywhere earlier a chatty mailbox would keep the pipeline's own stages
+permanently waiting. Dressing that up as a dependency would be the wrong kind of tidy.
 
 ```
 $ jobtracker work --dry-run
@@ -76,6 +84,13 @@ visible rather than being an inexplicably shrinking queue.
 | `level` | `"level"` | nothing re-asks it; a re-run is a retry |
 | `judge` | `profile.prose_hash` | profile prose re-asks every posting |
 | `prefill` | `answers.hash` | answers.yaml re-plans every application |
+| `inbox` | the `Message-ID` | nothing; a message cannot change |
+
+`inbox` is where that framing stops being an abstraction: the message *is* the question,
+so its id is the key. It is also load-bearing rather than decorative. Two ambiguous
+messages at one company both carry `ats_job_id=''`, so without the id in `unit_key` they
+share an `ident` — `task_attempts` charges one message's failures to the other, and the
+router collapses two distinct questions onto one answer.
 
 That is not bookkeeping. Editing the prose makes every posting a *new* unit, so its
 retry count starts clean — correct, because a failure answering the old question says
@@ -94,6 +109,13 @@ no half-applied state to clean up.
 
 **Failure stays absence**, inherited whole from docs/llm.md. A unit that times out,
 returns nonsense, or throws writes *nothing*; the posting stays exactly where it was.
+
+One deliberate divergence, in `inbox`: "this message is not about an application" is an
+**answer** and is written, where `level`'s equivalent (`unclear`) writes nothing and is
+retried three times. Copying `level` there would spend three model calls on every
+newsletter that squeaked through the narrower and would fill the blocked-unit count —
+which exists to signal breakage — with perfectly healthy readings. Only a transport
+failure leaves a message unread. See docs/mail.md.
 Every task in this package must be safe to abandon halfway through, on every night,
 forever. The model can add resolution to this pipeline; it cannot subtract correctness.
 

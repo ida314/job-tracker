@@ -202,10 +202,19 @@ class RankStats:
 # Python composes the score — so it is worth keeping the file split on it.
 
 
+def available(rows, today: str) -> list:
+    """Every scored posting still awaiting your decision, best first.
+
+    Extracted from `top_n` so that anything showing what falls *below* the picks starts
+    from the same list they came out of. Reading the raw query instead would put the jobs
+    you already applied to or skipped back on the page they left.
+    """
+    return [r for r in rows if is_available(r, today) and r["score"] is not None]
+
+
 def top_n(rows, n: int, today: str) -> list:
     """The n highest-scoring postings still awaiting your decision."""
-    available = [r for r in rows if is_available(r, today) and r["score"] is not None]
-    return available[:n]
+    return available(rows, today)[:n]
 
 
 def tier_lookup(companies: list[Company]) -> dict:

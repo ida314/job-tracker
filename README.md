@@ -32,6 +32,8 @@ docs/            reference notes — see the table below
 | [`docs/llm.md`](docs/llm.md) | The optional local ambiguity pass, and the router the model calls go through |
 | [`docs/tasks.md`](docs/tasks.md) | The task queue: what the model works on next, and why that order |
 | [`docs/prefill.md`](docs/prefill.md) | Opening an application with your answers already in it |
+| [`docs/applications.md`](docs/applications.md) | The outer loop: stages, reminders, and what became of what you sent |
+| [`docs/mail.md`](docs/mail.md) | Reading your job-search mailbox for replies, and proposing what they mean |
 | [`docs/ranking.md`](docs/ranking.md) | Picking the three to apply to tomorrow, and tuning it without a GPU |
 | [`docs/observability.md`](docs/observability.md) | Traces, metrics, and the query idioms that are not obvious |
 
@@ -74,6 +76,12 @@ python -m jobtracker.cli today --snooze  Stripe 7966029 --days 14
 python -m jobtracker.cli applications                 # what you applied to, and what it needs
 python -m jobtracker.cli apply Stripe 7966029 --status interview --note "round 2"
 python -m jobtracker.cli apply "Some Startup" --manual --title "Backend Eng (Referral)"
+
+# what the employers said back — see docs/mail.md
+export JOBTRACKER_MAILDIR=~/Mail/jobs                 # read-only, never written
+python -m jobtracker.cli mail                         # narrow the mailbox, no model
+python -m jobtracker.cli work --task inbox            # read the candidates
+python -m jobtracker.cli mail --list                  # proposals awaiting your ruling
 
 # prefilled applications — see docs/prefill.md
 cp answers.example.yaml answers.yaml                  # gitignored; holds your details

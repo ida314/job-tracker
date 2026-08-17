@@ -92,3 +92,17 @@ def test_every_surface_carries_the_chip(tmp_path):
     assert 'class="ver"' in server.render_tuning(conn, load_criteria(config.CRITERIA_YAML))
     assert 'class="ver"' in server.render_settings(conn, tmp_path / "answers.yaml")
     conn.close()
+
+
+def test_every_subcommand_appears_in_the_help_table():
+    """`cli.py`'s docstring is the subcommand table `--help` prints. Nothing pinned it
+    to the parser before, so the two could drift silently — and a command missing from
+    the table is a command nobody finds."""
+    from jobtracker import cli
+
+    parser = cli.build_parser()
+    subparsers = [a for a in parser._actions
+                  if isinstance(a, __import__("argparse")._SubParsersAction)][0]
+    table = cli.__doc__
+    missing = [name for name in subparsers.choices if f"\n  {name} " not in table]
+    assert missing == [], f"not in the --help table: {missing}"

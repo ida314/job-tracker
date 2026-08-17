@@ -1,8 +1,9 @@
 """Task: work out what goes in every box on an application form.
 
-The third bounded model role, and the most constrained of the three. Where `level` reads
-a description for a fact and `judge` reads it for a fit judgment, this one only ever
-*points at an answer you already wrote*. It cannot produce prose, and there is no code
+The fourth bounded model role (DESIGN.md §8 numbers it fourth; this docstring said third
+until 2026-08-16), and the most constrained of them all. Where `level` reads a description
+for a fact and `judge` reads it for a fit judgment, this one only ever *points at an answer
+you already wrote*. It cannot produce prose, and there is no code
 path here by which a sentence the model composed reaches a form field. An unanswered
 free-text question is a gap, exactly like an unanswered dropdown.
 
@@ -27,10 +28,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
-from .. import store
+from .. import resumes, store
 from ..answers import normalize_label, slugify
 from ..models import FormField
 from ..sources import get_source
@@ -88,6 +89,27 @@ LABEL_ALIASES = {
 # rather than from an answer, and only a real browser can act on it.
 RESUME_FIELDS = {"resume", "cv"}
 COVER_LETTER_FIELDS = {"cover_letter"}
+
+# Questions every employer asks eventually. A first sighting at one company is still an
+# answer worth writing once, so these are generic at count 1 — the list exists only to
+# stop the very first sighting of `work_authorization` being filed under whichever
+# employer happened to ask first.
+COMMON_QUESTION_KEYS = frozenset({
+    "work_authorization", "sponsorship", "sponsorship_required", "visa_status",
+    "start_date", "salary_expectation", "notice_period", "how_did_you_hear",
+    "current_employer", "country_of_residence",
+    # The EEO block. Asked by essentially every US employer, worth answering once.
+    "gender", "race", "ethnicity", "hispanic_latino", "veteran_status",
+    "disability_status",
+    "resume", "cover_letter",
+})
+
+# Everything that is generic by construction rather than by observation.
+GENERIC_KEYS = (
+    frozenset(CANONICAL_FIELDS.values())
+    | frozenset(LABEL_ALIASES.values())
+    | COMMON_QUESTION_KEYS
+)
 
 MATCH_SCHEMA_NAME = "question_match"
 
@@ -270,6 +292,80 @@ def mark_alternatives(entries: list[PlanEntry]) -> None:
             entry.source = "alternative"
 
 
+def split_gaps(gaps) -> tuple[list, list[tuple[str, list]]]:
+    """`(generic, [(company, gaps), …])` — which unanswered questions pay off repeatedly.
+
+    Generic means a question that is canonical or common (GENERIC_KEYS), or that two or
+    more employers have already asked. Everything else is one company's own question and
+    is grouped under that company.
+
+    The rule needs no new state and no maintained list, which is the point: a question
+    migrates into the generic list on its own the day a second employer asks it, the same
+    way `tuning`'s suggestions avoid a hand-maintained blocklist. Generic sorts by how
+    many ask, descending, because that is the order in which answering them pays.
+
+    This decides which list a question is *rendered* in and nothing else. No write and no
+    fill reads it, so a misfiled question costs ordering, never correctness.
+    """
+    generic, owned = [], {}
+    for gap in gaps:
+        companies = store.gap_companies(gap)
+        if gap["question_key"] in GENERIC_KEYS or len(companies) > 1:
+            generic.append((len(companies), gap))
+        elif companies:
+            owned.setdefault(companies[0], []).append(gap)
+        else:
+            # No company recorded at all. Nothing to file it under, and dropping it would
+            # hide a question you still owe someone an answer to.
+            generic.append((0, gap))
+
+    generic.sort(key=lambda pair: (-pair[0], pair[1]["first_seen"] or "",
+                                   pair[1]["question_key"]))
+    groups = sorted(owned.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    for _, rows in groups:
+        rows.sort(key=lambda g: (g["first_seen"] or "", g["question_key"]))
+    return [gap for _, gap in generic], groups
+
+
+def gap_ask_count(gap) -> int:
+    """How many employers have asked this question. Rendered beside a generic gap."""
+    return len(store.gap_companies(gap))
+
+
+def retarget_resume(plan_json: Optional[str], resume: Optional[str]) -> Optional[str]:
+    """Point a stored plan's resume entries at `resume`.
+
+    Required, not defensive. `browser._plan_index` lets a stored plan value win over a
+    fresh `resolve_field`, so swapping `answers.resume` alone would still attach the
+    bank's file at every posting that already had a plan — silently, and under your name.
+    Both halves are applied wherever an application is opened.
+    """
+    if not plan_json or not resume:
+        return plan_json
+    try:
+        entries = json.loads(plan_json)
+    except (ValueError, TypeError):
+        return plan_json
+    if not isinstance(entries, list):
+        return plan_json
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("question_key") == "resume":
+            entry["value"] = resume
+    return json.dumps(entries)
+
+
+def plan_from_fields(fields, answers, alias_map: dict, form_source: str) -> "PrefillResult":
+    """Everything a plan can be given without asking a model.
+
+    Shared by the nightly task and by the Rebuild button, which is what stops the two
+    from drifting: one of them running a resolution pass the other does not have is
+    exactly how a button comes to report counts the pipeline disagrees with.
+    """
+    entries = [resolve_field(f, answers, alias_map) for f in fields]
+    mark_alternatives(entries)
+    return PrefillResult(entries=entries, form_source=form_source)
+
+
 class PrefillTask(Task):
     name = "prefill"
     priority = 30
@@ -286,6 +382,7 @@ class PrefillTask(Task):
         )
         alias_map = dict(ctx.answers.by_alias)
         alias_map.update(store.known_question_keys(conn))
+        overrides = store.posting_resumes(conn)
 
         units: list[TaskUnit] = []
         for row in rows:
@@ -313,6 +410,11 @@ class PrefillTask(Task):
                 # what goes in this form?" Write one more answer and it is a new
                 # question, so every plan is rebuilt — for free, since the rebuild is
                 # rules-only for every field that was already resolved.
+                #
+                # The posting's own resume is deliberately NOT in this key. It is a
+                # different question, tracked by `prefill_plans.resume_key`, and folding
+                # it in here would reset the attempt ledger of a posting whose form
+                # question has not changed at all.
                 unit_key=ctx.answers.hash,
                 title=row["title"],
                 payload={
@@ -320,6 +422,10 @@ class PrefillTask(Task):
                     "score": row["score"],
                     "cached_fields": [_field_of(r) for r in cached],
                     "alias_map": alias_map,
+                    "resume_override": (
+                        overrides[(company_name, row["ats_job_id"])]["filename"]
+                        if (company_name, row["ats_job_id"]) in overrides else None
+                    ),
                 },
             ))
             if limit is not None and len(units) >= limit:
@@ -341,10 +447,22 @@ class PrefillTask(Task):
         if not fields:
             return None
 
+        # This posting's own resume, if it has one. A copy of the frozen bank, never a
+        # mutation: `ctx.answers` is shared across every unit in flight. The copy's
+        # `.hash` is deliberately not used for anything — see `apply`.
         answers = ctx.answers
+        override = unit.payload.get("resume_override")
+        if override:
+            path = resumes.path_for(override)
+            if path.is_file():
+                answers = replace(answers, resume=path)
+            else:
+                log.warning("resume %s for %s is missing — planning the bank's",
+                            override, unit.label)
+
         alias_map = unit.payload["alias_map"]
-        entries = [resolve_field(f, answers, alias_map) for f in fields]
-        mark_alternatives(entries)
+        result = plan_from_fields(fields, answers, alias_map, form_source)
+        entries = result.entries
 
         # The model pass, and only for what the rules could not place. Most nights this
         # is zero calls: a form is mostly fields we have seen before.
@@ -364,7 +482,7 @@ class PrefillTask(Task):
                     continue
                 entry.question_key, entry.value, entry.source = key, chosen, "model"
 
-        return PrefillResult(entries=entries, form_source=form_source)
+        return result
 
     async def _ask(self, entry: PlanEntry, candidates, client, unit) -> Optional[str]:
         text = await client.complete(
@@ -421,8 +539,14 @@ class PrefillTask(Task):
             plan_json=json.dumps([e.as_dict() for e in result.entries]),
             fields=len(result.entries),
             gaps=len(result.gaps),
+            # The BANK's hash, never the copy's. The copy carries the override in its
+            # resume basename, so storing its hash would make this plan look stale
+            # against `ctx.answers.hash` and rebuild it every night forever. Which resume
+            # was used is `resume_key`'s question, and `matches_needing_prefill` compares
+            # that column separately.
             answers_hash=ctx.answers.hash,
             now=ctx.today,
+            resume_key=unit.payload.get("resume_override"),
         )
         return result.summary
 

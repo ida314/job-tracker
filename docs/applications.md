@@ -1,7 +1,11 @@
 # Applications: the outer loop
 
 `check` and `work` find roles. `rank` decides which three to do today. This is what
-happens after you click Apply — the only part of the system where the input is you.
+happens after you click Apply — the part of the system where the input is you.
+
+Since 2026-08-16 there is one other source of input, and it is deliberately not a writer:
+your mailbox can **propose** that an application moved, and accepting the proposal is what
+writes. See "Proposals from mail" below and docs/mail.md.
 
 Two surfaces, one dataset:
 
@@ -163,6 +167,26 @@ built yet — there is no data.
 
 ---
 
+## Proposals from mail
+
+A section above the add form, when there is one. Full design in docs/mail.md; what matters
+to *this* table:
+
+- **Accepting is the only path from the mailbox into `applications`.** The scan writes to
+  `mail_candidates`, the model writes to `mail_proposals`, and neither touches this table
+  or its event log. There is a test that snapshots both around a full task run.
+- **The event note is composed by Python** — `from mail: <subject> (<date>)`. The model's
+  quote is the evidence shown on the card and stays in `mail_proposals.evidence`. Nothing
+  it wrote reaches an application, which is DESIGN.md §8.4's rule with your own history as
+  the field.
+- **An unresolved job is asked about, never guessed.** When a message identifies the
+  company but not which of your applications, the card renders a dropdown and the endpoint
+  refuses until you pick. A stage on the wrong job is not a thing you would notice later.
+- **Dismissed is a resolution, not a delete.** The row stays so the next scan cannot
+  propose the same message again.
+- **The controls are `app-accept` and `app-dismiss`**, in the same `app-*` family as the
+  rest of this page and therefore inside the exact-set test below.
+
 ## Rules that must not be "simplified"
 
 - **The static file carries no buttons.** `dashboard._applications` renders read-only and
@@ -170,7 +194,9 @@ built yet — there is no data.
   and a button's handler must live in the file that renders the button — dashboard.py
   ships no application handlers, so it must ship no application buttons. Every control is
   emitted by `server.render_applications` and every handler is a branch in `server._JS`.
-  There is a test asserting the button set and the handler set match exactly.
+  There is a test asserting the button set and the handler set match exactly — it seeds a
+  pending mail proposal too, because an equality that only ever sees four of six buttons
+  is not the guard it looks like.
 - **The applications panel is never a `table[data-filterable]`.** The filter JS selects
   those, so a tier or location filter left set on the All postings tab would silently
   empty the list of things you actually did. Same trap the picks are protected from, and
@@ -206,6 +232,10 @@ jobtracker apply Stripe 7966029 --status interview --note "round 2 — system de
 # a job the pipeline never surfaced
 jobtracker apply "Some Startup" --manual --title "Backend Engineer (Referral)" \
     --url https://... --next-action 2026-08-25 --next-action-note "ping Alex"
+
+# what your mailbox thinks happened
+jobtracker mail --list
+jobtracker mail --accept '<CAF...@mail.gmail.com>'
 ```
 
 `apply` appends an event on every run, so repeating it with `--status interview` twice is

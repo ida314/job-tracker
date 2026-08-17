@@ -5,6 +5,7 @@ escaping is the most security-relevant behaviour here and testing it should not
 require standing up HTTP.
 """
 
+import json
 from html.parser import HTMLParser
 
 import pytest
@@ -784,13 +785,28 @@ def test_every_button_on_the_page_has_a_handler_in_its_own_script(tmp_path):
     page = server.render_applications(conn, [], "2026-08-16")
     conn.close()
 
+    # A pending proposal too, so the mail controls are on the page being checked. An
+    # equality that only ever sees four of six buttons is not the guard it looks like.
+    conn = store.connect(db)
+    conn.execute(
+        "INSERT INTO mail_candidates (message_id, company, ats_job_id, choices, "
+        "match_kind, subject, scanned_at) VALUES ('m1', 'Acme', '', '[]', 'company_name',"
+        " 'Your application', '2026-08-16')"
+    )
+    store.record_mail_proposal(conn, "m1", "Acme", "", "screen", "quote", "2026-08-16")
+    conn.commit()
+    page = server.render_applications(conn, [], "2026-08-16")
+    conn.close()
+
     script = page[page.rindex("<script>"):]
     classes = set(re.findall(r"class=[\"']?(app-[a-z]+)", page))
-    assert classes == {"app-add", "app-save", "app-meta", "app-delete"}
+    assert classes == {"app-add", "app-save", "app-meta", "app-delete",
+                       "app-accept", "app-dismiss"}
     for cls in classes:
         assert f"button.{cls}" in script, cls
     for endpoint in ("/api/application", "/api/application/meta",
-                     "/api/application/delete"):
+                     "/api/application/delete", "/api/mail/accept",
+                     "/api/mail/dismiss"):
         assert endpoint in script
 
 
@@ -807,3 +823,448 @@ def test_the_page_is_a_pure_read(tmp_path):
 
 def test_nav_reaches_the_applications_page():
     assert 'href="/applications"' in server._NAV
+
+
+# -- proposals from the mailbox -----------------------------------------------------
+def _proposal(db, *, company="Stripe", job="7966029", status="screen",
+              choices=("7966029",), message_id="m1", seed_app=True):
+    conn = store.connect(db)
+    if seed_app:
+        store.record_application(conn, company, job, "Backend Engineer, New Grad",
+                                 "applied", "2026-08-01T09:00:00")
+    conn.execute(
+        "INSERT INTO mail_candidates (message_id, company, ats_job_id, choices, "
+        "match_kind, subject, from_addr, sent_on, body, snippet, scanned_at, read_at) "
+        "VALUES (?, ?, ?, ?, 'sole_open', 'Your application', 'r@greenhouse.io', "
+        "'2026-08-15', 'body', 'body', '2026-08-16', '2026-08-16')",
+        (message_id, company, job if len(choices) == 1 else "",
+         json.dumps(list(choices))),
+    )
+    store.record_mail_proposal(conn, message_id, company,
+                               job if len(choices) == 1 else "", status,
+                               "we would like to schedule a call", "2026-08-16")
+    conn.commit()
+    conn.close()
+    return message_id
+
+
+def test_accepting_is_the_only_path_from_mail_into_applications(tmp_path):
+    """The task proposes and writes nothing. This is where a stage is actually set."""
+    db = _fresh(tmp_path)
+    mid = _proposal(db)
+    h = _apps_handler(db)
+
+    conn = store.connect(db)
+    assert store.get_application(conn, "Stripe", "7966029")["status"] == "applied"
+    conn.close()
+
+    assert h._api_mail_accept({"message_id": mid})["ok"] is True
+
+    conn = store.connect(db)
+    app = store.get_application(conn, "Stripe", "7966029")
+    assert app["status"] == "screen"
+    events = store.events_by_application(conn)[("Stripe", "7966029")]
+    # Exactly one new event (the seed used `record_application`, which logs none), and
+    # its note was composed here — never by the model.
+    assert [e["status"] for e in events] == ["screen"]
+    assert events[-1]["note"].startswith("from mail: Your application")
+    assert "schedule a call" not in events[-1]["note"]
+    assert store.pending_mail_proposals(conn) == []
+    conn.close()
+
+
+def test_a_refused_accept_writes_nothing(tmp_path):
+    """A half-recorded interview round is worse than one you type in yourself, because
+    you would believe it saved."""
+    db = _fresh(tmp_path)
+    mid = _proposal(db)
+    h = _apps_handler(db)
+
+    conn = store.connect(db)
+    before = [dict(r) for r in store.all_applications(conn)]
+    events = {k: [dict(e) for e in v]
+              for k, v in store.events_by_application(conn).items()}
+    conn.close()
+
+    for payload in ({}, {"message_id": ""}, {"message_id": "nope"},
+                    {"message_id": mid, "ats_job_id": "not-an-application"}):
+        res = h._api_mail_accept(payload)
+        assert res["ok"] is False, payload
+        assert res["error"]
+
+    conn = store.connect(db)
+    assert [dict(r) for r in store.all_applications(conn)] == before
+    assert {k: [dict(e) for e in v]
+            for k, v in store.events_by_application(conn).items()} == events
+    assert len(store.pending_mail_proposals(conn)) == 1
+    conn.close()
+
+
+def test_an_ambiguous_proposal_cannot_be_accepted_without_choosing_a_job(tmp_path):
+    db = _fresh(tmp_path)
+    conn = store.connect(db)
+    store.record_application(conn, "Stripe", "1", "Backend", "applied", "2026-08-01T00:00:00")
+    store.record_application(conn, "Stripe", "2", "Platform", "applied", "2026-08-01T00:00:00")
+    conn.commit()
+    conn.close()
+    mid = _proposal(db, choices=("1", "2"), seed_app=False)
+    h = _apps_handler(db)
+
+    assert h._api_mail_accept({"message_id": mid})["ok"] is False
+    assert h._api_mail_accept({"message_id": mid, "ats_job_id": "2"})["ok"] is True
+
+    conn = store.connect(db)
+    assert store.get_application(conn, "Stripe", "1")["status"] == "applied"
+    assert store.get_application(conn, "Stripe", "2")["status"] == "screen"
+    conn.close()
+
+
+def test_a_dismissed_proposal_cannot_be_accepted_afterwards(tmp_path):
+    db = _fresh(tmp_path)
+    mid = _proposal(db)
+    h = _apps_handler(db)
+    assert h._api_mail_dismiss({"message_id": mid})["ok"] is True
+    res = h._api_mail_accept({"message_id": mid})
+    assert res["ok"] is False and "dismissed" in res["error"]
+
+    conn = store.connect(db)
+    # Dismissed, not deleted — deleting is what would let the next scan re-propose it.
+    assert store.get_mail_proposal(conn, mid)["resolution"] == "dismissed"
+    assert store.get_application(conn, "Stripe", "7966029")["status"] == "applied"
+    conn.close()
+
+
+def test_a_subject_from_a_stranger_is_escaped_on_the_applications_page(tmp_path):
+    """Unlike an ATS title, this text comes from anyone who knows your email address."""
+    db = _fresh(tmp_path)
+    conn = store.connect(db)
+    store.record_application(conn, "Stripe", "7966029", "Backend", "applied",
+                             "2026-08-01T00:00:00")
+    conn.execute(
+        "INSERT INTO mail_candidates (message_id, company, ats_job_id, choices, "
+        "match_kind, subject, from_addr, body, snippet, scanned_at, read_at) "
+        "VALUES ('m1', 'Stripe', '7966029', '[\"7966029\"]', 'sole_open', ?, ?, '', ?, "
+        "'2026-08-16', '2026-08-16')",
+        (EVIL_TITLE, EVIL_LOCATION, EVIL_TITLE),
+    )
+    store.record_mail_proposal(conn, "m1", "Stripe", "7966029", "screen",
+                               EVIL_TITLE, "2026-08-16")
+    conn.commit()
+    page = server.render_applications(conn, [], "2026-08-16")
+    conn.close()
+    assert "<script>alert" not in page
+    assert page.count("<script>") == 1
+    # Parsed, not substring-matched: escaped text may legitimately contain the letters
+    # "onerror". What must not exist is an element that actually carries a handler.
+    collector = _AttrCollector()
+    collector.feed(page)
+    assert not {a for a in collector.attrs if a.startswith("on")}
+
+
+def test_the_server_never_reads_the_maildir():
+    """Walking a mailbox on a single-threaded HTTPServer would block every other
+    request, and it would make a page render a writer. Scanning is the CLI's job."""
+    import inspect
+
+    src = inspect.getsource(server)
+    assert "import mailbox" not in src
+    assert "maildir" not in src.replace("_MAILDIR", "")
+
+
+# -- a resume for one posting, and rebuilding its plan ------------------------------
+PDF = b"%PDF-1.4 a real enough pdf"
+
+
+def _b64(blob):
+    import base64
+    return base64.b64encode(blob).decode()
+
+
+def _posting(conn, company="Acme", job="1", title="Backend Engineer"):
+    conn.execute(
+        "INSERT INTO postings (company, ats_job_id, title, location, url, first_seen, "
+        "last_seen) VALUES (?, ?, ?, 'NYC', 'https://x/1', '2026-08-01', '2026-08-01')",
+        (company, job, title),
+    )
+
+
+def _own_bank(tmp_path):
+    """A minimal answers.yaml with a real resume file beside it."""
+    (tmp_path / "resume.pdf").write_bytes(PDF)
+    path = tmp_path / "answers.yaml"
+    path.write_text(
+        "identity:\n  first_name: Dylan\n  last_name: D\n  email: d@example.edu\n"
+        "resume: ./resume.pdf\n"
+        "answers:\n  work_authorization:\n    value: \"Yes\"\n"
+    )
+    return path
+
+
+def _form(conn, company="Acme"):
+    for key, label, kind in (("first_name", "First Name", "text"),
+                             ("resume", "Resume/CV", "file"),
+                             ("why_acme", "Why Acme?", "textarea")):
+        store.upsert_form_field(conn, company=company, form_key=key, label=label,
+                                field_type=kind, now="2026-08-16", required=1,
+                                options=None, question_key=None, source="dom")
+
+
+def _resume_handler(tmp_path, monkeypatch):
+    db = _fresh(tmp_path)
+    monkeypatch.setattr(config, "RESUMES_DIR", tmp_path / "resumes")
+    conn = store.connect(db)
+    _posting(conn)
+    _form(conn)
+    conn.commit()
+    conn.close()
+    return db, _handler_for(db, config.CRITERIA_YAML, _own_bank(tmp_path))
+
+
+def test_rebuilding_a_prefill_makes_no_model_call_and_no_network_call(tmp_path, monkeypatch):
+    """The endpoint runs on a single-threaded server. Anything that could block would
+    freeze every other tab, so there is no router and no fetcher in its path at all."""
+    db, h = _resume_handler(tmp_path, monkeypatch)
+    import socket
+
+    def _refuse(*a, **k):
+        raise AssertionError("the rebuild endpoint opened a socket")
+
+    monkeypatch.setattr(socket.socket, "connect", _refuse)
+    res = h._api_prefill({"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is True
+    assert res["fields"] == 3
+    conn = store.connect(db)
+    assert store.get_plan(conn, "Acme", "1")["fields"] == 3
+    conn.close()
+
+
+def test_rebuilding_a_prefill_refuses_when_no_form_has_been_learned_yet(tmp_path, monkeypatch):
+    """Zero fields is "we have never read this form", never "0/0, nothing to do".
+    Absence read as success is the failure DESIGN.md §3.4 exists to prevent."""
+    db = _fresh(tmp_path)
+    monkeypatch.setattr(config, "RESUMES_DIR", tmp_path / "resumes")
+    conn = store.connect(db)
+    _posting(conn, company="Ramp")
+    conn.commit()
+    conn.close()
+    h = _handler_for(db, config.CRITERIA_YAML, _own_bank(tmp_path))
+    res = h._api_prefill({"company": "Ramp", "ats_job_id": "1"})
+    assert res["ok"] is False
+    assert "no application form learned" in res["error"]
+
+
+def test_rebuilding_a_prefill_refuses_an_unknown_posting(tmp_path, monkeypatch):
+    _db, h = _resume_handler(tmp_path, monkeypatch)
+    assert h._api_prefill({"company": "Acme", "ats_job_id": "nope"})["ok"] is False
+    assert h._api_prefill({"company": "Acme"})["ok"] is False
+
+
+def test_rebuilding_replays_a_key_the_model_matched_once_without_asking_again(
+        tmp_path, monkeypatch):
+    """Every key the model ever matched was written onto form_fields.question_key, so a
+    rules-only rebuild is not the downgrade it sounds like."""
+    db, h = _resume_handler(tmp_path, monkeypatch)
+    conn = store.connect(db)
+    store.upsert_form_field(conn, company="Acme", form_key="q1",
+                            label="Are you authorized to work in the US?",
+                            field_type="text", now="2026-08-16", required=1,
+                            options=None, question_key="work_authorization",
+                            source="dom")
+    conn.commit()
+    conn.close()
+    res = h._api_prefill({"company": "Acme", "ats_job_id": "1"})
+    conn = store.connect(db)
+    plan = json.loads(store.get_plan(conn, "Acme", "1")["plan"])
+    conn.close()
+    filled = {e["form_key"]: e["value"] for e in plan if e["value"]}
+    assert filled["q1"] == "Yes"
+    assert res["gaps"] < res["fields"]
+
+
+def test_rebuilding_a_current_plan_still_rebuilds_it(tmp_path, monkeypatch):
+    """`matches_needing_prefill` excludes a plan whose hash already matches, so routing
+    the button through the queue would make it silently do nothing in exactly the case
+    it exists for."""
+    db, h = _resume_handler(tmp_path, monkeypatch)
+    assert h._api_prefill({"company": "Acme", "ats_job_id": "1"})["ok"] is True
+    conn = store.connect(db)
+    first = store.get_plan(conn, "Acme", "1")["built_at"]
+    conn.execute("UPDATE prefill_plans SET fields=99 WHERE company='Acme'")
+    conn.commit()
+    conn.close()
+    assert h._api_prefill({"company": "Acme", "ats_job_id": "1"})["ok"] is True
+    conn = store.connect(db)
+    plan = store.get_plan(conn, "Acme", "1")
+    assert plan["fields"] == 3 and plan["built_at"] == first
+    conn.close()
+
+
+def test_a_posting_resume_is_checked_by_content_not_only_by_name(tmp_path, monkeypatch):
+    _db, h = _resume_handler(tmp_path, monkeypatch)
+    ident = {"company": "Acme", "ats_job_id": "1"}
+    for filename, blob, expected in (
+        ("cv.exe", PDF, "not a resume"),
+        ("cv.pdf", b"MZ this is a windows binary", "not really"),
+        ("cv.pdf", b"", "no file"),
+    ):
+        res = h._api_posting_resume({**ident, "filename": filename,
+                                     "content_b64": _b64(blob)})
+        assert res["ok"] is False and expected in res["error"], (filename, blob)
+    assert not list((tmp_path / "resumes").glob("*")) if (tmp_path / "resumes").exists() \
+        else True
+
+
+def test_a_posting_resume_is_stored_under_a_name_this_server_minted(tmp_path, monkeypatch):
+    """A filename is attacker-shaped input even when the attacker is you with a badly
+    named file, and this one names a file that goes out with a real application."""
+    db, h = _resume_handler(tmp_path, monkeypatch)
+    res = h._api_posting_resume({"company": "Acme", "ats_job_id": "1",
+                                 "filename": "../../etc/passwd.pdf",
+                                 "content_b64": _b64(PDF)})
+    assert res["ok"] is True
+    written = list((tmp_path / "resumes").glob("*"))
+    assert len(written) == 1
+    assert written[0].name == res["filename"]
+    assert ".." not in written[0].name and "/" not in written[0].name
+    conn = store.connect(db)
+    assert store.get_posting_resume(conn, "Acme", "1")["filename"] == res["filename"]
+    conn.close()
+
+
+def test_a_posting_resume_leaves_the_answer_bank_and_its_hash_alone(tmp_path, monkeypatch):
+    """The override is one posting's business. Folding it into `Answers.hash` would make
+    every plan built with one look permanently stale."""
+    from jobtracker.answers import load_answers
+
+    db, h = _resume_handler(tmp_path, monkeypatch)
+    bank_path = tmp_path / "answers.yaml"
+    before_text = bank_path.read_text()
+    before_hash = load_answers(bank_path).hash
+
+    h._api_posting_resume({"company": "Acme", "ats_job_id": "1", "filename": "a.pdf",
+                           "content_b64": _b64(PDF)})
+
+    assert bank_path.read_text() == before_text
+    assert load_answers(bank_path).hash == before_hash
+    conn = store.connect(db)
+    assert store.get_plan(conn, "Acme", "1")["answers_hash"] == before_hash
+    conn.close()
+
+
+def test_uploading_a_posting_resume_replans_that_posting_only(tmp_path, monkeypatch):
+    db, h = _resume_handler(tmp_path, monkeypatch)
+    conn = store.connect(db)
+    _posting(conn, job="2", title="Platform Engineer")
+    conn.commit()
+    conn.close()
+    h._api_prefill({"company": "Acme", "ats_job_id": "2"})
+
+    conn = store.connect(db)
+    other = dict(store.get_plan(conn, "Acme", "2"))
+    conn.close()
+
+    res = h._api_posting_resume({"company": "Acme", "ats_job_id": "1",
+                                 "filename": "a.pdf", "content_b64": _b64(PDF)})
+    conn = store.connect(db)
+    mine = store.get_plan(conn, "Acme", "1")
+    assert mine["resume_key"] == res["filename"]
+    plan = json.loads(mine["plan"])
+    resume_entry = [e for e in plan if e["question_key"] == "resume"][0]
+    assert res["filename"] in resume_entry["value"]
+    # The other posting is untouched, and still on the bank's resume.
+    assert dict(store.get_plan(conn, "Acme", "2")) == other
+    assert store.get_plan(conn, "Acme", "2")["resume_key"] is None
+    conn.close()
+
+
+def test_clearing_a_posting_resume_falls_back_to_the_bank(tmp_path, monkeypatch):
+    db, h = _resume_handler(tmp_path, monkeypatch)
+    res = h._api_posting_resume({"company": "Acme", "ats_job_id": "1",
+                                 "filename": "a.pdf", "content_b64": _b64(PDF)})
+    assert h._api_posting_resume_clear({"company": "Acme", "ats_job_id": "1"})["ok"] is True
+
+    conn = store.connect(db)
+    assert store.get_posting_resume(conn, "Acme", "1") is None
+    plan = store.get_plan(conn, "Acme", "1")
+    assert plan["resume_key"] is None
+    resume_entry = [e for e in json.loads(plan["plan"])
+                    if e["question_key"] == "resume"][0]
+    assert resume_entry["value"].endswith("resume.pdf")
+    conn.close()
+    assert not (tmp_path / "resumes" / res["filename"]).exists()
+    # Clearing something that was never set is a refusal, not a silent success.
+    assert h._api_posting_resume_clear({"company": "Acme", "ats_job_id": "1"})["ok"] is False
+
+
+def test_a_missing_override_file_reads_as_no_override_not_as_an_error(tmp_path, monkeypatch):
+    """Raising here would surface with a browser already sitting on an open form."""
+    from jobtracker import resumes
+
+    db, h = _resume_handler(tmp_path, monkeypatch)
+    res = h._api_posting_resume({"company": "Acme", "ats_job_id": "1",
+                                 "filename": "a.pdf", "content_b64": _b64(PDF)})
+    (tmp_path / "resumes" / res["filename"]).unlink()
+    conn = store.connect(db)
+    assert resumes.override_for(conn, "Acme", "1") is None
+    conn.close()
+
+
+def test_the_upload_cap_applies_to_every_route_that_carries_a_file():
+    """A second upload route left out of the set reads its body as {} and reports "no
+    file" — a correct-looking error for entirely the wrong reason."""
+    assert server._UPLOAD_ROUTES == {"/api/resume", "/api/posting-resume"}
+
+
+# -- the gap split ------------------------------------------------------------------
+def _gaps_at(conn, key, ask, companies, first_seen="2026-08-01"):
+    for company in companies:
+        store.record_gap(conn, question_key=key, ask=ask, field_type="text",
+                         company=company, now=first_seen)
+
+
+def test_a_question_two_employers_ask_is_generic_and_one_employers_is_not(tmp_path):
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "how_did_you_hear", "How did you hear about us?", ["Stripe", "Ramp"])
+    _gaps_at(conn, "why_stripe", "Why Stripe?", ["Stripe"])
+    conn.commit()
+    page = server.render_settings(conn, tmp_path / "answers.yaml")
+    conn.close()
+    assert page.index("Asked everywhere") < page.index("How did you hear about us?")
+    assert page.index("Only Stripe asks") < page.index("Why Stripe?")
+    assert page.index("How did you hear about us?") < page.index("Only Stripe asks")
+
+
+def test_a_canonical_field_is_generic_even_at_one_employer(tmp_path):
+    """A first sighting of "work authorization" is still an answer worth writing once."""
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "work_authorization", "Authorized to work in the US?", ["Stripe"])
+    conn.commit()
+    page = server.render_settings(conn, tmp_path / "answers.yaml")
+    conn.close()
+    assert "Asked everywhere" in page
+    assert "Only Stripe asks" not in page
+
+
+def test_generic_gaps_are_ordered_by_how_many_employers_ask_them(tmp_path):
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "rare", "Rare question?", ["Stripe", "Ramp"])
+    _gaps_at(conn, "common", "Common question?", ["Stripe", "Ramp", "Acme", "Figma"])
+    conn.commit()
+    page = server.render_settings(conn, tmp_path / "answers.yaml")
+    conn.close()
+    assert page.index("Common question?") < page.index("Rare question?")
+    assert "4 employers" in page
+
+
+def test_every_gap_keeps_its_answer_box_and_save_button_in_both_lists(tmp_path):
+    """The split decides ordering and nothing else — which is why `_JS`'s save branch
+    needed no change at all."""
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "how_did_you_hear", "How did you hear about us?", ["Stripe", "Ramp"])
+    _gaps_at(conn, "why_stripe", "Why Stripe?", ["Stripe"])
+    conn.commit()
+    page = server.render_settings(conn, tmp_path / "answers.yaml")
+    conn.close()
+    for key in ("how_did_you_hear", "why_stripe"):
+        assert f'<input class=answer type=text placeholder=\'Your answer\' data-key="{key}"' in page
+        assert f'<button class=save data-key="{key}">' in page

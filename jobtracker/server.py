@@ -29,12 +29,9 @@ precisely so that config errors are loud rather than silent.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import html
 import json
 import logging
-import os
 import signal
 import sqlite3
 import threading
@@ -50,6 +47,7 @@ from . import (
     config,
     dashboard as dashboard_mod,
     rank as rank_mod,
+    resumes,
     safewrite,
     store,
     tuning,
@@ -62,22 +60,16 @@ log = logging.getLogger("jobtracker.serve")
 
 MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
 
-# The resume upload, base64'd inside a JSON body — so the wire cost is ~4/3 of the file.
-# 6 MB of body is comfortably over any real resume and still bounded.
-MAX_UPLOAD = 6 * 1024 * 1024
+# The body cap for routes that carry a file. It is a *set*, not one path: a second upload
+# route added without joining this set silently reads its body as `{}` and reports "no
+# file" — a correct-looking error for entirely the wrong reason.
+_UPLOAD_ROUTES = {"/api/resume", "/api/posting-resume"}
+MAX_UPLOAD = resumes.MAX_UPLOAD
 
 # Held for as long as a prefilled window is open. One browser profile directory, which
 # Chromium locks, so two at once is not a thing that can work — and the second failure
 # would happen on a worker thread where nothing can report it back to the click.
 _APPLY_LOCK = threading.Lock()
-
-# What a resume may be. An allowlist rather than a blocklist, and checked before anything
-# reaches disk: this file is written into a directory the pipeline reads on every run.
-RESUME_TYPES = {
-    ".pdf": b"%PDF-",
-    # DOCX is a zip. `PK\x03\x04` is the local file header every one starts with.
-    ".docx": b"PK\x03\x04",
-}
 
 
 # -- rendering (pure reads, testable without a server) ------------------------------
@@ -193,30 +185,29 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     p.extend(_identity_card(answers))
     p.extend(_resume_card(answers))
 
+    from .tasks.prefill import gap_ask_count, split_gaps
+
     p.append(f"<h2>Unanswered questions ({len(gaps)})</h2>")
     if not gaps:
         p.append("<p class=note>Nothing outstanding. Every field prefill has seen so "
                  "far has an answer.</p>")
-    for gap in gaps:
-        options = gap["options"] or ""
-        p.append("<div class=gap>")
-        p.append(f"<div class=ask>{html.escape(gap['ask'])}</div>")
-        p.append(
-            "<div class=note>"
-            f"asked by {html.escape(gap['seen_on'])} · type {html.escape(gap['type'])}"
-            f" · first seen {html.escape(gap['first_seen'])}</div>"
-        )
-        if options:
-            p.append(f"<div class=note>one of: {html.escape(options)}</div>")
-        # The key travels in a data attribute rather than being interpolated into a
-        # handler — the question text comes from a third-party ATS.
-        p.append(
-            f"<div class=row><input class=answer type=text placeholder='Your answer' "
-            f"data-key=\"{html.escape(gap['question_key'], quote=True)}\">"
-            f"<button class=save data-key=\"{html.escape(gap['question_key'], quote=True)}\">"
-            "Save</button></div>"
-        )
-        p.append("</div>")
+
+    # Two lists, because they are worth two different amounts of your time. A question
+    # nine employers ask is answered once and fills nine forms forever; a question only
+    # Stripe asks is worth exactly one application. Sorting the first by how many ask is
+    # the whole point — that is the order in which answering pays.
+    generic, per_company = split_gaps(gaps)
+    if generic:
+        p.append(f"<h3>Asked everywhere <span class=count>{len(generic)}</span></h3>")
+        p.append("<p class=note>Answer one of these once and every employer that asks "
+                 "it is filled in from then on. Most-asked first.</p>")
+        for gap in generic:
+            p.extend(_gap_card(gap, gap_ask_count(gap)))
+    for company, rows in per_company:
+        p.append(f"<h3>Only {html.escape(company)} asks "
+                 f"<span class=count>{len(rows)}</span></h3>")
+        for gap in rows:
+            p.extend(_gap_card(gap, 1))
 
     if answers is not None:
         p.append(f"<h2>Answers you have written ({len(answers.answerable)})</h2>")
@@ -259,6 +250,9 @@ def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
         "<body><div class=wrap>"
         f"<h1>Applications {dashboard_mod.version_chip()}</h1>", _NAV,
     ]
+    # Above the blank form on purpose: work the system is asking you to confirm outranks
+    # a form asking you to type something in from scratch.
+    p.extend(_mail_proposals_card(conn))
     p.extend(_add_application_card(today))
 
     if not apps:
@@ -306,6 +300,68 @@ def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
 
     p.append(f"<script>{_JS}</script></div></body></html>")
     return "\n".join(p)
+
+
+def _mail_proposals_card(conn: sqlite3.Connection) -> list:
+    """What your inbox suggests happened, awaiting your ruling.
+
+    Nothing here has been written to `applications`. Accepting is what writes, which is
+    the whole shape of this subsystem — the narrower decides that a message is relevant,
+    the model decides what it means, and you decide whether it happened.
+
+    Everything rendered comes from a stranger with your email address, so every field is
+    escaped and the message id travels in a data attribute rather than a handler.
+    """
+    rows = store.pending_mail_proposals(conn)
+    if not rows:
+        # No zero-state line. A permanent "0 from your inbox" stops being read long
+        # before it has anything to say.
+        return []
+
+    p = [f"<h2>From your mail <span class=count>{len(rows)}</span>"
+         '<span class="sub">proposed — nothing has been written yet</span></h2>',
+         '<div class="apps">']
+    for row in rows:
+        job = row["ats_job_id"] or ""
+        status = row["status"]
+        p.append(f'<article class="app prop" data-message='
+                 f'"{html.escape(row["message_id"], quote=True)}">')
+        bits = [f'<span class="st st-{html.escape(status)}">{html.escape(status)}</span>',
+                f'<span>{html.escape(row["company"])}</span>']
+        if row["sent_on"]:
+            bits.append(f'<span>{html.escape(row["sent_on"])}</span>')
+        bits.append(f'<span class="src">{html.escape(row["from_addr"])}</span>')
+        p.append(f'<div class="meta">{"<span>·</span>".join(bits)}</div>')
+        p.append(f'<div class="subj">{html.escape(row["subject"] or "(no subject)")}</div>')
+        if row["evidence"]:
+            p.append(f'<div class="quote">“{html.escape(row["evidence"])}”</div>')
+        if row["snippet"]:
+            p.append(f'<div class="note">{html.escape(row["snippet"])}</div>')
+
+        choices = json.loads(row["choices"] or "[]")
+        if not job:
+            # The narrower could not tell which application this is about, and the model
+            # declined to. Guessing would put a stage on the wrong job; asking costs one
+            # dropdown.
+            p.append('<label class=note>Which application '
+                     '<select class=propjob><option value="">choose…</option>')
+            for choice in choices:
+                app = store.get_application(conn, row["company"], choice)
+                label = app["title"] if app else choice
+                p.append(f'<option value="{html.escape(choice, quote=True)}">'
+                         f"{html.escape(label)}</option>")
+            p.append("</select></label>")
+        else:
+            app = store.get_application(conn, row["company"], job)
+            if app is not None:
+                p.append(f'<div class=note>{html.escape(app["title"])} '
+                         f'— currently <strong>{html.escape(app["status"])}</strong></div>')
+        p.append('<div class="row">'
+                 "<button class=app-accept>Accept</button>"
+                 "<button class=app-dismiss>Not this</button></div>")
+        p.append("</article>")
+    p.append("</div>")
+    return p
 
 
 def _add_application_card(today: str) -> list:
@@ -488,6 +544,35 @@ def _identity_card(answers) -> list:
     return p
 
 
+def _gap_card(gap, asked_by: int) -> list:
+    """One unanswered question, with the box you answer it in.
+
+    Identical markup in both lists on purpose. The split above decides ordering and
+    nothing else, so `div.gap`, `input.answer[data-key]` and `button.save[data-key]` are
+    the same everywhere — which is why `_JS`'s save branch needed no change at all: it
+    looks the input up by key, and `question_key` is the table's primary key.
+    """
+    p = ["<div class=gap>"]
+    p.append(f"<div class=ask>{html.escape(gap['ask'])}</div>")
+    note = (f"asked by {html.escape(gap['seen_on'])} · type {html.escape(gap['type'])}"
+            f" · first seen {html.escape(gap['first_seen'])}")
+    if asked_by > 1:
+        note += f" · <strong>{asked_by} employers</strong>"
+    p.append(f"<div class=note>{note}</div>")
+    if gap["options"]:
+        p.append(f"<div class=note>one of: {html.escape(gap['options'])}</div>")
+    # The key travels in a data attribute rather than being interpolated into a
+    # handler — the question text comes from a third-party ATS.
+    key = html.escape(gap["question_key"], quote=True)
+    p.append(
+        f"<div class=row><input class=answer type=text placeholder='Your answer' "
+        f'data-key="{key}">'
+        f'<button class=save data-key="{key}">Save</button></div>'
+    )
+    p.append("</div>")
+    return p
+
+
 def _resume_card(answers) -> list:
     """Upload a resume, or see the one already attached.
 
@@ -636,7 +721,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         # The cap is per-route rather than global: only the upload carries a file, and
         # leaving 6 MB open on every endpoint would let a decision POST buffer one.
-        payload = self._read_json(MAX_UPLOAD if path == "/api/resume" else MAX_BODY)
+        payload = self._read_json(MAX_UPLOAD if path in _UPLOAD_ROUTES else MAX_BODY)
         try:
             if path == "/api/decision":
                 self._send_json(self._api_decision(payload))
@@ -652,6 +737,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_identity(payload))
             elif path == "/api/resume":
                 self._send_json(self._api_resume(payload))
+            elif path == "/api/posting-resume":
+                self._send_json(self._api_posting_resume(payload))
+            elif path == "/api/posting-resume/clear":
+                self._send_json(self._api_posting_resume_clear(payload))
+            elif path == "/api/prefill":
+                self._send_json(self._api_prefill(payload))
             elif path == "/api/apply-to":
                 self._send_json(self._api_apply_to(payload))
             elif path == "/api/application":
@@ -660,6 +751,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_application_meta(payload))
             elif path == "/api/application/delete":
                 self._send_json(self._api_application_delete(payload))
+            elif path == "/api/mail/accept":
+                self._send_json(self._api_mail_accept(payload))
+            elif path == "/api/mail/dismiss":
+                self._send_json(self._api_mail_dismiss(payload))
             else:
                 self._send_json({"ok": False, "error": "unknown endpoint"}, 404)
         except Exception as exc:  # noqa: BLE001
@@ -974,6 +1069,89 @@ class Handler(BaseHTTPRequestHandler):
         log.info("deleted application %s/%s", company, job_id)
         return {"ok": True, "detail": "deleted"}
 
+    def _api_mail_accept(self, payload: dict) -> dict:
+        """Agree with what a message said, and move the application.
+
+        The only path from the mailbox into `applications`. Everything is validated
+        before the single commit, so a refusal touches neither table — a half-recorded
+        interview round is worse than one you have to enter by hand, because you would
+        believe it saved.
+
+        The event note is composed here, from the subject and the date. The model's quote
+        stays where it was written, as the evidence on the card: DESIGN.md §8.4's rule
+        that no sentence the model composed reaches a field, with your own application
+        history as the field.
+        """
+        message_id = str(payload.get("message_id") or "").strip()
+        if not message_id:
+            return {"ok": False, "error": "message_id is required"}
+
+        conn = self._conn()
+        try:
+            proposal = store.get_mail_proposal(conn, message_id)
+            if proposal is None:
+                return {"ok": False, "error": "no such proposal"}
+            if proposal["resolution"] != "pending":
+                return {"ok": False,
+                        "error": f"already {proposal['resolution']}"}
+            if proposal["status"] not in store.APPLICATION_STATUSES:
+                return {"ok": False, "error": "unknown status"}
+
+            job_id = (str(payload.get("ats_job_id") or "").strip()
+                      or proposal["ats_job_id"] or "")
+            if not job_id:
+                return {"ok": False,
+                        "error": "choose which application this is about"}
+            app = store.get_application(conn, proposal["company"], job_id)
+            if app is None:
+                return {"ok": False, "error": "no such application"}
+
+            cand = conn.execute(
+                "SELECT subject, sent_on FROM mail_candidates WHERE message_id=?",
+                (message_id,),
+            ).fetchone()
+            subject = (cand["subject"] if cand else "") or "(no subject)"
+            sent_on = (cand["sent_on"] if cand else "") or ""
+            note = f"from mail: {subject[:80]}" + (f" ({sent_on})" if sent_on else "")
+
+            now = datetime.now().isoformat(timespec="seconds")
+            store.advance_application(
+                conn, proposal["company"], job_id, app["title"],
+                proposal["status"], now, note=note,
+            )
+            store.resolve_mail_proposal(conn, message_id, "accepted", now)
+            conn.commit()
+            from .cli import applications_total
+
+            applications_total.add(1, {"status": proposal["status"]})
+        finally:
+            conn.close()
+        log.info("accepted mail proposal: %s -> %s", proposal["company"],
+                 proposal["status"])
+        return {"ok": True, "status": proposal["status"]}
+
+    def _api_mail_dismiss(self, payload: dict) -> dict:
+        """Disagree. The row stays, marked dismissed — deleting it is what would let the
+        next scan propose the same message all over again."""
+        message_id = str(payload.get("message_id") or "").strip()
+        if not message_id:
+            return {"ok": False, "error": "message_id is required"}
+        conn = self._conn()
+        try:
+            proposal = store.get_mail_proposal(conn, message_id)
+            if proposal is None:
+                return {"ok": False, "error": "no such proposal"}
+            if proposal["resolution"] != "pending":
+                return {"ok": False, "error": f"already {proposal['resolution']}"}
+            store.resolve_mail_proposal(
+                conn, message_id, "dismissed",
+                datetime.now().isoformat(timespec="seconds"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"ok": True, "detail": "dismissed"}
+
     def _api_rule(self, payload: dict) -> dict:
         phrase = str(payload.get("phrase") or "").strip()
         key = str(payload.get("list") or "exclude_titles")
@@ -1103,37 +1281,15 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "save your name and email first — the upload "
                                           "needs an answer bank to record the path in"}
 
-        filename = str(payload.get("filename") or "").strip()
-        b64 = str(payload.get("content_b64") or "")
-        if not filename or not b64:
-            return {"ok": False, "error": "no file"}
-
-        # The extension decides the name we write, so it can never come from the client's
-        # string — a filename is attacker-shaped input even when the attacker is you with
-        # a badly named file. Only the suffix is read, and only from an allowlist.
-        suffix = Path(filename).suffix.lower()
-        if suffix not in RESUME_TYPES:
-            return {"ok": False,
-                    "error": f"{suffix or 'that'} is not a resume; expected "
-                             f"{' or '.join(sorted(RESUME_TYPES))}"}
         try:
-            blob = base64.b64decode(b64, validate=True)
-        except (ValueError, binascii.Error):
-            return {"ok": False, "error": "could not decode the upload"}
-        if not blob:
-            return {"ok": False, "error": "the file is empty"}
-        if len(blob) > MAX_UPLOAD:
-            return {"ok": False, "error": f"{len(blob) // 1024} KB is over the "
-                                          f"{MAX_UPLOAD // (1024 * 1024)} MB limit"}
-        if not blob.startswith(RESUME_TYPES[suffix]):
-            # Content, not just the name. A .docx that is really something else would be
-            # attached to a job application and read by a person.
-            return {"ok": False, "error": f"that is not really a {suffix} file"}
+            blob, suffix = resumes.validate_upload(
+                payload.get("filename"), payload.get("content_b64")
+            )
+        except resumes.RefusedUpload as exc:
+            return {"ok": False, "error": str(exc)}
 
         target = path.parent / f"resume{suffix}"
-        tmp = target.with_suffix(target.suffix + ".part")
-        tmp.write_bytes(blob)
-        os.replace(tmp, target)
+        resumes.write_atomic(target, blob)
 
         try:
             safewrite.write_text(path, set_resume(path.read_text(), target.name),
@@ -1143,6 +1299,163 @@ class Handler(BaseHTTPRequestHandler):
 
         log.info("resume saved to %s (%d bytes)", target, len(blob))
         return {"ok": True, "filename": target.name, "bytes": len(blob)}
+
+    def _rebuild_plan(self, conn, company: str, ats_job_id: str) -> dict:
+        """Re-plan one posting from what is already known. No model, no network.
+
+        This server handles one request at a time, so anything that could block — a
+        rate-limited form fetch, a router call with a 180-second timeout — would freeze
+        the page for every other tab. So this pass is CPU and SQLite only, and it refuses
+        rather than fetching when a form has never been learned.
+
+        That is much less of a downgrade than it sounds. Every key the model has ever
+        matched was written onto `form_fields.question_key`, and `known_question_keys`
+        replays those as alias hits — the same mechanism `browser.fill_application`
+        already relies on. The only thing a full run can still do is ask about a field
+        the model has *never seen*, so this pass's gap count can only be equal or higher
+        than the nightly one. It can understate readiness; it can never overstate it.
+
+        `PrefillTask.apply` does the writing, so the button and the nightly run cannot
+        drift about what a plan is.
+        """
+        from .tasks.base import TaskContext, TaskUnit
+        from .tasks.prefill import PrefillTask, _field_of, plan_from_fields
+
+        row = conn.execute(
+            "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
+            (company, ats_job_id),
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "error": "no such posting"}
+
+        answers, error = _load_answers_quietly(Path(self.server.answers_path))
+        if answers is None:
+            return {"ok": False, "error": error or
+                    "no answer bank yet — fill in your name and email under Settings"}
+
+        cached = store.form_fields_for(conn, company)
+        if not cached:
+            # Zero fields is "we have never read this form", never "0/0, nothing to do".
+            # Absence read as success is the failure DESIGN.md §3.4 exists to prevent.
+            return {"ok": False,
+                    "error": f"no application form learned for {company} yet — press "
+                             f"Open prefilled once and this fills in"}
+
+        base_hash = answers.hash
+        answers, override = resumes.effective(conn, answers, company, ats_job_id)
+        # `known_question_keys` is what makes a rules-only rebuild worth doing: every
+        # key the model has ever matched was written onto `form_fields.question_key`,
+        # so its past decisions replay here as alias hits with no call at all.
+        alias_map = dict(answers.by_alias)
+        alias_map.update(store.known_question_keys(conn))
+
+        result = plan_from_fields(
+            [_field_of(r) for r in cached], answers, alias_map, cached[0]["source"]
+        )
+        unit = TaskUnit(
+            task="prefill", company=company, ats_job_id=ats_job_id,
+            unit_key=base_hash, title=row["title"],
+            payload={"resume_override": override.name if override else None},
+        )
+        # `ctx.answers` must be the BANK, not the copy: `apply` stores its hash, and the
+        # copy's differs by the override's basename.
+        bank, _ = _load_answers_quietly(Path(self.server.answers_path))
+        PrefillTask().apply(conn, unit, result, TaskContext(today=_today(), answers=bank))
+        conn.commit()
+        return {
+            "ok": True,
+            "fields": len(result.entries),
+            "gaps": len(result.gaps),
+            "resume": (override.name if override else
+                       (bank.resume.name if bank and bank.resume else "")),
+        }
+
+    def _api_prefill(self, payload: dict) -> dict:
+        """Rebuild one posting's plan against the answers and resume as they stand now.
+
+        Deliberately not `task.pending()` filtered down to this posting, which is how
+        `prepare` does it: `matches_needing_prefill` excludes a plan whose `answers_hash`
+        already matches, so that route returns zero units for a current plan — and the
+        button would silently do nothing in exactly the case it exists for. That is the
+        apply-to regression's shape, and it is avoided by building the unit directly.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+        conn = self._conn()
+        try:
+            return self._rebuild_plan(conn, company, job_id)
+        finally:
+            conn.close()
+
+    def _api_posting_resume(self, payload: dict) -> dict:
+        """Attach a resume to one posting. The bank's stays the default for everything else.
+
+        Same validation as `/api/resume` — it is literally the same function — and the
+        same ordering rule: the file lands before anything points at it.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
+                (company, job_id),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "error": "no such posting"}
+            try:
+                blob, suffix = resumes.validate_upload(
+                    payload.get("filename"), payload.get("content_b64")
+                )
+            except resumes.RefusedUpload as exc:
+                return {"ok": False, "error": str(exc)}
+
+            name = resumes.stored_name(company, job_id, suffix)
+            resumes.write_atomic(resumes.path_for(name), blob)
+            store.set_posting_resume(conn, company, job_id, name, len(blob), _today())
+            conn.commit()
+            log.info("resume for %s %s saved as %s (%d bytes)",
+                     company, job_id, name, len(blob))
+            # Re-plan immediately, so the card can say what changed rather than telling
+            # you to wait for tonight.
+            out = self._rebuild_plan(conn, company, job_id)
+            out.setdefault("ok", True)
+            out["filename"] = name
+            out["bytes"] = len(blob)
+            return out
+        finally:
+            conn.close()
+
+    def _api_posting_resume_clear(self, payload: dict) -> dict:
+        """Go back to the answer bank's resume for this posting."""
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+        conn = self._conn()
+        try:
+            row = store.get_posting_resume(conn, company, job_id)
+            if row is None:
+                return {"ok": False, "error": "this posting has no resume of its own"}
+            store.clear_posting_resume(conn, company, job_id)
+            conn.commit()
+            path = resumes.path_for(row["filename"])
+            # Unlink after the row is gone: an orphaned file is inert, while a row
+            # pointing at a deleted file is a lookup that has to log every time.
+            try:
+                path.unlink()
+            except OSError:
+                log.warning("could not remove %s", path)
+            out = self._rebuild_plan(conn, company, job_id)
+            out.setdefault("ok", True)
+            return out
+        finally:
+            conn.close()
 
     def _api_apply_to(self, payload: dict) -> dict:
         """Open one application in a browser, filled in. Returns before it finishes.
@@ -1178,6 +1491,7 @@ class Handler(BaseHTTPRequestHandler):
             plan = store.get_plan(conn, company_name, job_id)
             plan_json = plan["plan"] if plan else None
             url = row["url"]
+            override = resumes.override_for(conn, company_name, job_id)
         finally:
             conn.close()
 
@@ -1194,6 +1508,19 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": error or (
                 f"no answer bank at {self.server.answers_path} — add your name and "
                 "email on the Settings tab to create one")}
+
+        # Both halves of the override, and both are needed. The replaced `Answers` covers
+        # DOM fields no stored plan ever saw; `retarget_resume` covers the ones it did,
+        # because `browser._plan_index` lets a stored plan value win over a fresh
+        # `resolve_field`. Applied identically in `cli.cmd_apply_to`, so the button and
+        # the terminal cannot disagree about which file goes out under your name.
+        if override is not None:
+            from dataclasses import replace as _replace
+
+            from .tasks.prefill import retarget_resume
+
+            answers = _replace(answers, resume=override)
+            plan_json = retarget_resume(plan_json, str(override))
 
         from . import browser as browser_mod
 
@@ -1329,6 +1656,14 @@ gap:.5rem;margin-top:.75rem;align-items:end}
 .appform .acts{display:flex;gap:.4rem;align-items:end}
 .app .danger{border-color:rgba(220,53,69,.6);opacity:.75}
 .app .danger:hover{opacity:1;color:#dc3545}
+/* A proposal from the mailbox. Marked as unwritten — the border is the reminder that
+   nothing on this card has touched your application history yet. */
+.app.prop{border-left:3px solid var(--accent)}
+.app.prop .subj{font-weight:600;margin-top:.35rem}
+.app.prop .quote{margin:.4rem 0;padding-left:.7rem;border-left:2px solid var(--rule);
+font-size:.88rem;color:var(--ink-2)}
+.app.prop .row{display:flex;gap:.4rem;margin-top:.6rem}
+.app.prop select{margin-left:.4rem}
 """
 
 _EXTRA_CSS = """
@@ -1460,10 +1795,33 @@ document.addEventListener('click', async (e) => {
     location.reload();
     return;
   }
-  // No `button.apply-to` branch here on purpose. This script is emitted by the tuning,
-  // settings and applications pages only; that button is rendered by the dashboard,
+  const acc = e.target.closest('button.app-accept');
+  if (acc) {
+    const card = acc.closest('.prop');
+    // Only present when the narrower could not tell which application it is. Sending ''
+    // is what makes the server refuse rather than guess.
+    const sel = card.querySelector('select.propjob');
+    const res = await post('/api/mail/accept', {
+      message_id: card.dataset.message, ats_job_id: sel ? sel.value : ''});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+
+  const nope = e.target.closest('button.app-dismiss');
+  if (nope) {
+    const card = nope.closest('.prop');
+    const res = await post('/api/mail/dismiss', {message_id: card.dataset.message});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+
+  // No `button.apply-to`, `button.pick-rebuild`, `button.pick-attach` or
+  // `button.pick-detach` branch here on purpose. This script is emitted by the tuning,
+  // settings and applications pages only; those buttons are rendered by the dashboard,
   // whose script is dashboard._JS. A handler here never ran, which is exactly how the
-  // button came to do nothing at all.
+  // Open prefilled button came to do nothing at all.
 });
 """
 

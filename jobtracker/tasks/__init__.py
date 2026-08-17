@@ -10,6 +10,12 @@ Priority is the pipeline's dependency chain, not a preference:
     prefill 30   prefill the best matches    -> consumes scores
 
 so "work the next available task" and "keep every stage drained" are one instruction.
+
+    inbox   40   read replies from employers -> proposes application updates
+
+`inbox` is the exception, and it says so: it is not in that chain at all. It goes last
+because its queue refills from an external stream on its own schedule, so anywhere
+earlier a busy mailbox would starve the pipeline's own stages.
 """
 
 from .base import (  # noqa: F401
@@ -25,6 +31,7 @@ from .base import (  # noqa: F401
 from . import level  # noqa: F401  (side effect: register())
 from . import judge  # noqa: F401  (side effect: register())
 from . import prefill  # noqa: F401  (side effect: register())
+from . import inbox  # noqa: F401  (side effect: register())
 from .runner import (  # noqa: F401
     DEFAULT_CONCURRENCY,
     Candidate,

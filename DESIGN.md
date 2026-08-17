@@ -289,7 +289,7 @@ postings today."
 ## 8. Where the model still earns its place
 
 The rewrite does not eliminate the language model. It relocates it from the runtime to
-bounded roles — two when this was written, four now. Since 2026-08-13 they share one
+bounded roles — two when this was written, five now. Since 2026-08-13 they share one
 mechanism: each is a **task** (docs/tasks.md), which is a prompt, a schema, a parser, a
 query for what still needs asking, and a write. A scheduler picks between them by
 priority, and priority is the pipeline's own dependency order. The bounds below did not
@@ -398,7 +398,8 @@ change; what changed is that they are now stated once instead of three times.
    problem §3.2 reserves for a model, and exactly the kind of rule you cannot finish
    writing.
 
-   It is the most tightly bounded of the four. Its schema is an **enum of keys the
+   It is the most tightly bounded of them all — role 5 below has an enum too, but it also
+   returns a quote, and this one returns no text at all. Its schema is an **enum of keys the
    candidate already wrote, plus `none`**, so the model cannot produce text: there is no
    code path by which a sentence it composed reaches a form field. It names a key; the
    value comes from `answers.yaml`. A key it names still has to fit the field — a
@@ -408,11 +409,43 @@ change; what changed is that they are now stated once instead of three times.
    a question already answered elsewhere resolves with no call at all, so the steady
    state is zero model calls per form.
 
-   The general principle across all four: the model is allowed to *read*, never to
+5. **Inbox reading** (added 2026-08-16) — **implemented** as the `inbox` task; see
+   `docs/mail.md`. An employer's reply is prose, arriving on no schedule, saying "we'd
+   like to find time to chat" or "we've decided to move forward with other candidates".
+   No rule finishes reading that, and until something did, `applications` had exactly one
+   writer — you — and `next_action` went stale first.
+
+   Structurally this is role 2 again: **a deterministic detector, and the model as the
+   exception handler behind it**. But the detector is a different animal. `repair`'s
+   trigger is a health status this system computed about itself; here it is a *matcher
+   against your own data* — every index is built from rows in `applications`, so a message
+   can never be a candidate for a company you never applied to. That is not a rule
+   enforced somewhere, it is the shape of the data, and it is what bounds the cost of
+   pointing a language model at a mailbox.
+
+   Three bounds on the answer, and the third is new to this list. Its `status` is an enum
+   of the seven application stages plus `none`. Its `application` is an enum of ids the
+   narrower offered, the §8.4 shape again. And its one free-text field, a quote, must
+   **appear in the message verbatim** — `repair`'s rule that a proposed slug must appear
+   on the page it was read from, applied to prose. That is what keeps a fabricated
+   rejection off the review list.
+
+   Then it proposes, and nothing else. Accepting is a separate human action and the only
+   path from the mailbox into `applications`; even the event note is composed by Python,
+   so nothing the model wrote reaches your history. §7.3 now covers a third medium too:
+   an unreadable maildir is not an empty inbox, and `mail` exits 2 rather than reporting
+   "no new mail today".
+
+   The honest limit is mail whose identity lives somewhere nothing can read it — a
+   rendered-image newsletter, an agency sending from a domain you never applied at, a
+   forwarded thread whose context is below the fold.
+
+   The general principle across all five: the model is allowed to *read*, never to
    *decide*. Level extraction reads a description for a fact the title omitted; ranking
    reads it for a fit judgment no rule could encode; question matching reads a label and
-   points at an answer already written. In every case deterministic code holds the
-   verdict, the ordering, the text, and the reason.
+   points at an answer already written; inbox reading reads a reply and proposes what it
+   meant. In every case deterministic code holds the verdict, the ordering, the text, and
+   the reason.
 
 ---
 
@@ -457,6 +490,7 @@ Planned expansion, in descending value-per-hour:
 | Tuning UI (`jobtracker serve`) | **Complete** — stdlib only, localhost, writes back |
 | Ambiguity pass (§6) — local, provider-pluggable | **Complete** — `docs/llm.md`; vLLM first |
 | Slug-repair agent (§8) | **Complete** — `docs/repair.md`; regex-first, model as fallback |
+| Inbox reading (§8.5) | **Complete** — `docs/mail.md`; local Maildir, read-only, proposes only |
 | Aggregator sources (§9) | Deferred — still never fetched |
 
 The verified slug data is the asset worth preserving from version 1. The audit that

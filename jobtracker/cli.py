@@ -21,6 +21,8 @@ Subcommands:
   decide        record a judgment on one posting; --pin makes it an override
   apply         record an application and its outcome; --manual for an untracked job
   applications  list what you applied to, grouped by what needs doing
+  mail          read the job-search mailbox and propose application updates; it never
+                writes to the mailbox. `work --task inbox` is what reads the candidates
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
   repair        read careers pages for broken boards' new slugs; --write applies
   add-company   append a curated entry to companies.yaml
@@ -814,6 +816,9 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
         tiers=rank_mod.tier_lookup(companies),
         companies={c.name: c for c in companies},
         fetcher=fetcher,
+        # A path, not an open mailbox. `inbox` inspects it to know whether it is
+        # configured at all, and reads nothing — the reading is `jobtracker mail`'s job.
+        maildir=getattr(args, "maildir", None) or config.MAILDIR,
     )
 
 
@@ -1259,7 +1264,7 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
     It never submits. It fills what it knows, outlines what it does not, and leaves the
     window open — see docs/prefill.md for why that boundary is where it is.
     """
-    from . import browser as browser_mod
+    from . import browser as browser_mod, resumes
 
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
@@ -1293,6 +1298,18 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
             # lose the model's question-matching for this form.
             log.info("no prefill plan stored — filling from the rules alone")
 
+        plan_json = plan["plan"] if plan else None
+        # This posting's own resume, if it has one. Both halves, exactly as
+        # `server._api_apply_to` does them — the terminal and the button must not
+        # disagree about which file goes out under your name.
+        override = resumes.override_for(conn, args.company, args.job_id)
+        if override is not None:
+            from .tasks.prefill import retarget_resume
+
+            answers = replace(answers, resume=override)
+            plan_json = retarget_resume(plan_json, str(override))
+            log.info("attaching this posting's own resume: %s", override.name)
+
         print(f"{row['company']} — {row['title']}")
         report = browser_mod.fill_application(
             conn,
@@ -1302,7 +1319,7 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
             answers=answers,
             today=today,
             user_data_dir=config.BROWSER_PROFILE,
-            plan_json=plan["plan"] if plan else None,
+            plan_json=plan_json,
             headless=args.headless,
         )
         if args.headless:
@@ -1560,6 +1577,139 @@ def cmd_applications(args: argparse.Namespace) -> int:
                 bits.append(f"{what} {'overdue by ' + str(-until) if until < 0 else 'in ' + str(until)}d")
             print(f"  {app['company']} · {app['title']}")
             print(f"    {' · '.join(bits)}")
+    return 0
+
+
+# -- mail --------------------------------------------------------------------------
+def cmd_mail(args: argparse.Namespace) -> int:
+    """Read the job-search mailbox, narrow it against what you applied to, and record
+    the candidates. Never writes to the mailbox.
+
+    This is the deterministic half, and it is to `work --task inbox` exactly what `check`
+    is to `level`: it does the I/O and caches what the model needs, so the task itself is
+    a pure read of `state.db` and an unmounted volume cannot silently shrink a queue.
+
+    `--list`, `--accept` and `--dismiss` never touch the maildir at all, so the whole
+    loop works from a machine with no mail on it.
+    """
+    from . import mail as mail_mod, maildir as maildir_mod
+
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    try:
+        if args.accept or args.dismiss:
+            return _mail_decide(conn, args)
+        if args.list:
+            return _mail_list(conn)
+
+        path = Path(args.maildir) if args.maildir else config.MAILDIR
+        if path is None:
+            print("error: no maildir configured — set $JOBTRACKER_MAILDIR or pass "
+                  "--maildir", file=sys.stderr)
+            return 1
+        if not maildir_mod.is_maildir(path):
+            # Not "0 messages". An unmounted volume reporting zero is the
+            # `greenhouse/hubspot` failure with a filesystem instead of a board.
+            print(f"error: {path} is not a maildir (no cur/ and new/)", file=sys.stderr)
+            return 1
+
+        apps = store.all_applications(conn)
+        if not apps:
+            print("no applications recorded yet — nothing to match mail against")
+            return 0
+        companies = config.load_companies(args.companies)
+        index = mail_mod.build_index(apps, companies)
+        known = store.known_message_ids(conn)
+
+        read = unreadable = skipped = new = 0
+        for item in maildir_mod.read_messages(path, limit=args.limit):
+            if not item.ok:
+                unreadable += 1
+                continue
+            read += 1
+            message = mail_mod.parse(item.raw)
+            if message is None:
+                unreadable += 1
+                continue
+            if message.message_id in known:
+                skipped += 1
+                continue
+            cand = mail_mod.narrow(message, index, since=args.since)
+            if cand is None:
+                continue
+            if store.record_mail_candidate(conn, cand, _today()):
+                new += 1
+        conn.commit()
+
+        parts = [f"read {read:,} messages", f"{skipped:,} already known",
+                 f"{new} new candidate(s)"]
+        if unreadable:
+            parts.append(f"{unreadable} unreadable")
+        print(" · ".join(parts))
+        if new:
+            print("\nrun `jobtracker work --task inbox` to have them read")
+        _mail_list(conn)
+        # A message that could not be read must never contribute to "no new mail today".
+        return EXIT_DEGRADED if unreadable else EXIT_OK
+    finally:
+        conn.close()
+
+
+def _mail_list(conn) -> int:
+    rows = store.pending_mail_proposals(conn)
+    if not rows:
+        print("\nno proposals awaiting review")
+        return 0
+    print(f"\n{len(rows)} proposal(s) awaiting review")
+    for row in rows:
+        where = row["ats_job_id"] or "(which application?)"
+        print(f"  {row['status']:<10} {row['company']} · {where}")
+        print(f"             {row['subject'][:70]!r}  {row['sent_on'] or ''}")
+        if row["evidence"]:
+            print(f"             “{row['evidence'][:80]}”")
+        print(f"             accept: jobtracker mail --accept {row['message_id']!r}")
+    return 0
+
+
+def _mail_decide(conn, args: argparse.Namespace) -> int:
+    message_id = args.accept or args.dismiss
+    proposal = store.get_mail_proposal(conn, message_id)
+    if proposal is None:
+        print(f"error: no proposal for {message_id}", file=sys.stderr)
+        return 1
+    if proposal["resolution"] != "pending":
+        print(f"error: already {proposal['resolution']}", file=sys.stderr)
+        return 1
+
+    now = datetime.now().isoformat(timespec="seconds")
+    if args.dismiss:
+        store.resolve_mail_proposal(conn, message_id, "dismissed", now)
+        conn.commit()
+        print(f"dismissed — {proposal['company']}")
+        return 0
+
+    job_id = args.job or proposal["ats_job_id"]
+    if not job_id:
+        print("error: this proposal does not say which application it is about; "
+              "pass --job ATS_JOB_ID", file=sys.stderr)
+        return 1
+    app = store.get_application(conn, proposal["company"], job_id)
+    if app is None:
+        print(f"error: no application {proposal['company']} / {job_id}", file=sys.stderr)
+        return 1
+
+    cand = conn.execute(
+        "SELECT subject, sent_on FROM mail_candidates WHERE message_id=?", (message_id,)
+    ).fetchone()
+    subject = (cand["subject"] if cand else "") or "(no subject)"
+    sent_on = (cand["sent_on"] if cand else "") or ""
+    note = f"from mail: {subject[:80]}" + (f" ({sent_on})" if sent_on else "")
+
+    store.advance_application(conn, proposal["company"], job_id, app["title"],
+                              proposal["status"], now, note=note)
+    store.resolve_mail_proposal(conn, message_id, "accepted", now)
+    conn.commit()
+    applications_total.add(1, {"status": proposal["status"]})
+    print(f"{proposal['company']} · {app['title']} → {proposal['status']}")
     return 0
 
 
@@ -1855,6 +2005,23 @@ def build_parser() -> argparse.ArgumentParser:
     apps_p = sub.add_parser("applications", help="list what you applied to")
     apps_p.add_argument("--db", default=None)
     apps_p.set_defaults(func=cmd_applications)
+
+    ml = sub.add_parser("mail", help="read the mailbox and propose application updates")
+    ml.add_argument("--maildir", default=None,
+                    help="default $JOBTRACKER_MAILDIR. Read-only, always.")
+    ml.add_argument("--db", default=None)
+    ml.add_argument("--since", default=None,
+                    help="ignore mail older than this ISO day")
+    ml.add_argument("--limit", type=int, default=None,
+                    help="stop after this many messages")
+    ml.add_argument("--list", action="store_true",
+                    help="show pending proposals; reads no mail")
+    ml.add_argument("--accept", default=None, metavar="MESSAGE_ID",
+                    help="agree, and move the application")
+    ml.add_argument("--job", default=None, metavar="ATS_JOB_ID",
+                    help="with --accept, when the proposal does not say which")
+    ml.add_argument("--dismiss", default=None, metavar="MESSAGE_ID")
+    ml.set_defaults(func=cmd_mail)
 
     r = sub.add_parser("report", help="re-render state.db without fetching")
     r.add_argument("--criteria", default=str(config.CRITERIA_YAML))

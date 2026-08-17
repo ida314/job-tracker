@@ -99,9 +99,20 @@ def test_priority_is_the_pipeline_dependency_order():
     Draining the earliest stage with work is therefore the same instruction as never
     letting a downstream stage starve; if this order is ever changed, that stops being
     true and the reason for the whole scheduler goes with it.
+
+    `inbox` is deliberately outside that chain and deliberately last — see the test
+    below.
     """
-    assert task_names() == ["level", "judge", "prefill"]
+    assert task_names()[:3] == ["level", "judge", "prefill"]
     assert [t.priority for t in all_tasks()] == sorted(t.priority for t in all_tasks())
+
+
+def test_inbox_runs_last_so_a_busy_mailbox_cannot_starve_the_pipeline():
+    """The mail queue refills from an external stream on a schedule nothing here
+    controls. Ahead of `level` a chatty inbox would keep the pipeline's own stages
+    permanently waiting for a queue that never drains."""
+    assert task_names()[-1] == "inbox"
+    assert get_task("inbox").priority > get_task("prefill").priority
 
 
 def test_the_first_task_with_work_wins(criteria, profile):

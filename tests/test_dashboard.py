@@ -391,7 +391,9 @@ def test_static_file_carries_no_application_controls():
     _applied(conn)
     doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
     assert "/api/application" not in doc
-    for cls in ("app-add", "app-save", "app-meta", "app-delete"):
+    assert "/api/mail" not in doc
+    for cls in ("app-add", "app-save", "app-meta", "app-delete",
+                "app-accept", "app-dismiss"):
         assert cls not in doc
     # Under serve there IS somewhere to send you, and only then.
     live = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
@@ -454,3 +456,262 @@ def test_rendering_applications_writes_nothing():
              conn.execute("SELECT COUNT(*) n FROM application_events").fetchone()["n"])
     assert [dict(r) for r in before[0]] == [dict(r) for r in after[0]]
     assert before[1] == after[1]
+
+
+# -- grouping the postings tables by company ----------------------------------------
+def _matches(*specs):
+    """[(company, job_id, title, location)] -> a conn with those open matches."""
+    conn = store.connect(":memory:")
+    by_company = {}
+    for company, jid, title, loc in specs:
+        by_company.setdefault(company, []).append(
+            Posting(company, jid, title, f"https://x/{jid}", loc))
+    for company, postings in by_company.items():
+        store.sync_postings(conn, company, postings, "2026-07-01")
+        for p in postings:
+            store.record_verdict(
+                conn, Verdict(company, p.ats_job_id, Decision.MATCH, "why", "rules"),
+                "2026-07-01")
+    conn.commit()
+    return conn
+
+
+def _all_panel(doc):
+    return doc[doc.index('data-panel-body="all"'):doc.index('data-panel-body="boards"')]
+
+
+def test_open_matches_are_grouped_one_tbody_per_company():
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"),
+                    ("Acme", "2", "Platform Engineer", "New York, NY"),
+                    ("Zeta", "3", "Infra Engineer", "Austin, TX"))
+    panel = _all_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    assert panel.count('<tbody class="grp">') == 2
+    assert panel.count('class="cohead"') == 2
+    assert ">2 roles<" in panel and ">1 role<" in panel
+
+
+def test_every_grouped_posting_is_rendered_visible_so_the_page_works_without_js():
+    """The collapse is JS-side only. With JS off you get a caption and every row under
+    it — the same bargain the tabs make."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"),
+                    ("Acme", "2", "Platform Engineer", "New York, NY"))
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22"))
+    assert panel.count("data-search=") == 2
+    assert "<tr hidden" not in panel and "<tbody hidden" not in panel
+    assert 'class="grp closed"' not in panel
+
+
+def test_the_group_toggle_is_hidden_until_js_confirms_it_is_running():
+    """A button that cannot collapse anything is a dead control in a mailed file."""
+    assert ".cotoggle { display: none; }" in dashboard._CSS
+    assert ".js-groups .cotoggle" in dashboard._CSS
+    assert "classList.add('js-groups')" in dashboard._JS
+
+
+def test_a_group_head_is_not_counted_as_a_posting():
+    """"N of M shown" means postings. Group heads carry no data-search, which is what
+    keeps them out of it — and keeps the existing numbers where they were."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22"))
+    head = panel[panel.index('class="cohead"'):panel.index("</th></tr>")]
+    assert "data-search" not in head
+    assert "data-tier=" not in head
+    assert "tr[data-search]" in dashboard._JS
+
+
+def test_the_filter_counts_every_group_not_only_the_first():
+    """`tBodies[0]` filtered one company and made the denominator that company's size."""
+    assert "tBodies[0].rows" not in dashboard._JS
+    assert "rowsOf(t)" in dashboard._JS
+
+
+def test_a_filter_expands_the_groups_it_matches():
+    """A collapsed page under a typed search reads as "nothing found", which is the one
+    thing this page may never say while it is holding rows that match."""
+    assert "var filtering = !!(text || ats || locs || tiers);" in dashboard._JS
+    assert "b.dataset.closed === '1' && !filtering" in dashboard._JS
+
+
+def test_a_row_still_matches_a_search_for_its_company_after_the_cell_moved():
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22"))
+    assert 'data-search="acme backend engineer new york, ny 1 greenhouse"' in panel
+
+
+def test_a_hostile_company_name_is_escaped_in_the_group_head():
+    conn = _matches(('<b>Ev"il</b>', "1", "Backend Engineer", "NYC"))
+    doc = dashboard.build_dashboard(conn, [_company('<b>Ev"il</b>', 1)], "2026-07-22")
+    assert "<b>Ev" not in doc
+    assert "&lt;b&gt;Ev" in doc
+
+
+# -- the rest of the ranking --------------------------------------------------------
+def _ranked_pool(n=6):
+    specs = [("Acme" if i % 2 else "Zeta", str(i), f"Engineer {i}", "New York, NY")
+             for i in range(1, n + 1)]
+    conn = _matches(*specs)
+    for i in range(1, n + 1):
+        _ranked(conn, "Acme" if i % 2 else "Zeta", str(i), 100.0 - i)
+    conn.commit()
+    return conn
+
+
+def _today_panel(doc):
+    return doc[doc.index('data-panel-body="today"'):
+               doc.index('data-panel-body="applications"')]
+
+
+def test_the_rest_of_the_ranking_is_reachable_from_the_today_tab():
+    conn = _ranked_pool(6)
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    assert "The rest of the ranking" in panel
+    assert "3 roles at 2 companies" in panel
+    # The real position in the ranking, not a per-company counter.
+    assert '<span class="rn">4</span>' in panel
+    assert '<span class="rn">6</span>' in panel
+
+
+def test_the_rest_of_the_ranking_needs_no_js_and_is_not_filterable():
+    conn = _ranked_pool(6)
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    assert "<details class=\"rest\">" in panel
+    assert "data-filterable" not in panel
+
+
+def test_the_rest_of_the_ranking_carries_no_buttons_in_either_mode():
+    """A pick is what has buttons. Anything else would put `.pick [data-act]` on more
+    than the three cards the disposition handler is written for."""
+    conn = _ranked_pool(6)
+    for interactive in (False, True):
+        doc = dashboard.build_dashboard(conn, [_company("Acme", 1), _company("Zeta", 3)],
+                                        "2026-07-22", interactive=interactive)
+        rest = doc[doc.index('<details class="rest">'):doc.index("</details>")]
+        assert "<button" not in rest
+        assert "data-act" not in rest
+
+
+def test_the_rest_of_the_ranking_excludes_what_you_applied_to_or_skipped():
+    """It has to come out of the same filtered list the picks did, or a job you applied
+    to this morning reappears on the page it left."""
+    conn = _ranked_pool(6)
+    store.record_application(conn, "Acme", "5", "Engineer 5", "applied",
+                            "2026-07-22T09:00:00")
+    store.set_deferral(conn, "Zeta", "6", "skipped", "2026-07-22")
+    conn.commit()
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    assert "Engineer 5" not in panel
+    assert "Engineer 6" not in panel
+    assert "1 role at 1 company" in panel
+
+
+def test_no_drawer_when_there_is_nothing_below_the_picks():
+    conn = _ranked_pool(3)
+    panel = _today_panel(dashboard.build_dashboard(conn, [_company("Acme", 1),
+                                                          _company("Zeta", 3)],
+                                                   "2026-07-22"))
+    assert "The rest of the ranking" not in panel
+
+
+# -- per-posting resume and the rebuild button --------------------------------------
+def _one_ranked(conn=None):
+    conn = conn or _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _ranked(conn, "Acme", "1", 90.0)
+    conn.commit()
+    return conn
+
+
+def test_the_prefill_line_is_two_text_nodes_so_the_script_never_writes_markup():
+    conn = _one_ranked()
+    store.record_plan(conn, "Acme", "1", "[]", 16, 3, "h", "2026-07-22")
+    conn.commit()
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22")
+    assert '<span class="counts">prefill 13/16 fields</span>' in doc
+    assert '<span class="tail need"> · 3 need you</span>' in doc
+    # The phrases the older tests pin are still contiguous.
+    assert "prefill 13/16 fields" in doc and "3 need you" in doc
+
+
+def test_the_rebuild_and_resume_controls_exist_only_under_serve():
+    conn = _one_ranked()
+    static = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22")
+    live = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                     interactive=True)
+    # The rendered control, not the class name: `dashboard._JS` names these selectors on
+    # every page, and the script is not the button.
+    for markup in ('class="pick-rebuild"', 'class="pick-attach"', 'class="pickfile"'):
+        assert markup not in static, markup
+        assert markup in live, markup
+    # The name of the file that will be attached is useful offline, so it renders in both.
+    assert "resume: the one in Settings" in static
+    assert "resume: the one in Settings" in live
+
+
+def test_the_pick_controls_have_their_handlers_on_the_page_that_renders_them():
+    """The regression this repo already shipped: a button rendered by one file with its
+    handler in another file's script, so every click did nothing at all."""
+    conn = _one_ranked()
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                    interactive=True)
+    script = doc[doc.rindex("<script>"):doc.rindex("</script>")]
+    for cls in ("pick-rebuild", "pick-attach", "pick-detach"):
+        assert f"button.{cls}" in script, cls
+    for endpoint in ("/api/prefill", "/api/posting-resume", "/api/posting-resume/clear"):
+        assert endpoint in script, endpoint
+    assert doc.count("<script>") == 1
+
+
+def test_a_posting_with_its_own_resume_says_so_in_both_modes():
+    conn = _one_ranked()
+    store.set_posting_resume(conn, "Acme", "1", "acme_1_ab12cd34.pdf", 1234, "2026-07-22")
+    conn.commit()
+    for interactive in (False, True):
+        doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                        interactive=interactive)
+        assert "resume for this posting: acme_1_ab12cd34.pdf" in doc
+    # Only the live page offers to undo it.
+    assert "pick-detach" in dashboard.build_dashboard(
+        conn, [_company("Acme", 1)], "2026-07-22", interactive=True)
+
+
+# -- the inbox banner ---------------------------------------------------------------
+def _pending_mail(conn):
+    conn.execute(
+        "INSERT INTO mail_candidates (message_id, company, ats_job_id, choices, "
+        "match_kind, subject, scanned_at) VALUES ('m1','Acme','1','[\"1\"]','sole_open',"
+        "'Your application','2026-07-22')")
+    store.record_mail_proposal(conn, "m1", "Acme", "1", "screen", "quote", "2026-07-22")
+    conn.commit()
+
+
+def test_the_static_file_counts_pending_mail_but_links_nowhere():
+    """A file:// page pointing at a server that may not be running is worse than no
+    link. The count still earns its place — it says whether opening the app is worth it."""
+    conn, companies = _setup([], [_company("Acme", 1)])
+    _pending_mail(conn)
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "1 email suggests an application moved" in doc
+    assert 'href="/applications"' not in doc
+    assert "jobtracker mail" in doc
+
+    live = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
+    assert 'href="/applications"' in live
+
+
+def test_the_dashboard_says_nothing_about_mail_when_there_is_nothing_to_review():
+    """A permanent zero-state line stops being read long before it has anything to say."""
+    conn, companies = _setup([], [_company("Acme", 1)])
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "banner mail" not in doc
+
+
+def test_a_dismissed_proposal_leaves_the_banner():
+    conn, companies = _setup([], [_company("Acme", 1)])
+    _pending_mail(conn)
+    store.resolve_mail_proposal(conn, "m1", "dismissed", "2026-07-23")
+    conn.commit()
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    assert "banner mail" not in doc

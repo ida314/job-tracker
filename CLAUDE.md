@@ -382,6 +382,29 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
 - **Panels are server-rendered; the script only toggles `[hidden]`.** `.tabs` is
   `display:none` until JS confirms it is running, so with JS off every panel shows
   stacked — exactly the pre-tabs page. Same rule as the row filters.
+- **The postings tables group by company** (2026-08-16): one `<tbody class="grp">` per
+  company, headed by a `<tr class="cohead">` that spans the row and carries the tier chip,
+  the name, a role count and a `.cotoggle` button. Four rules, all load-bearing:
+  - **Rows render visible and JS collapses on load** — never the reverse. `.cotoggle` is
+    `display:none` until the script adds `js-groups`, the same mechanism `.tabs` uses and
+    for the same reason: with JS off you get a caption and every row under it, and no dead
+    control in a mailed file.
+  - **Filtering owns `hidden`; collapsing owns `tbody.closed`.** Two owners of one
+    property is how they drift.
+  - **Any active filter force-expands the matching groups**, with `data-closed`
+    remembering your own choice for when the filters clear. A collapsed page under a typed
+    search reads as "nothing found", which this page may never say while holding rows.
+  - **A data row is one carrying `data-search`.** Group heads do not, which keeps them out
+    of "N of M shown" — that number means postings, and it must not move. The filter IIFE
+    was rewritten off `t.tBodies[0].rows`, which with one tbody per company filtered only
+    the first group. Tier/company cells moved into the head but stay in the row's search
+    blob, or searching a company name stops matching its own rows.
+- **Today has a `<details>` drawer for the rest of the ranking** (2026-08-16), grouped by
+  company, numbered with the real rank. `<details>` because it opens with no script, and
+  because it is not a table the filter JS could reach. Built from
+  `rank.available(...)[3:]` — **never** from raw `ranked_matches`, or a job you applied to
+  this morning reappears on the page it left. **No buttons in it, in either mode**: a pick
+  is what has buttons, which is what keeps `.pick [data-act]` meaning exactly three cards.
 - **The picks must never be a `table[data-filterable]`.** The filter JS selects those, so
   a tier or location filter left set on another tab would silently empty a curated list
   the user never asked to filter. There is a test.
@@ -504,6 +527,65 @@ is the reading, the history, and manual entry.
   no age — so every comparison goes through `applications.day_of`. `days_since` returns
   None, never 0, and an unreadable `updated_at` sorts last rather than first.
 
+## Reading the mailbox
+
+`jobtracker mail`, the `inbox` task, and a review list on `/applications`. Full guide in
+`docs/mail.md`. Added 2026-08-16, and it is the **fifth** bounded model role (DESIGN.md
+§8) — the first thing other than the user to touch the outer loop, which is why it may
+only propose.
+
+- **`mail` is to `inbox` what `check` is to `level`.** The deterministic pass does the I/O
+  and caches into `mail_candidates`; the task is a pure read of `state.db` whose only
+  socket is the router. Do not give the task a mailbox — an unmounted volume would then
+  silently shrink a queue that was already recorded.
+- **Nothing writes to the maildir.** `mailbox.Maildir(path, factory=None, create=False)` —
+  `create` defaults to **True**, so a typo'd `$JOBTRACKER_MAILDIR` would make directories
+  inside the user's mail store. `keys()` + `get_bytes()` and nothing else; no flags, no
+  renames, not `get_message`. Two tests: one on the source text, one on a before/after
+  filesystem snapshot.
+- **`Message-ID` is the identity; the maildir filename is not.** A client renames
+  `1234.host` to `1234.host:2,S` the moment you read the message, so a filename key would
+  re-propose the whole inbox every time you opened your mail. No header → `synth:<digest>`,
+  the `manual_job_id` fallback.
+- **The narrower is built from `applications`,** so a message can never be a candidate for
+  a company you never applied to. That is the shape of the data, not a rule. Domains are
+  *read* off URLs you applied at — synthesizing `stripe.com` from "Stripe" is `ashby/cedar`
+  again. ATS relay domains identify the ATS, never the company (§7.2 one layer up). Names
+  match on whole tokens ("Ramp" ≠ "Rampart") and only in the From display name; a name in
+  the *subject* additionally needs an application-shaped word, or every digest naming a
+  tracked employer becomes a candidate — measured against a real newsletter. A name in the
+  body alone is never enough.
+- **An unresolved job is asked about, not guessed.** `ats_job_id=''` plus a `choices` list;
+  the card renders a dropdown and the endpoint refuses until one is picked.
+- **`read_at` NULL is the queue**, and non-NULL with no proposal means "read, and not
+  application news" — the NULL-vs-`''` distinction `postings.description` draws. Rejected
+  messages are deliberately **not** stored, which is what lets a message that predates the
+  application become a candidate on the next scan.
+- **"Nothing here" is an answer and is written**, unlike `level`'s `unclear`. Copying
+  `level` would spend three calls on every newsletter and fill the blocked-unit count —
+  which exists to signal breakage — with healthy readings. Only a transport failure leaves
+  a message unread.
+- **The model's quote must appear in the message verbatim.** It is the only free text it
+  produces; grounding it is `repair`'s "a slug must appear on the page it was shown", and
+  it is what keeps a fabricated rejection off the list.
+- **`unit_key` is the message id.** Not bookkeeping: two ambiguous messages at one company
+  both carry `ats_job_id=''`, so without it they share an `ident`, `task_attempts` charges
+  one's failures to the other, and the router collapses two questions onto one answer.
+- **Accepting is the only path into `applications`,** and the event note is composed by
+  Python — the model's quote stays in `mail_proposals.evidence`. A refusal writes nothing.
+  Dismissed is a resolution, never a delete; deleting is what would let the next scan
+  re-propose it.
+- **Priority 40 is a starvation argument, not a dependency**, and the docs say so. Nothing
+  in the chain consumes what `inbox` produces.
+- **No scan endpoint, ever.** Walking a mailbox on a single-threaded `HTTPServer` blocks
+  every other request and makes a page render a writer. A test asserts `server.py` imports
+  neither `maildir` nor `mailbox`.
+- **The banner is a derived count, not a `seen` flag.** A flag would have to be written by
+  a GET (which would break `test_the_page_is_a_pure_read`) or by JS (which never fires
+  with JS off). The acknowledgement is accepting or dismissing, not glancing.
+- **`state.db` now holds the text of personal mail.** Gitignored and local; no log line or
+  span attribute may carry a subject or a body.
+
 ## The tuning loop
 
 `criteria.yaml` is easy to edit and hard to edit safely: a token added to stop one bad
@@ -531,7 +613,8 @@ in `docs/tuning.md`; the rules that matter here:
 
 `jobtracker work`, documented in `docs/tasks.md`. Added 2026-08-13, and it is where all
 model work now lives: `level` (was `resolve`), `judge` (was `rank`'s first phase), and
-`prefill`. The scheduler polls tasks by priority and runs the first with work.
+`prefill` — joined by `inbox` on 2026-08-16. The scheduler polls tasks by priority and
+runs the first with work.
 
 - **`work` rescores after every run, and that is load-bearing.** `judge` writes a ranking
   with a NULL score and `prefill` only queues postings that have one, so without it a
@@ -547,7 +630,10 @@ model work now lives: `level` (was `resolve`), `judge` (was `rank`'s first phase
 - **Priority is the pipeline's dependency chain, not a preference.** level → judge →
   prefill, because each produces what the next consumes. Reorder it and "work the next
   available task" stops meaning "keep every stage drained", which is the entire reason
-  the scheduler exists. There is a test.
+  the scheduler exists. There is a test. **`inbox` (40) is outside that chain and says
+  so**: it consumes nothing the others produce, and it is last on a starvation argument —
+  its queue refills from an external stream, so anywhere earlier a chatty mailbox would
+  keep the pipeline's own stages waiting. There is a test for that too.
 - **The queue is derived, never stored.** Each task's `pending()` is a SQL read over
   tables that already exist, so there is nothing to reconcile — a posting that closes
   overnight simply stops appearing. `task_attempts` is a *failure ledger*, not a queue:
@@ -715,6 +801,39 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   narrowest.
 - **A dropdown that does not offer our answer is a gap, not a fill.** Picking the nearest
   option puts an answer the candidate did not give onto a submitted application.
+- **Gaps are split generic vs company-specific** (2026-08-16). `prefill.split_gaps`:
+  generic = a key in `GENERIC_KEYS` *or* asked by 2+ employers, sorted by ask count
+  descending; everything else groups under its one company. No new state and no
+  maintained list — a question migrates on its own when a second employer asks it. It
+  decides **rendering order only**; no write and no fill reads it, so a misfiled question
+  costs ordering, never correctness. `answers.render_gap_block` uses the same order,
+  because both are renderings of one table. `_gap_card` emits identical markup in both
+  lists, which is why `server._JS`'s save branch needed no change.
+- **A posting may override the bank's resume** (2026-08-16), and **the override is never
+  in `Answers.hash`.** `prefill_plans.resume_key` carries it instead; one disjunct in
+  `matches_needing_prefill` compares the two stored columns, so attaching a resume
+  re-plans that posting and no other. Fold it into the hash and every plan built with one
+  looks permanently stale forever. `PrefillTask.apply` must keep storing
+  `ctx.answers.hash`, never the `dataclasses.replace`d copy's.
+- **Swapping `answers.resume` is not enough to attach the override.**
+  `browser._plan_index` lets a stored plan value beat a fresh `resolve_field`, so
+  `prefill.retarget_resume` rewrites the plan's resume entries too. Both halves are
+  applied in `server._api_apply_to` **and** `cli.cmd_apply_to` — the button and the
+  terminal must not disagree about which file went out under the user's name.
+- **Uploads are named by us, validated by content, and share one function.**
+  `resumes.validate_upload` (suffix allowlist *before* decode, base64, size, magic bytes)
+  is called by both `/api/resume` and `/api/posting-resume`; `resumes.stored_name` mints
+  `<company>_<job>_<digest8><suffix>`, so no separator or `..` survives from a company
+  name and two look-alike slugs cannot overwrite each other. `_UPLOAD_ROUTES` is a **set**
+  — a file route left out of it reads its body as `{}` and reports "no file", a
+  correct-looking error for the wrong reason.
+- **"Rebuild prefill" opens no socket.** `server._rebuild_plan` is CPU + SQLite only: the
+  server is single-threaded, so a form fetch or a router call would freeze every tab.
+  `known_question_keys` replays every key the model ever matched, so a rules-only rebuild
+  can understate readiness but never overstate it. No cached form → it **refuses and says
+  so**, never `0/0 · nothing left to type`. The unit is built directly rather than
+  filtered out of `task.pending()`, which returns nothing when the plan is already current
+  — the button would then silently do nothing in exactly the case it exists for.
 - **`answers.yaml` is gitignored** — it is personal data. `answers.example.yaml` is the
   tracked file. Everything above the `# ===== unanswered questions` marker is the user's
   and is never parsed or rewritten; the block below it is regenerated wholesale from

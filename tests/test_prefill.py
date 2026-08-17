@@ -24,6 +24,7 @@ from jobtracker.models import Company, Decision, FormField, Posting, Verdict
 from jobtracker.sources.greenhouse import Greenhouse
 from jobtracker.tasks import TaskContext, get_task, run_task
 from jobtracker.tasks.judge import RankJudgment
+from jobtracker.tasks import prefill
 from jobtracker.tasks.prefill import (
     PlanEntry,
     mark_alternatives,
@@ -564,4 +565,105 @@ def test_prepare_rescores_before_choosing_the_picks(answers, tmp_path):
 
     conn = store.connect(db)
     assert conn.execute("SELECT score FROM rankings").fetchone()[0] is not None
+    conn.close()
+
+
+# -- generic vs one company's own ---------------------------------------------------
+def _gap_row(key, seen_on, first_seen="2026-08-01"):
+    return {"question_key": key, "seen_on": seen_on, "first_seen": first_seen,
+            "ask": key, "type": "text", "options": None}
+
+
+def test_a_question_two_employers_ask_is_generic_and_one_employers_is_not():
+    generic, per_company = prefill.split_gaps([
+        _gap_row("how_did_you_hear", "Stripe,Ramp"),
+        _gap_row("why_stripe", "Stripe"),
+    ])
+    assert [g["question_key"] for g in generic] == ["how_did_you_hear"]
+    assert [(c, [g["question_key"] for g in rows]) for c, rows in per_company] == [
+        ("Stripe", ["why_stripe"])]
+
+
+def test_a_canonical_field_is_generic_even_at_one_employer():
+    """A first sighting of "work authorization" is still an answer worth writing once."""
+    generic, per_company = prefill.split_gaps([_gap_row("work_authorization", "Stripe")])
+    assert [g["question_key"] for g in generic] == ["work_authorization"]
+    assert per_company == []
+
+
+def test_generic_questions_sort_by_how_many_employers_ask():
+    generic, _ = prefill.split_gaps([
+        _gap_row("two", "A,B"), _gap_row("four", "A,B,C,D"), _gap_row("three", "A,B,C"),
+    ])
+    assert [g["question_key"] for g in generic] == ["four", "three", "two"]
+
+
+def test_a_gap_nobody_is_recorded_against_is_still_shown():
+    """Dropping it would hide a question you still owe someone an answer to."""
+    generic, per_company = prefill.split_gaps([_gap_row("orphan", "")])
+    assert [g["question_key"] for g in generic] == ["orphan"]
+    assert per_company == []
+
+
+def test_the_yaml_stubs_are_ordered_like_the_settings_page():
+    """The block is a rendering of `prefill_gaps` and so is that page; two renderings of
+    one table should not disagree about what to do first."""
+    from jobtracker import answers as answers_mod
+
+    block = answers_mod.render_gap_block([
+        _gap_row("why_stripe", "Stripe"),
+        _gap_row("how_did_you_hear", "Stripe,Ramp"),
+    ])
+    assert block.index("how_did_you_hear") < block.index("why_stripe")
+
+
+# -- a resume for one posting -------------------------------------------------------
+def test_retargeting_a_plan_moves_only_the_resume_entry():
+    """`browser._plan_index` lets a stored plan value beat a fresh `resolve_field`, so
+    swapping `answers.resume` alone would still attach the bank's file."""
+    plan = json.dumps([
+        {"form_key": "resume", "question_key": "resume", "value": "/bank/resume.pdf"},
+        {"form_key": "email", "question_key": "email", "value": "d@example.edu"},
+    ])
+    out = json.loads(prefill.retarget_resume(plan, "/data/resumes/acme_1.pdf"))
+    assert out[0]["value"] == "/data/resumes/acme_1.pdf"
+    assert out[1]["value"] == "d@example.edu"
+
+
+def test_retargeting_survives_a_plan_it_cannot_read():
+    for plan in (None, "", "not json", "[]", json.dumps({"not": "a list"})):
+        assert prefill.retarget_resume(plan, "/x.pdf") == plan
+
+
+def test_a_posting_resume_does_not_change_the_answers_hash(answers, tmp_path):
+    """Two questions, two columns. Folding the override into the hash would make every
+    plan built with one look permanently stale and rebuild it every night forever."""
+    import dataclasses
+
+    override = tmp_path / "tailored.pdf"
+    override.write_bytes(b"%PDF-1.4 x")
+    swapped = dataclasses.replace(answers, resume=override)
+    assert swapped.resume != answers.resume
+    assert swapped.hash != answers.hash          # the copy is a different question...
+    # ...which is exactly why `apply` stores ctx.answers.hash and never the copy's.
+
+
+def test_a_changed_posting_resume_puts_that_posting_back_in_the_queue(answers):
+    """And only that posting: the disjunct compares two stored columns, per row."""
+    conn = store.connect(":memory:")
+    _seed(conn, answers)
+    store.record_plan(conn, "Stripe", "8077887", "[]", 3, 0, answers.hash, TODAY)
+    conn.commit()
+    assert store.matches_needing_prefill(conn, answers.hash, TODAY) == []
+
+    store.set_posting_resume(conn, "Stripe", "8077887", "stripe_1_ab12.pdf", 10, TODAY)
+    conn.commit()
+    queued = store.matches_needing_prefill(conn, answers.hash, TODAY)
+    assert [r["ats_job_id"] for r in queued] == ["8077887"]
+
+    # Re-planned with that resume recorded, it is settled again.
+    store.record_plan(conn, "Stripe", "8077887", "[]", 3, 0, answers.hash, TODAY,
+                      resume_key="stripe_1_ab12.pdf")
+    conn.commit()
+    assert store.matches_needing_prefill(conn, answers.hash, TODAY) == []
     conn.close()

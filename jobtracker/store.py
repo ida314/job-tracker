@@ -10,6 +10,7 @@ fetch, because absence during a failure or drift is not evidence a posting close
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -252,6 +253,104 @@ CREATE TABLE IF NOT EXISTS prefill_plans (
     PRIMARY KEY (company, ats_job_id)
 );
 
+-- A resume for ONE posting, overriding the answer bank's. OBSERVATION, not curation: it
+-- is a fact about one application, so it lives here and never in answers.yaml, whose
+-- `resume:` key is hand-written and is the default for everything.
+--
+-- `filename` is a name this repo minted (resumes.stored_name), never the client's string.
+-- A filename is attacker-shaped input even when the attacker is you with a badly named
+-- file, and this one names a file that gets attached to a real job application.
+--
+-- A row whose file has gone missing reads as "no override" and logs — never as an
+-- exception raised with a browser sitting on an open form, which is the worst possible
+-- moment to discover a missing resume (docs/prefill.md says the same about the bank's).
+CREATE TABLE IF NOT EXISTS posting_resumes (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    bytes       INTEGER NOT NULL DEFAULT 0,
+    uploaded_at TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
+
+-- Mail the deterministic narrower tied to a row in `applications`. Written only by
+-- `jobtracker mail` — never by a task, never by the web server. Reading a mailbox is I/O,
+-- and the rule that made `check` cache descriptions applies unchanged: the `inbox` task
+-- must be a pure read of state.db, so an unmounted maildir cannot shrink a queue that was
+-- already recorded, and a task never opens a file.
+--
+-- Keyed on `message_id`, the mail system's own stable identity. The maildir FILENAME is
+-- not that: a client renames `1234.host` to `1234.host:2,S` the moment you read the
+-- message, so keying on it would re-propose the whole inbox every time you opened your
+-- mail. A message with no Message-ID gets 'synth:' + a digest of From+Date+Subject+size,
+-- the same fallback `manual_job_id` uses for a title that slugs to nothing.
+--
+-- `application_events` has no unique constraint and no dedup by design — repeats are the
+-- point there — so anything ingesting an external stream nightly has to carry its own
+-- idempotency key. This primary key is that key, and it is the only thing standing
+-- between a nightly scan and seven identical `rejected` events.
+--
+-- `sent_at` is the raw Date header and `sent_on` is it normalized to a plain ISO day.
+-- Same split, and same reason, as `postings.posted_at` / `posted_on`: Date headers arrive
+-- in a dozen timezone spellings and collate wrongly as text, so nothing may sort on the
+-- raw one.
+--
+-- `body` is truncated to mail.MAX_MAIL_CHARS and is the model's entire input, cached for
+-- the same reason `postings.description` is. Consequence worth stating out loud: state.db
+-- now holds the text of personal mail. It is gitignored, it lives in ./data, nothing
+-- ships it anywhere, and no log line or span attribute may carry a subject or a body.
+--
+-- `read_at` NULL IS the queue — "the model has not been asked what this is". Non-NULL
+-- with no `mail_proposals` row means "asked, and it is not application news": exactly the
+-- NULL-vs-'' distinction `postings.description` draws between never-fetched and
+-- fetched-and-genuinely-empty. It is never cleared.
+--
+-- Messages the narrower REJECTED are deliberately not stored. Re-narrowing is free, local
+-- and deterministic, and storing rejections would freeze them — not storing is what lets
+-- a message that arrived BEFORE you recorded the application become a candidate on the
+-- very next scan.
+CREATE TABLE IF NOT EXISTS mail_candidates (
+    message_id  TEXT PRIMARY KEY,
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL DEFAULT '',  -- '' = company matched, no single job did
+    choices     TEXT NOT NULL DEFAULT '',  -- JSON [ats_job_id, ...] the model may point at
+    match_kind  TEXT NOT NULL,             -- job_url|job_id|title|sole_open|company_domain|company_name
+    evidence    TEXT NOT NULL DEFAULT '',  -- the literal text that matched, for the reviewer
+    from_addr   TEXT NOT NULL DEFAULT '',
+    from_name   TEXT NOT NULL DEFAULT '',
+    subject     TEXT NOT NULL DEFAULT '',
+    sent_at     TEXT,
+    sent_on     TEXT,
+    body        TEXT NOT NULL DEFAULT '',
+    snippet     TEXT NOT NULL DEFAULT '',
+    scanned_at  TEXT NOT NULL,
+    read_at     TEXT
+);
+
+-- What the model made of one message, and what you did about it. A PROPOSAL, never a
+-- decision: nothing in this subsystem calls advance_application except the accept
+-- endpoint and `jobtracker mail --accept`, and there is a test asserting a full task run
+-- leaves `applications` and `application_events` untouched.
+--
+-- `resolution` is set, never deleted, and a dismissed row stays dismissed forever — the
+-- scanner skips any message_id already in `mail_candidates`, so a rejection you have
+-- already waved off cannot return next Tuesday. Deleting the row is what would let it.
+--
+-- `evidence` is the model's quote, and it is the ONLY free text the model produces here.
+-- It is shown on the review card and never written into an application: the event note is
+-- composed by Python. DESIGN.md §8.4's rule that no sentence the model composed reaches a
+-- field, with your own application history as the field.
+CREATE TABLE IF NOT EXISTS mail_proposals (
+    message_id   TEXT PRIMARY KEY,
+    company      TEXT NOT NULL,
+    ats_job_id   TEXT NOT NULL DEFAULT '',  -- '' = you still have to say which job
+    status       TEXT NOT NULL,             -- one of APPLICATION_STATUSES
+    evidence     TEXT NOT NULL DEFAULT '',
+    resolution   TEXT NOT NULL DEFAULT 'pending',  -- pending | accepted | dismissed
+    proposed_at  TEXT NOT NULL,
+    resolved_at  TEXT
+);
+
 -- Verified slug repairs awaiting a human (DESIGN.md §8.2). OBSERVATION, not curation:
 -- a proposal is something the system noticed about a board, so it lives here and never
 -- in companies.yaml, which no scheduled run may write (§2.3, principle 3).
@@ -340,6 +439,13 @@ _ADDED_COLUMNS = [
     # is the normal state and never means "overdue".
     ("applications", "next_action", "TEXT"),
     ("applications", "next_action_note", "TEXT"),
+    # Which resume this plan was built with: a `posting_resumes.filename`, or NULL for
+    # the answer bank's. It is a second column rather than a component of `answers_hash`
+    # because they answer two different questions — the hash covers the bank, this covers
+    # one posting. Folding the override into the hash would make every plan built with one
+    # look permanently stale, and `matches_needing_prefill` would rebuild it every night
+    # forever.
+    ("prefill_plans", "resume_key", "TEXT"),
 ]
 
 
@@ -1388,6 +1494,21 @@ def normalize_label(label: str) -> str:
     return " ".join("".join(kept).split())
 
 
+def gap_companies(row) -> list[str]:
+    """The companies that have asked a gap's question.
+
+    One definition of the delimiter, because `seen_on` is a comma-joined string and two
+    readers of it would drift. Accepts either the row or the column, so the Settings page
+    and `record_gap` share it.
+
+    Known limitation, inherited from the column and not introduced here: a company name
+    containing a comma splits into two. No such name is in companies.yaml today, and the
+    fix belongs in the schema rather than in a reader that would silently paper over it.
+    """
+    text = row if (row is None or isinstance(row, str)) else row["seen_on"]
+    return [s for s in (text or "").split(",") if s]
+
+
 def record_gap(
     conn: sqlite3.Connection,
     question_key: str,
@@ -1416,7 +1537,7 @@ def record_gap(
             (question_key, ask, field_type, options, company, now),
         )
         return True
-    seen = [s for s in row["seen_on"].split(",") if s]
+    seen = gap_companies(row["seen_on"])
     if company not in seen:
         seen.append(company)
         conn.execute(
@@ -1447,17 +1568,25 @@ def record_plan(
     gaps: int,
     answers_hash: str,
     now: str,
+    resume_key: Optional[str] = None,
 ) -> None:
+    """Record a built plan. `resume_key` names the posting's own resume, or None.
+
+    A trailing default rather than a positional, so the three-year-old callers that
+    predate per-posting resumes keep working and mean what they always meant: this plan
+    was built with the answer bank's resume.
+    """
     conn.execute(
         """
         INSERT INTO prefill_plans (company, ats_job_id, plan, fields, gaps,
-                                   answers_hash, built_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+                                   answers_hash, built_at, resume_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company, ats_job_id) DO UPDATE SET
             plan=excluded.plan, fields=excluded.fields, gaps=excluded.gaps,
-            answers_hash=excluded.answers_hash, built_at=excluded.built_at
+            answers_hash=excluded.answers_hash, built_at=excluded.built_at,
+            resume_key=excluded.resume_key
         """,
-        (company, ats_job_id, plan_json, fields, gaps, answers_hash, now),
+        (company, ats_job_id, plan_json, fields, gaps, answers_hash, now, resume_key),
     )
 
 
@@ -1493,6 +1622,12 @@ def matches_needing_prefill(
 
     Already-applied and skipped postings are excluded here rather than filtered later —
     building a prefill for a job you have already applied to is pure waste.
+
+    A posting whose own resume has changed is stale too, which is the `resume_key`
+    disjunct. It carries no new bind parameter because it compares two stored columns:
+    the resume the plan was built with against the one attached now. Attaching, replacing
+    or clearing a posting's resume therefore re-plans exactly that posting and nothing
+    else — the reason the override is not part of `answers_hash`.
     """
     sql = """
         SELECT p.company, p.ats_job_id, p.title, p.url, r.score
@@ -1503,14 +1638,201 @@ def matches_needing_prefill(
         LEFT JOIN deferrals d ON p.company=d.company AND p.ats_job_id=d.ats_job_id
         LEFT JOIN prefill_plans pp
                ON p.company=pp.company AND p.ats_job_id=pp.ats_job_id
+        LEFT JOIN posting_resumes pr
+               ON p.company=pr.company AND p.ats_job_id=pr.ats_job_id
         WHERE v.verdict='match' AND p.closed_at IS NULL
           AND r.score IS NOT NULL
           AND a.company IS NULL
           AND (d.company IS NULL
                OR (d.kind='snoozed' AND d.until IS NOT NULL AND d.until <= ?))
-          AND (pp.answers_hash IS NULL OR pp.answers_hash != ?)
+          AND (pp.answers_hash IS NULL OR pp.answers_hash != ?
+               OR COALESCE(pp.resume_key, '') != COALESCE(pr.filename, ''))
         ORDER BY r.score DESC, p.company
     """
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     return list(conn.execute(sql, (today, answers_hash)))
+
+
+# -- per-posting resumes -------------------------------------------------------------
+def set_posting_resume(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    filename: str,
+    size: int,
+    now: str,
+) -> None:
+    """Attach a resume to one posting, replacing any earlier one."""
+    conn.execute(
+        """
+        INSERT INTO posting_resumes (company, ats_job_id, filename, bytes, uploaded_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            filename=excluded.filename, bytes=excluded.bytes,
+            uploaded_at=excluded.uploaded_at
+        """,
+        (company, ats_job_id, filename, size, now),
+    )
+
+
+def get_posting_resume(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM posting_resumes WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+
+
+def clear_posting_resume(conn: sqlite3.Connection, company: str, ats_job_id: str) -> None:
+    conn.execute(
+        "DELETE FROM posting_resumes WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    )
+
+
+def posting_resumes(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Row]:
+    """Every override, keyed for a cheap lookup while rendering or while queueing."""
+    return {
+        (r["company"], r["ats_job_id"]): r
+        for r in conn.execute("SELECT * FROM posting_resumes")
+    }
+
+
+# -- mail ----------------------------------------------------------------------------
+MAIL_RESOLUTIONS = ("pending", "accepted", "dismissed")
+
+
+def record_mail_candidate(conn: sqlite3.Connection, cand, now: str) -> bool:
+    """Record what the narrower tied to an application. True if this message is new.
+
+    INSERT OR IGNORE, because the primary key is the whole idempotency mechanism: a
+    message already recorded — read or not, proposed or not, dismissed or not — must not
+    be re-recorded, or a dismissal would be undone by the next scan.
+    """
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO mail_candidates
+            (message_id, company, ats_job_id, choices, match_kind, evidence,
+             from_addr, from_name, subject, sent_at, sent_on, body, snippet,
+             scanned_at, read_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        """,
+        (
+            cand.message.message_id, cand.company, cand.ats_job_id,
+            json.dumps(list(cand.choices)), cand.match_kind, cand.evidence,
+            cand.message.from_addr, cand.message.from_name, cand.message.subject,
+            cand.message.sent_at, cand.message.sent_on, cand.message.body,
+            cand.snippet, now,
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def known_message_ids(conn: sqlite3.Connection) -> set[str]:
+    """Every message already recorded. One query, filtered in Python — the same shape
+    `blocked_units` uses, and the reason a scan of 5,000 messages costs one round trip."""
+    return {r["message_id"] for r in conn.execute("SELECT message_id FROM mail_candidates")}
+
+
+def unread_mail_candidates(
+    conn: sqlite3.Connection, limit: Optional[int] = None
+) -> list[sqlite3.Row]:
+    """Candidates the model has not been asked about, newest first.
+
+    `read_at IS NULL` is the queue. Undated messages sort last rather than first: an
+    unparseable Date header is not evidence of urgency.
+    """
+    sql = ("SELECT * FROM mail_candidates WHERE read_at IS NULL "
+           "ORDER BY sent_on IS NULL, sent_on DESC, message_id")
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return list(conn.execute(sql))
+
+
+def mark_mail_read(conn: sqlite3.Connection, message_id: str, now: str) -> None:
+    """The model has been asked about this message. Set whether or not it proposed
+    anything — "read, and it is not application news" is an answer, and re-asking it
+    every night would spend the budget on newsletters."""
+    conn.execute(
+        "UPDATE mail_candidates SET read_at=? WHERE message_id=?", (now, message_id)
+    )
+
+
+def record_mail_proposal(
+    conn: sqlite3.Connection,
+    message_id: str,
+    company: str,
+    ats_job_id: str,
+    status: str,
+    evidence: str,
+    now: str,
+) -> None:
+    if status not in APPLICATION_STATUSES:
+        raise ValueError(f"unknown application status: {status!r}")
+    conn.execute(
+        """
+        INSERT INTO mail_proposals (message_id, company, ats_job_id, status, evidence,
+                                    resolution, proposed_at, resolved_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)
+        ON CONFLICT(message_id) DO UPDATE SET
+            company=excluded.company, ats_job_id=excluded.ats_job_id,
+            status=excluded.status, evidence=excluded.evidence,
+            proposed_at=excluded.proposed_at
+        """,
+        (message_id, company, ats_job_id, status, evidence, now),
+    )
+
+
+def get_mail_proposal(
+    conn: sqlite3.Connection, message_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM mail_proposals WHERE message_id=?", (message_id,)
+    ).fetchone()
+
+
+def pending_mail_proposals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Proposals awaiting your ruling, with the message they came from.
+
+    Joined to the candidate rather than duplicating subject and snippet into the proposal:
+    the message is the evidence, and one copy of it cannot disagree with itself.
+    """
+    return list(conn.execute(
+        """
+        SELECT p.*, c.subject, c.from_addr, c.from_name, c.sent_on, c.snippet,
+               c.choices, c.match_kind
+        FROM mail_proposals p
+        JOIN mail_candidates c ON p.message_id = c.message_id
+        WHERE p.resolution = 'pending'
+        ORDER BY c.sent_on IS NULL, c.sent_on DESC, p.message_id
+        """
+    ))
+
+
+def pending_mail_count(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM mail_proposals WHERE resolution='pending'"
+    ).fetchone()["n"]
+
+
+def resolve_mail_proposal(
+    conn: sqlite3.Connection, message_id: str, resolution: str, now: str
+) -> None:
+    if resolution not in MAIL_RESOLUTIONS:
+        raise ValueError(f"unknown resolution: {resolution!r}")
+    conn.execute(
+        "UPDATE mail_proposals SET resolution=?, resolved_at=? WHERE message_id=?",
+        (resolution, now, message_id),
+    )
+
+
+def application_keys(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every (company, ats_job_id) you have applied to. What the mail narrower is
+    allowed to match against, and what `inbox.pending()` re-checks — an application
+    deleted since the scan is work the task can no longer do."""
+    return {
+        (r["company"], r["ats_job_id"])
+        for r in conn.execute("SELECT company, ats_job_id FROM applications")
+    }

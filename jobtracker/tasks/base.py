@@ -37,7 +37,14 @@ MAX_ATTEMPTS = 3
 
 @dataclass(frozen=True)
 class TaskUnit:
-    """One posting's worth of one task's question."""
+    """One posting's worth of one task's question.
+
+    `ats_job_id` is not always a posting. The `inbox` task's units are messages, and a
+    message that identifies a company but not which of your applications it is about
+    carries `''` here until you say. Anything that assumes this field names a row in
+    `postings` is wrong for that task — which is also why `unit_key` carries the message
+    id, so two such messages at one company do not collapse onto one `ident`.
+    """
 
     task: str
     company: str
@@ -76,6 +83,10 @@ class TaskContext:
     tiers: dict = field(default_factory=dict)
     companies: dict = field(default_factory=dict)
     fetcher: Any = None
+    # The path to the job-search mailbox, or None. A path, inspected — `inbox` reports
+    # itself unavailable when this is absent and never opens it: reading the maildir is
+    # `jobtracker mail`'s job, and the task is a pure read of what that recorded.
+    maildir: Any = None
 
 
 class Task:
