@@ -1,11 +1,12 @@
 """Deterministic backend new-grad job-discovery pipeline.
 
 See DESIGN.md for the full architecture. The short version: fetching, parsing,
-diffing, and storing are ordinary tested code; the language model is confined to four
+diffing, and storing are ordinary tested code; the language model is confined to five
 bounded roles off the main loop (DESIGN.md §8) — resolving genuine ambiguity
 (`resolve`), reading a careers page when a board's slug breaks (`repair`), ranking
-against a profile (`rank`), and matching a form's questions to answers you already
-wrote (`prefill`). In all four it may read and propose, never decide.
+against a profile (`rank`), matching a form's questions to answers you already wrote
+(`prefill`), and reading an employer's reply for the stage it reports (`inbox`). In all
+five it may read and propose, never decide.
 """
 
 import os
@@ -17,7 +18,12 @@ import os
 # 0.2.0 (2026-08-16) — applications: the outer loop got a page, a history and manual
 # entry. Minor rather than patch because it adds a surface and a table, and because a
 # version that never moves cannot answer "is this the build with the new thing in it".
-__version__ = "0.2.0"
+#
+# 0.3.0 (2026-08-16) — the mailbox became a source of proposals (`mail` + the `inbox`
+# task, the fifth bounded model role), a posting can carry its own resume and be
+# re-planned from the page, the postings tables group by company, Today opens past its
+# three, and the answer gaps sort by how many employers ask. Three new tables.
+__version__ = "0.3.0"
 
 
 def build_version() -> str:
