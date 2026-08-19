@@ -194,3 +194,35 @@ def test_the_queue_is_the_only_channel():
     assert isinstance(session.commands, queue.Queue)
     session.submit(live.Command(kind=live.SET, handle="jt0", value="x", epoch=1))
     assert session.commands.get_nowait().value == "x"
+
+
+# -- ending the session ----------------------------------------------------------------
+def test_closing_is_asked_for_outside_the_vocabulary_and_survives_a_closed_session():
+    """The vocabulary is what a request may do to the *form*. This ends the session.
+
+    It also has to work when nothing is being accepted any more — a session part-way
+    through filling, or one whose phase has already moved on, is exactly when you want
+    the window gone. Routing it through `submit` would mean the one action that frees the
+    one-window lock is refused in the states that most often hold it.
+    """
+    session = _session(("first_name", "First Name", "text"))
+    assert session.close_requested() is False
+    assert "close" not in live.VOCABULARY
+
+    session.set_phase(live.CLOSED)
+    assert session.submit(live.Command(kind=live.SET, handle="jt0", value="x")) is False
+    session.request_close()
+    assert session.close_requested() is True
+    assert session.snapshot()["closing"] is True
+
+
+def test_the_session_names_the_page_the_browser_actually_opened():
+    """It is created from the posting's URL — the page has to render before the fill
+    starts — and the browser then goes somewhere else entirely: Greenhouse is redirected
+    at the form, which is not even the same host. *"No application form found on …"* is
+    the sentence that sends you to look, so it has to name the page that was looked at."""
+    session = _session(("first_name", "First Name", "text"))
+    session.retarget("https://job-boards.greenhouse.io/embed/job_app?for=a&token=1")
+    snap = session.snapshot()
+    assert snap["url"] == "https://job-boards.greenhouse.io/embed/job_app?for=a&token=1"
+    assert live.summary({**snap, "discovered": 0}).endswith(snap["url"])

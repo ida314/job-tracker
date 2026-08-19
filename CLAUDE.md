@@ -872,12 +872,25 @@ Three things learned from live forms; all are handled and none is obvious:
   a hidden select; "Resume/CV" is a file input plus a textarea, either of which satisfies
   it. Once any sibling holds the answer the question is answered and the rest are not
   gaps.
-- **Some employers redirect the hosted board to their own careers site.** Stripe's
-  `absolute_url` is a search page with no form on it, and `job-boards.greenhouse.io`
-  redirects there too. Greenhouse gets the canonical board URL when the slug and job id
-  are known, and **zero fields discovered is reported as "no application form found",
-  never as "0/0 filled, nothing left to do"** — absence read as success is the failure
-  DESIGN.md §3.4 exists to prevent.
+- **Some employers redirect the hosted board to their own careers site, and the fix for
+  that was itself wrong until 2026-08-19.** Stripe's `absolute_url` is a search page with
+  no form on it, so the canonical board URL was used instead — but **the board redirects
+  too**: `job-boards.greenhouse.io/asana/jobs/…` 302s to `asana.com`, a JS shell whose
+  form is a cross-origin iframe, and the card reported *"no application form found"*
+  about a job with 32 fields. Measured over every Greenhouse board tracked: **25 of 45
+  do not carry the form there** (airbnb, asana, betterment, brex, coinbase, databricks,
+  datadog, dropbox, lyft, mongodb, okta, pinterest, stripe, …; `careportalinc` 403s).
+  Greenhouse now gets `embed/job_app?for={slug}&token={id}` — the form itself, keyless,
+  never redirected, and present on all 45. **Zero fields discovered is still reported as
+  "no application form found", never as "0/0 filled, nothing left to do"** — absence read
+  as success is the failure DESIGN.md §3.4 exists to prevent.
+- **`page.evaluate` only ever sees the main frame.** An employer that embeds its ATS puts
+  the whole application in an iframe, which a main-frame reading calls an empty page. So
+  `_discover` falls back to the frames and returns the **surface** the fields came off —
+  a `Page` or a `Frame` — and every write, highlight and re-reading goes through it,
+  because a handle minted by one discovery names nothing outside it. Second line of
+  defence behind the URL above, and it exists because zero is the one count this project
+  never takes at face value.
 ## The mirrored form
 
 `/apply` under `serve`, `jobtracker/live.py`, and the drain in `browser._hold_until_closed`.
@@ -927,6 +940,14 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   `default-src 'none'` and both fall back to it, failing the same silent way: the preview
   becomes a broken image over a browser that is working perfectly. `_CSP` is one string
   now, and the test asserts the value rather than `_send`'s source text.
+- **The shot is the whole page, and the zoom is client-side** (2026-08-19). A viewport is
+  720px and a form is several thousand — Asana's is 1280x3352 — so a viewport-shaped
+  preview showed five fields of thirty-two over a window nobody on `/apply` can scroll.
+  `full_page=True`, rendered scaled-to-fit with a Fit/100% toggle that is **two CSS
+  classes and no request**: no command, no session state, nothing for the browser thread
+  to know about. `SHOT_EVERY_S` went 2s → 4s to pay for it (190 KB / 113 ms against
+  22 KB / 36 ms, measured). `.fit` is in the server's markup and `#zoom` is hidden until
+  the script adds `js-zoom`, so JS-off gets the whole page and no dead control.
 - **No screenshots for a page nobody is looking at.** Each poll refreshes a deadline; the
   drain shoots only inside it. That is also the Pause button and the closed-tab case, for
   free — a JPEG every two seconds forever on the box that also runs the nightly pipeline
@@ -940,6 +961,16 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   atomic write are `resumes`', unchanged — there is no second way a file reaches this box.
 - **Handlers live in `server._APPLY_JS`**, emitted only by `render_apply` — the
   button-and-handler-in-the-same-file rule, applied up front. There is a parity test.
+- **"Done — close the window" is the only ending a headless host can reach** (added
+  2026-08-19). The window opens on the machine running `serve`, so with no screen to
+  reach there was no way to end a session: the browser stayed up, `_APPLY_LOCK` stayed
+  held, and every later "Open prefilled" answered *"a prefilled window is already open"*
+  until `serve` was restarted. `POST /api/session/close` sets `Session.closing`, the hold
+  loop reads it in the tick it was already doing, and `fill_application` closes the
+  context on the way out. **Deliberately not a `live.Command`** — the vocabulary is what a
+  request may do to the *form*, and this does nothing to the form — and **deliberately
+  not conditional on the phase**, because a session stuck mid-fill is exactly the one
+  holding the lock. The refusal on the dashboard names the job and points at the page.
 - **This did not remove `DISPLAY`, Xvfb or the viewer units**, and must not be read as
   having done so. Chromium still draws somewhere, and captchas and the submit itself still
   happen in the window. What changed is what you type into.

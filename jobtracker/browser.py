@@ -208,6 +208,11 @@ class FillReport:
 
 GREENHOUSE_BOARD = "https://job-boards.greenhouse.io"
 
+# The form itself, as Greenhouse serves it for embedding. A complete standalone page —
+# every question, the resume input, and the employer's own submit button — and the one
+# Greenhouse URL that is never redirected away. See `apply_url_for`.
+GREENHOUSE_FORM = f"{GREENHOUSE_BOARD}/embed/job_app"
+
 
 def apply_url_for(
     url: str, ats: str, slug: str = "", ats_job_id: str = ""
@@ -217,17 +222,27 @@ def apply_url_for(
     Kept here rather than in `sources/` because it is a fact about the *hosted careers
     page*, not about the JSON API those adapters exist to speak.
 
-    Greenhouse gets special handling that is not cosmetic. Its `absolute_url` is
-    whatever the employer configured, and large employers point it at their own careers
-    site: Stripe's is `stripe.com/jobs/search?gh_jid=8077887`, a search page with no form
-    on it at all. Observed on 2026-08-13 — the browser found zero fields there. The
-    hosted board always carries the real form and we already know the slug and the job
-    id, so it is used whenever both are available, with the employer's own URL as the
-    fallback.
+    Greenhouse gets special handling that is not cosmetic, and it has now been wrong
+    twice in the same direction. Its `absolute_url` is whatever the employer configured,
+    and large employers point it at their own careers site: Stripe's is
+    `stripe.com/jobs/search?gh_jid=8077887`, a search page with no form on it at all.
+    That was fixed on 2026-08-13 by using the hosted board instead — which turned out to
+    move the problem rather than solve it, because **the hosted board redirects too**.
+    `job-boards.greenhouse.io/asana/jobs/7766762` 302s to `asana.com/jobs/apply/…`, a JS
+    shell whose form is a cross-origin iframe, so the browser found zero fields and the
+    card said *"no application form found"* about a job that has a form.
+
+    Measured across every Greenhouse board we track, 2026-08-19: **25 of 45 boards do
+    not carry the form** at `/{slug}/jobs/{id}` (airbnb, asana, betterment, brex,
+    coinbase, databricks, datadog, dropbox, lyft, mongodb, okta, pinterest, stripe and
+    more — Cedar's board answers 403 there outright). The embed URL carried it for all
+    45. So that is what the browser is pointed at: it is the form, it is keyless, and
+    nothing redirects it. The employer's own URL stays the fallback for when the slug or
+    the job id is not known.
     """
     base = (url or "").rstrip("/")
     if ats == "greenhouse" and slug and ats_job_id:
-        return f"{GREENHOUSE_BOARD}/{slug}/jobs/{ats_job_id}#app"
+        return f"{GREENHOUSE_FORM}?for={slug}&token={ats_job_id}"
     if not base:
         return base
     if ats == "ashby":
@@ -281,6 +296,56 @@ def _fields_from_dom(found: list) -> list[FormField]:
         )
         for f in found
     ]
+
+
+def _discover(page) -> tuple:
+    """Read every field on the page, and say which surface they were read off.
+
+    `page.evaluate` runs in the main frame and nowhere else. An employer that embeds its
+    ATS — which is ordinary practice, not an exotic case — puts the whole application in
+    a cross-origin iframe, and a main-frame-only reading of that page finds nothing at
+    all. Asana's careers page is exactly this: it renders the Greenhouse embed script,
+    the form lives in an iframe, and the card reported *"no application form found"*
+    about a job with thirty-one fields on it.
+
+    The apply URL is now chosen to land on the form directly (see `apply_url_for`), so
+    this is the second line of defence rather than the first — but zero discovered is the
+    one reading this project may never take at face value, and looking in the frames
+    before believing it costs one evaluate per frame.
+
+    Returns `(found, surface)`. The surface is the `Page` or the `Frame` the fields were
+    read off, and it is what every later write, highlight and re-reading must use: a
+    handle minted by a discovery in one frame names nothing in any other.
+    """
+    found = page.evaluate(_DISCOVER_JS)
+    if found:
+        return found, page
+
+    best, best_found = page, found
+    for frame in getattr(page, "frames", []):
+        if frame is getattr(page, "main_frame", None):
+            continue
+        try:
+            got = frame.evaluate(_DISCOVER_JS)
+        except Exception as exc:  # noqa: BLE001 — a frame we cannot read is not a crash
+            log.debug("could not read frame %s: %s", getattr(frame, "url", "?"), exc)
+            continue
+        if len(got) > len(best_found):
+            best, best_found = frame, got
+
+    if best is not page:
+        log.info("the form is in a frame: %d field(s) on %s",
+                 len(best_found), getattr(best, "url", "?"))
+    return best_found, best
+
+
+def _page_of(surface):
+    """The `Page` behind a surface, for the things only a page can do.
+
+    A screenshot is one of them: `Frame` has `evaluate` and `fill` but no `screenshot`,
+    and a picture of one frame would not be the picture the preview is for anyway.
+    """
+    return getattr(surface, "page", surface)
 
 
 def _plan_index(plan_json: Optional[str]) -> dict:
@@ -352,11 +417,18 @@ def fill_application(
         try:
             page = context.pages[0] if context.pages else context.new_page()
             if session is not None:
+                # One derivation of the target, so the page and the browser cannot
+                # disagree about which URL was opened.
+                session.retarget(target)
                 session.set_phase(live.FILLING)
             page.goto(target, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(1500)  # let a SPA render its form
 
-            found = page.evaluate(_DISCOVER_JS)
+            # `surface` is the page, or the frame the form turned out to live in.
+            # Everything downstream — the writes, the highlight, every later reading —
+            # goes through it, because a handle belongs to the discovery that minted it
+            # and that discovery happened here.
+            found, surface = _discover(page)
             report.discovered = len(found)
             fields = _fields_from_dom(found)
             log.info("%s: %d field(s) on %s", company.name, len(fields), target)
@@ -391,7 +463,7 @@ def fill_application(
                     _remember(conn, company.name, field_, None, today)
                     continue
 
-                if _write(page, raw, value):
+                if _write(surface, raw, value):
                     report.filled.append(Filled(
                         handle=raw["handle"], label=field_.label,
                         type=field_.type, value=value, question_key=question_key,
@@ -425,7 +497,7 @@ def fill_application(
                     report.new_questions += 1
             conn.commit()
 
-            page.evaluate(_HIGHLIGHT_JS, unfilled_required)
+            surface.evaluate(_HIGHLIGHT_JS, unfilled_required)
 
             if session is not None:
                 # Keyed by field key for the carry-over, because that is what survives a
@@ -444,7 +516,7 @@ def fill_application(
                 except (EOFError, KeyboardInterrupt):
                     pass
             elif (hold or session is not None) and not headless:
-                _hold_until_closed(report, context, session)
+                _hold_until_closed(report, context, session, surface)
         finally:
             context.close()
 
@@ -453,17 +525,23 @@ def fill_application(
 
 HOLD_POLL_MS = 500
 
-# How often the preview is refreshed while somebody is watching. Two seconds is a
-# still-image cadence, not a video one — which is the whole point. The expensive path
-# this replaces shipped every frame of a remote X server.
-SHOT_EVERY_S = 2.0
+# How often the preview is refreshed while somebody is watching. A still-image cadence,
+# not a video one — which is the whole point. The expensive path this replaces shipped
+# every frame of a remote X server.
+#
+# Four seconds rather than two because the shot is now the whole page: measured on a live
+# Greenhouse form (1280x3352, 2026-08-19) a full-page JPEG is 190 KB and 113 ms against
+# 22 KB and 36 ms for the viewport. That is a fair price for seeing every field, and the
+# picture is deliberately behind anyway — the fields you type into are local and instant.
+SHOT_EVERY_S = 4.0
 
 # Cheap enough to send often, legible enough to read a form in. PNG would be several
 # times the bytes for a screenshot that is mostly flat white boxes.
 SHOT_QUALITY = 60
 
 
-def _hold_until_closed(report: FillReport, context, session=None) -> None:
+def _hold_until_closed(report: FillReport, context, session=None,
+                       surface=None) -> None:
     """Block until the window is gone. For a caller with no terminal to prompt at.
 
     **The wait has to happen inside a Playwright call.** The sync API only dispatches
@@ -479,6 +557,13 @@ def _hold_until_closed(report: FillReport, context, session=None) -> None:
 
     The summary goes to the log because that is the only place a served run has to speak.
 
+    There is a second way out, and it exists because the first one is not always
+    reachable. The window opens on the machine running `serve`, which for a headless
+    host means there is no window to close — so a session left open pinned the
+    one-window lock until `serve` itself was restarted, and every later "Open prefilled"
+    answered *"a prefilled window is already open"*. `Session.request_close` is the
+    Done button on `/apply`, read here, on the thread that owns the browser.
+
     With a `session`, this is also where the dashboard's edits land. The tick was already
     here and already inside a Playwright call, so draining the queue in it costs nothing
     and inherits the one property that matters: every call to `page` happens on the
@@ -493,7 +578,12 @@ def _hold_until_closed(report: FillReport, context, session=None) -> None:
             if not pages:
                 break
             if session is not None:
-                _drain(session, pages[0])
+                if session.close_requested():
+                    log.info("closing the window — asked for from the page")
+                    break
+                # The surface is where the form was read, which is not the page itself
+                # when the employer embeds its ATS in an iframe.
+                _drain(session, surface if surface is not None else pages[0])
             pages[0].wait_for_timeout(HOLD_POLL_MS)
         except Exception:  # noqa: BLE001 — the browser is gone, which is the exit
             break
@@ -581,14 +671,24 @@ def _reread(session, page) -> None:
                  len(found), session.epoch)
 
 
-def _shoot(session, page) -> None:
+def _shoot(session, surface) -> None:
     """A still of the real page, for the preview.
 
     A picture rather than a stream, deliberately: what this replaces was a stream, and
-    the reason it was slow is that a stream is what it was. Two seconds of staleness on
+    the reason it was slow is that a stream is what it was. A few seconds of staleness on
     an image you glance at costs nothing; the fields you actually type into are local.
+
+    **The whole page, not the window.** A browser viewport is 720 px and an application
+    form is several thousand — the Asana one is 3352 — so a viewport shot showed the first
+    five fields and nothing else, over a window nobody watching this page can scroll. The
+    picture has to be of the form, not of the part of it Chromium happens to be showing.
+    Scaling it to fit, or zooming back in, is the page's business and costs no bytes.
     """
-    session.store_shot(page.screenshot(type="jpeg", quality=SHOT_QUALITY))
+    session.store_shot(
+        _page_of(surface).screenshot(
+            type="jpeg", quality=SHOT_QUALITY, full_page=True
+        )
+    )
 
 
 def _write(page, raw: dict, value: str) -> bool:

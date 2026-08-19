@@ -1351,13 +1351,13 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
 
     script = page[page.rindex("<script>"):]
     ids = set(re.findall(r'id="([a-z]+)"', page))
-    assert {"pause", "reread", "reload", "preview"} <= ids
-    for element in ("pause", "reread", "reload", "preview"):
+    assert {"pause", "reread", "reload", "preview", "closewin", "zoom"} <= ids
+    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom"):
         assert f"getElementById('{element}')" in script, element
     for hook in ("lf-file", "tobank", "bankkey", ".lv"):
         assert hook in script, hook
     for endpoint in ("/api/session", "/api/session/set", "/api/session/rediscover",
-                     "/api/session/file", "/api/answer"):
+                     "/api/session/file", "/api/session/close", "/api/answer"):
         assert endpoint in script, endpoint
 
 
@@ -1443,6 +1443,51 @@ def test_setting_a_field_queues_it_rather_than_touching_a_browser(tmp_path):
     assert command.epoch == session.epoch
     # Untouched: only the browser thread may mark a row.
     assert session.snapshot()["fields"][1]["status"] == "gap"
+
+
+def test_the_window_can_be_closed_from_the_page(tmp_path):
+    """The one ending a headless host can reach.
+
+    The browser opens on the machine running `serve`, so on a box whose screen you
+    cannot see there was no way to end a session at all: the window stayed up, the
+    one-window lock stayed held, and every later "Open prefilled" answered *"a prefilled
+    window is already open"* until `serve` was restarted.
+
+    Like every other write on this page it queues rather than acts — the handler thread
+    may not touch a browser — and it is deliberately not a `live.Command`: the vocabulary
+    is what a request may do to the *form*, and this does nothing to the form.
+    """
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    assert h._api_session_close()["ok"] is True
+    assert session.close_requested() is True
+    assert session.commands.empty()
+    assert live_mod.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+
+
+def test_closing_works_from_any_phase(tmp_path):
+    """A session stuck part-way through filling is exactly when you need this, and it is
+    also the state that would otherwise hold the lock for the life of the process."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.set_phase(live_mod.FILLING)
+    assert h._api_session_close()["ok"] is True
+    assert session.close_requested() is True
+
+    live_mod.CURRENT = None
+    assert h._api_session_close()["ok"] is False
+
+
+def test_a_refused_open_says_where_the_way_out_is(tmp_path):
+    """"Close it first" was advice with no way to take it on a headless host."""
+    source = inspect.getsource(server.Handler._api_apply_to)
+    start = source.index("a prefilled window is already open")
+    assert "Fill in page" in source[start:start + 200]
 
 
 def test_a_set_with_an_unreadable_epoch_is_refused_rather_than_guessed(tmp_path):

@@ -167,6 +167,12 @@ class Session:
     commands: queue.Queue = field(default_factory=queue.Queue)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # Asked for from the page, read by the browser thread. Not a `Command`, deliberately:
+    # the vocabulary is what a web request may do *to the form*, and this does nothing to
+    # the form — it ends the session. It also has to work when nothing is being accepted
+    # any more, which is exactly when you most want it.
+    closing: bool = False
+
     # -- written from the browser thread -------------------------------------------
     def carried(self) -> dict:
         """The current statuses, keyed for `rows_from` to carry into the next reading."""
@@ -201,6 +207,19 @@ class Session:
                     row["value"] = value
                     return
 
+    def retarget(self, url: str) -> None:
+        """Say which page the browser actually went to.
+
+        The session is created from the posting's URL, because the page has to render
+        before the fill has started. The browser then goes somewhere else: an Ashby
+        posting gains `/application`, and a Greenhouse one is redirected at the form
+        itself, which is a different host from the posting entirely. If the two are
+        allowed to disagree, *"no application form found on …"* names a page nobody
+        looked at — and that sentence exists to send you to look.
+        """
+        with self.lock:
+            self.url = url
+
     def set_phase(self, phase: str, note: str = "") -> None:
         with self.lock:
             self.phase = phase
@@ -234,6 +253,27 @@ class Session:
         with self.lock:
             self.watch_until = clock + WATCH_WINDOW_S
 
+    def request_close(self) -> None:
+        """Ask for the window to be closed, from a thread that may not touch it.
+
+        The window opens on the machine running `serve`. On a headless host — which is
+        the case this whole page was built for — there is no window to walk over to and
+        close, so the only ending `_hold_until_closed` knew about could never happen: the
+        browser stayed up, the one-window lock stayed held, and every later attempt to
+        open a prefilled application was refused with *"a prefilled window is already
+        open"* until `serve` was restarted. Observed 2026-08-19.
+
+        Setting a flag rather than closing anything here is the same rule every other
+        write on this page follows: Playwright objects belong to the thread that made
+        them, so the browser thread reads this in the poll it is already doing.
+        """
+        with self.lock:
+            self.closing = True
+
+    def close_requested(self) -> bool:
+        with self.lock:
+            return self.closing
+
     def submit(self, command: Command) -> bool:
         """Queue one command. False if it is not one of the four, or the window is gone.
 
@@ -260,6 +300,7 @@ class Session:
             # same absence-read-as-success mistake `summary` guards against for zero.
             need = sum(1 for r in self.fields if r["status"] != FILLED)
             return {
+                "closing": self.closing,
                 "company": self.company,
                 "ats_job_id": self.ats_job_id,
                 "title": self.title,

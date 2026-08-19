@@ -379,13 +379,26 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
     p.append(
         '<div class="phead">Preview '
         '<button id="pause" data-paused="0">Pause</button>'
+        '<button id="zoom" data-fit="1">100%</button>'
         '<span class="ago" id="ago"></span></div>'
     )
-    # A still, refreshed on a cadence — not a stream. What this page replaces was a
-    # stream, and being a stream is why it was slow.
-    p.append('<img id="preview" alt="the application form as the browser sees it">')
+    # A still of the *whole* form, refreshed on a cadence — not a stream. What this page
+    # replaces was a stream, and being a stream is why it was slow.
+    #
+    # It renders scaled to fit, from the server, because a browser viewport is 720px and
+    # the form is several thousand: a viewport-shaped picture showed five fields of
+    # thirty-two over a window nobody here can scroll. `.fit` is written in the markup
+    # rather than added by the script, so the whole page is what you get with JS off —
+    # and `#zoom`, which only a script can honour, stays hidden until one is running.
+    # Same rule as `.tabs` and `.cotoggle` on the dashboard.
     p.append(
-        '<p class=note>The picture is a couple of seconds behind. The fields are not.</p>'
+        '<div id="shotbox">'
+        '<img id="preview" class="fit" '
+        'alt="the whole application form as the browser sees it"></div>'
+    )
+    p.append(
+        '<p class=note>The whole page, a few seconds behind. The fields are not behind. '
+        'Click it (or <b>100%</b>) to read it at full size.</p>'
     )
     if view_url:
         # Kept, and pointed at the two things a mirrored form genuinely cannot do:
@@ -405,6 +418,15 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
             "deliberate. Set <code>JOBTRACKER_BROWSER_VIEW_URL</code> to get a link to "
             "the window from here, or use the screen the browser is drawing on.</p>"
         )
+    # The way out of a session, and on a headless host the only one there is. The window
+    # is on the machine running `serve`; if you cannot reach that machine's screen you
+    # cannot close it, and until it closes the one-window lock stays held and every later
+    # "Open prefilled" is refused. It was `serve` restarts or nothing. Observed
+    # 2026-08-19.
+    p.append(
+        '<p class="done"><button id="closewin">Done — close the window</button> '
+        '<span class="note" id="donemsg"></span></p>'
+    )
     p.append("</div>")
 
     # -- the fields -------------------------------------------------------------------
@@ -976,6 +998,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_session_set(payload))
             elif path == "/api/session/rediscover":
                 self._send_json(self._api_session_command(live.REDISCOVER))
+            elif path == "/api/session/close":
+                self._send_json(self._api_session_close())
             elif path == "/api/session/file":
                 self._send_json(self._api_session_file(payload))
             elif path == "/api/application":
@@ -1765,8 +1789,15 @@ class Handler(BaseHTTPRequestHandler):
         # locks it, so a second launch while the first window is open fails — on the
         # worker thread, where nobody sees it. Saying so is the honest answer.
         if not _APPLY_LOCK.acquire(blocking=False):
+            # Name the job and say where the way out is. The window is on *this* machine,
+            # which on a headless host is nowhere you can click — so "close it first"
+            # used to be advice with no way to take it, and the honest half of the
+            # sentence is the second one.
+            open_now = live.current()
+            held = f" for {open_now.title}" if open_now is not None else ""
             return {"ok": False,
-                    "error": "a prefilled window is already open — close it first"}
+                    "error": f"a prefilled window is already open{held} — finish it on "
+                             "the Fill in page, or press Done there to close it"}
 
         # The page the click is about to land on reads this, so it exists before the
         # thread does — a session created on the worker would leave `/apply` reporting
@@ -1838,6 +1869,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send_bytes(b"", "image/jpeg", 404)
             return
         self._send_bytes(blob, "image/jpeg")
+
+    def _api_session_close(self) -> dict:
+        """Close the window `serve` is holding, from the page that mirrors it.
+
+        Not a `live.Command`: the vocabulary is what a request may do to the *form*, and
+        this does nothing to the form. It sets a flag the browser thread reads in the
+        poll it is already doing, which then ends the hold, closes the context and
+        releases the one-window lock.
+
+        Deliberately not conditional on the phase. A session stuck part-way through
+        filling is exactly when this is needed, and refusing it then would leave the lock
+        held for the rest of the process's life — which is the defect it exists to fix.
+        """
+        session = live.current()
+        if session is None:
+            return {"ok": False, "error": "no window is open"}
+        session.request_close()
+        return {"ok": True, "detail": "closing the window…"}
 
     def _api_session_command(self, kind: str, handle: str = "",
                              value: str = "", epoch: int = -1) -> dict:
@@ -2011,8 +2060,18 @@ gap:1.2rem;align-items:start}
 .pane{min-width:0}
 .phead{display:flex;gap:.6rem;align-items:center;font-weight:600;margin:.2rem 0 .6rem}
 .phead .ago{font-weight:400;font-size:.8rem;opacity:.7;margin-left:auto}
-#preview{width:100%;border:1px solid rgba(127,127,127,.35);border-radius:6px;
-background:rgba(127,127,127,.08);display:block;min-height:120px}
+#preview{border:1px solid rgba(127,127,127,.35);border-radius:6px;
+background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
+/* Two ways to look at a page several thousand pixels tall. `fit` scales all of it into
+   view — every field at once, the state of the form at a glance. `actual` is full width
+   and legible, and it is the *box* that scrolls, never the document, so the field list
+   beside it does not move while you look. */
+#shotbox{max-height:78vh;overflow:auto}
+#preview.fit{width:auto;max-width:100%;max-height:78vh;object-fit:contain;
+cursor:zoom-in}
+#preview.actual{width:100%;height:auto;cursor:zoom-out}
+#zoom{display:none}
+.js-zoom #zoom{display:inline-block}
 .who{margin:.2rem 0 .1rem}
 .phase{margin:.1rem 0 1rem;font-size:.9rem}
 .phase .pill{padding:.1rem .5rem;border-radius:99px;background:rgba(127,127,127,.18);
@@ -2074,6 +2133,7 @@ _APPLY_JS = """
   var epoch = parseInt(root.dataset.epoch, 10);
   var paused = false;
   var moved = document.getElementById('moved');
+  var img = document.getElementById('preview');
 
   function post(url, body) {
     return fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2187,6 +2247,22 @@ _APPLY_JS = """
     post('/api/session/rediscover', {});
   });
 
+  // Fit or full size. Entirely on this side of the wire: the shot is always the whole
+  // page, so this costs no request, no command and no session state — it is two classes.
+  var zoom = document.getElementById('zoom');
+  document.body.classList.add('js-zoom');
+  function setZoom(fit) {
+    img.className = fit ? 'fit' : 'actual';
+    zoom.dataset.fit = fit ? '1' : '0';
+    zoom.textContent = fit ? '100%' : 'Fit';
+  }
+  zoom.addEventListener('click', function () {
+    setZoom(zoom.dataset.fit !== '1');
+  });
+  img.addEventListener('click', function () {
+    setZoom(zoom.dataset.fit !== '1');
+  });
+
   var pause = document.getElementById('pause');
   pause.addEventListener('click', function () {
     paused = !paused;
@@ -2197,10 +2273,27 @@ _APPLY_JS = """
   var reload = document.getElementById('reload');
   if (reload) reload.addEventListener('click', function () { location.reload(); });
 
+  // Done. Closes the window this page mirrors, which is what frees the one-window lock
+  // — there is no other way to end a session from a machine that is not the one the
+  // browser is drawing on. It closes a browser; it cannot send anything.
+  var closewin = document.getElementById('closewin');
+  var donemsg = document.getElementById('donemsg');
+  closewin.addEventListener('click', function () {
+    closewin.disabled = true;
+    donemsg.textContent = 'closing…';
+    post('/api/session/close', {}).then(function (res) {
+      donemsg.textContent = res.ok ? (res.detail || 'closing…')
+                                   : (res.error || 'could not close it');
+      if (!res.ok) closewin.disabled = false;
+    }).catch(function () {
+      closewin.disabled = false;
+      donemsg.textContent = 'the server did not answer';
+    });
+  });
+
   // -- the poll ----------------------------------------------------------------------
   // This is also what tells the browser thread somebody is watching, which is the only
   // thing that makes it take screenshots. Stop polling and the work stops.
-  var img = document.getElementById('preview');
   var ago = document.getElementById('ago');
 
   function tick() {

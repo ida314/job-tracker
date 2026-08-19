@@ -352,6 +352,7 @@ class _Recorder:
 
     def screenshot(self, **kwargs):
         self.shots += 1
+        self.shot_kwargs = kwargs
         return b"\xff\xd8jpeg"
 
     def wait_for_timeout(self, ms):
@@ -524,3 +525,117 @@ def test_the_mirror_writes_to_the_real_form(tmp_path, answers):
         finally:
             context.close()
     conn.close()
+
+
+# -- where the form actually is ---------------------------------------------------------
+def test_greenhouse_is_pointed_at_the_form_not_at_the_board():
+    """The board URL is not the form URL, and half the boards prove it.
+
+    `job-boards.greenhouse.io/{slug}/jobs/{id}` is whatever the employer configured it to
+    be: measured across every Greenhouse board we track on 2026-08-19, 25 of 45 redirect
+    it to the employer's own careers site — Asana's lands on a JS shell whose form is a
+    cross-origin iframe, Cedar's answers 403 — and the browser found zero fields there.
+    The embed URL is the form itself, is keyless, and was carrying it on all 45.
+    """
+    assert browser.apply_url_for(
+        "https://www.asana.com/jobs/apply/7766762?gh_jid=7766762",
+        "greenhouse", "asana", "7766762",
+    ) == "https://job-boards.greenhouse.io/embed/job_app?for=asana&token=7766762"
+
+    # Without both halves there is nothing to build it from, so the employer's own URL
+    # stands — with the anchor, which is all we can do for it.
+    assert browser.apply_url_for(
+        "https://job-boards.greenhouse.io/stripe/jobs/1", "greenhouse", "", "1"
+    ) == "https://job-boards.greenhouse.io/stripe/jobs/1#app"
+
+
+@needs_browser
+def test_a_form_inside_an_iframe_is_found_rather_than_reported_as_absent(tmp_path,
+                                                                        answers):
+    """Embedding the ATS is ordinary practice, and `page.evaluate` cannot see into it.
+
+    `page.evaluate` runs in the main frame only, so an employer page that renders its
+    application in an iframe reads as having no form at all — which is the *"no
+    application form found"* card the user saw for a job with thirty-one fields on it.
+    Zero discovered is the one reading this project may never take at face value.
+    """
+    (tmp_path / "form.html").write_text(FORM_HTML)
+    host = tmp_path / "host.html"
+    host.write_text(
+        "<!doctype html><meta charset=utf-8><title>Careers</title>"
+        "<h1>Work with us</h1><iframe src='form.html' width=800 height=600></iframe>"
+    )
+
+    conn = store.connect(":memory:")
+    report = browser.fill_application(
+        conn,
+        company=Company(name="Asana", ats="", slug="asana", tier=5),
+        ats_job_id="1",
+        url=host.as_uri(),
+        answers=answers,
+        today=TODAY,
+        user_data_dir=tmp_path / "profile",
+        headless=True,
+        wait=False,
+    )
+    assert report.found_a_form
+    assert {f.label: f.value for f in report.filled}["First Name"] == "Dylan"
+    assert [g.label for g in report.gaps] == ["Why do you want to work here?"]
+    conn.close()
+
+
+def test_a_page_with_a_form_of_its_own_is_never_read_through_its_frames():
+    """The frames are the fallback, not the rule — an analytics iframe is not the form."""
+    class _Frame:
+        url = "https://tag-manager.example/ns.html"
+
+        def evaluate(self, script, arg=None):
+            raise AssertionError("the main frame had the form; nothing else was needed")
+
+    class _Page:
+        frames = [_Frame()]
+        main_frame = None
+
+        def evaluate(self, script, arg=None):
+            return [_raw("jt0", "first_name", "First Name", "text")]
+
+    found, surface = browser._discover(_Page())
+    assert [f["handle"] for f in found] == ["jt0"]
+    assert isinstance(surface, _Page)
+
+
+# -- ending a session from somewhere that is not the machine holding it -----------------
+def test_the_window_can_be_closed_from_the_page_that_mirrors_it():
+    """The browser opens on the machine running `serve`. On a headless host that is
+    nowhere you can click, so before this the only ending `_hold_until_closed` knew about
+    could not happen: the window stayed up, the one-window lock stayed held, and every
+    later "Open prefilled" was refused until `serve` was restarted."""
+    session, _ = _mirror(("first_name", "First Name", "text"))
+    context = _FakeContext(closes_after=999)     # nobody is going to close this window
+    session.request_close()
+
+    browser._hold_until_closed(browser.FillReport(url="https://x", discovered=1),
+                               context, session)
+
+    assert session.snapshot()["phase"] == live.CLOSED
+    # And it returned rather than waiting the window out, which is what releases the lock.
+    assert context.waits == 0
+
+
+def test_the_preview_is_the_whole_page_not_the_window():
+    """A viewport is 720px and an application form is several thousand.
+
+    Measured on Asana's, 2026-08-19: 1280x3352. A viewport-shaped shot showed five fields
+    of thirty-two, over a window nobody watching `/apply` can scroll — so the picture was
+    of the browser rather than of the form. Scaling it back down is the page's business
+    and costs no bytes; what cannot be recovered on that side is the part never captured.
+    """
+    session, _ = _mirror(("first_name", "First Name", "text"))
+    page = _Recorder()
+    session.watch()
+    browser._shoot(session, page)
+
+    assert page.shot_kwargs.get("full_page") is True
+    assert page.shot_kwargs.get("type") == "jpeg"
+    # And the cadence pays for it: the whole page is ~8x the bytes of the viewport.
+    assert browser.SHOT_EVERY_S >= 4.0

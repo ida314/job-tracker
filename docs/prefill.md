@@ -293,12 +293,28 @@ Three things learned from live forms, all now handled:
   hidden select, and "Resume/CV" as a file input plus a textarea, either of which
   satisfies it. Once any of them holds the answer the question is answered, and its
   siblings are not reported as gaps.
-- **Some employers redirect the hosted board to their own careers site.** Stripe's
-  `absolute_url` is `stripe.com/jobs/search?gh_jid=…`, a search page with no form on it;
-  their `job-boards.greenhouse.io` URL redirects there too. For Greenhouse the canonical
-  board URL is used when the slug and job id are known, and **finding zero fields is
-  reported as "no application form found", never as "0/0 filled, nothing left to do."**
-  Absence read as success is the failure this project exists to avoid (DESIGN.md §3.4).
+- **Some employers redirect the hosted board to their own careers site — and this was
+  wrong twice in the same direction.** Stripe's `absolute_url` is
+  `stripe.com/jobs/search?gh_jid=…`, a search page with no form on it, so the canonical
+  board URL `job-boards.greenhouse.io/{slug}/jobs/{id}` was used instead (2026-08-13).
+  **That board redirects too.** Asana's 302s to `asana.com/jobs/apply/…`, a JS shell whose
+  form is a cross-origin iframe; the browser found zero fields and the card said *"no
+  application form found"* about a job with 32 of them. Measured across every Greenhouse
+  board we track on 2026-08-19: **25 of 45 do not carry the form at the board URL**
+  (airbnb, asana, betterment, brex, coinbase, databricks, datadog, dropbox, lyft, mongodb,
+  okta, pinterest, stripe and more; Cedar's answers 403 there). Greenhouse is now pointed
+  at `job-boards.greenhouse.io/embed/job_app?for={slug}&token={id}` — the form itself,
+  keyless, complete with the employer's own submit button, and carrying it on all 45.
+  **Finding zero fields is still reported as "no application form found", never as "0/0
+  filled, nothing left to do."** Absence read as success is the failure this project
+  exists to avoid (DESIGN.md §3.4).
+- **The form is not always in the main frame.** `page.evaluate` runs in the main frame and
+  nowhere else, so an employer that embeds its ATS — ordinary practice, not exotic — reads
+  as having no form at all. `_discover` falls back to the frames and returns the *surface*
+  the fields were read off, which every later write, highlight and re-reading then uses:
+  a handle minted in one frame names nothing in any other. The apply URL now lands on the
+  form directly, so this is the second line of defence, not the first — but zero
+  discovered is the one reading this project may never take at face value.
 
 Under `jobtracker serve`, the Today tab's "Open prefilled" button does the same thing.
 It runs on a daemon thread and returns immediately, because `server.py` handles one
@@ -402,6 +418,15 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
   the epoch, the second field you typed would be refused because the first one succeeded —
   every edit poisoning the next. `live.signature` asks the one question the epoch is
   about: does every position still report the same field under the same handle.
+- **The preview is the whole page, not the window.** Chromium's viewport is 720px tall and
+  an application form is several thousand — Asana's measured 1280x3352 — so a
+  viewport-shaped shot showed five fields of thirty-two, over a window nobody looking at
+  this page can scroll. `_shoot` passes `full_page=True`; the page renders it scaled to
+  fit and a Fit/100% toggle switches to full width inside a scrolling box. **That toggle
+  is two CSS classes and nothing else** — no command, no endpoint, no session state, since
+  the capture is always the whole page either way. The cadence moved 2s → 4s to pay for
+  the bytes (190 KB / 113 ms against 22 KB / 36 ms, measured 2026-08-19), which the design
+  can afford: the picture is meant to be behind, and the fields are not.
 - **No screenshots for a page nobody is looking at.** Each poll refreshes a deadline and
   the drain shoots only inside it. That is also the Pause button, and the closed-tab case.
 - **`img-src 'self'` is as load-bearing as `connect-src 'self'`.** The CSP is
@@ -423,6 +448,26 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 - **A form that rewrites itself while you are in it.** Re-reading after each write narrows
   the window; when the shape does change, the page says so and stops rather than pushing
   into whatever is there now. "Read the form again" is one click.
+
+### Ending a session
+
+**Done — close the window** on `/apply` is the way out, and on a headless host it is the
+only one. The browser opens on the machine running `serve`; if you cannot reach that
+machine's screen, you cannot close the window, and until it closes `_APPLY_LOCK` stays
+held and every later "Open prefilled" answers *"a prefilled window is already open"* —
+until `serve` itself is restarted. Observed 2026-08-19.
+
+`POST /api/session/close` sets `Session.closing`; `_hold_until_closed` reads it in the
+tick it was already doing, breaks, and `fill_application` closes the context on the way
+out, which releases the lock. Two things about its shape:
+
+- **It is not a `live.Command`.** The vocabulary is what a web request may do to the
+  *form*, and closing the window does nothing to the form. Keeping it out leaves that
+  closed list — and the test on it — meaning exactly what it says.
+- **It is not conditional on the phase.** A session stuck part-way through filling is
+  precisely when you want the window gone, and it is also the state most likely to be
+  holding the lock. `submit()` refuses commands once the phase is `CLOSED`; this must
+  not.
 
 None of this removes the need for `DISPLAY`, `Xvfb` or the viewer. Chromium still draws
 somewhere, and the escape hatch has to show something. What changed is what you type into.
