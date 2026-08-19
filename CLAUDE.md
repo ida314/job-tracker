@@ -109,11 +109,11 @@ pretending to have checked it is not. Never let a `manual` entry silently report
 ## Validation state
 
 **Audited 2026-07-09.** Every `check_method: api` entry was fetched and its board identity
-confirmed against the company name. Current composition of the 99 entries:
+confirmed against the company name. Current composition of the 100 entries:
 
 | | Count | Status |
 |---|---|---|
-| `api` | 62 | All return valid JSON. 47 Greenhouse, 13 Ashby, 2 Lever. |
+| `api` | 63 | All return valid JSON. 47 Greenhouse, 14 Ashby, 2 Lever. |
 | `manual` | 35 | Never scraped, by rule. Flagged weekly. |
 | `aggregator` | 2 | GitHub new-grad lists, diffed daily. |
 
@@ -123,6 +123,17 @@ JSON board and it may not be promoted to `api`. It is IBM-owned but, unlike Hash
 migrated to IBM Careers. Filed at tier 2 on the growth axis, not product category — RHEL,
 OpenShift, Ansible and Ceph mean backend *is* the engineering — with the caveat that much of
 that engineering is in Brno and Pune and the US footprint is Raleigh and Boston, no NYC.
+
+**OpenRouter added 2026-08-19** at tier 2, `api`, `ashby/openrouter`. Verified by **provenance,
+not identity** — `openrouter.ai/careers` renders Open Positions in JavaScript and its static HTML
+names no ATS at all, so the slug was read out of the page's own JS chunk, which calls
+`api.ashbyhq.com/posting-api/job-board/openrouter` and links `jobs.ashbyhq.com/openrouter` as the
+"alternate careers page". That is `repair`'s Ashby rule applied by hand: the posting-api's `jobUrl`
+just restates the candidate slug, so it can never be identity proof. `greenhouse|lever/openrouter`
+both 404. Tier 2 on the work — an LLM routing layer is provider failover, latency and traffic
+routing — but it is a small team with no new-grad program and 23 reqs that are go-to-market heavy
+and otherwise senior-shaped, so **a long run of zero matches here is the expected state**, not a
+broken board.
 
 **Tier 6 added 2026-07-20** — seven Chinese frontier AI labs, all `manual`. None has a
 keyless JSON board; MiniMax, Zhipu, and Moonshot run Feishu/Lark boards that 405 on

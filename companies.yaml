@@ -360,6 +360,24 @@
     both what backend work is open to a US new grad and how much mentorship comes with it.
     Verify a US role actually exists before investing effort. Demote to tier 5 if not.
   expected_board_name: null
+- name: OpenRouter
+  ats: ashby
+  slug: openrouter
+  tier: 2
+  category: ai-infra
+  check_method: api
+  careers_page: https://openrouter.ai/careers
+  notes: 2026-08-19 — added. Ashby slug verified by provenance, not by identity — the
+    posting-api derives jobUrl from the slug itself, so it only restates it. openrouter.ai/careers
+    renders Open Positions in JS and its static HTML names no ATS; the slug is in the page's own
+    chunk, which calls api.ashbyhq.com/posting-api/job-board/openrouter and links
+    jobs.ashbyhq.com/openrouter as the "alternate careers page". greenhouse/lever `openrouter`
+    both 404. 23 open reqs, all "Remote (US)", and go-to-market heavy — the engineering ones are
+    Software Engineer Platform/Product, Applied AI and Forward Deployed. Tier 2 on the work —
+    an LLM routing layer is provider failover, latency and traffic routing, so backend is
+    the product. Caveat, and the reason it is not tier 1 — small team, no new-grad program,
+    and every req reads senior-shaped, so expect a long empty stretch rather than a broken board.
+  expected_board_name: openrouter
 - name: Bloomberg
   ats: bespoke
   tier: 3
