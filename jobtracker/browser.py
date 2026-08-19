@@ -34,11 +34,12 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import store
+from . import live, store
 from .answers import normalize_label, slugify
 from .models import FormField
 from .tasks.prefill import resolve_field
@@ -313,6 +314,7 @@ def fill_application(
     headless: bool = False,
     wait: bool = True,
     hold: bool = False,
+    session=None,
 ) -> FillReport:
     """Open the application, fill what we know, record what we do not, and stop.
 
@@ -326,6 +328,11 @@ def fill_application(
     `hold` is `serve`'s: no terminal to prompt at, so block until the browser is closed.
     Neither is the same as "return quickly and leave it up" — there is no such mode, and
     asking for one is how the served button came to open a window that vanished.
+
+    `session` is a `live.Session` to mirror the form into while holding it. It changes
+    nothing about what gets filled; it publishes what was read and then answers queued
+    commands from the dashboard, so the fields can be typed somewhere with no latency
+    instead of through a video stream of this window. It implies `hold`.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -344,6 +351,8 @@ def fill_application(
         context = _launch(playwright, user_data_dir, headless)
         try:
             page = context.pages[0] if context.pages else context.new_page()
+            if session is not None:
+                session.set_phase(live.FILLING)
             page.goto(target, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(1500)  # let a SPA render its form
 
@@ -353,6 +362,11 @@ def fill_application(
             log.info("%s: %d field(s) on %s", company.name, len(fields), target)
 
             unfilled_required: list[str] = []
+            # What happened to each field, for the mirror. Collected here rather than
+            # reconstructed from `report` afterwards because `report.gaps` holds
+            # `FormField`s, which carry no handle — and the handle is the only thing
+            # that identifies an input on the live page.
+            statuses: dict = {}
             for raw, field_ in zip(found, fields):
                 entry = (
                     index.get(field_.key)
@@ -371,6 +385,7 @@ def fill_application(
 
                 if value is None:
                     report.gaps.append(field_)
+                    statuses[raw["handle"]] = (live.GAP, "")
                     if field_.required:
                         unfilled_required.append(raw["handle"])
                     _remember(conn, company.name, field_, None, today)
@@ -381,9 +396,11 @@ def fill_application(
                         handle=raw["handle"], label=field_.label,
                         type=field_.type, value=value, question_key=question_key,
                     ))
+                    statuses[raw["handle"]] = (live.FILLED, value)
                     _remember(conn, company.name, field_, question_key, today)
                 else:
                     report.gaps.append(field_)
+                    statuses[raw["handle"]] = (live.REFUSED, "")
                     if field_.required:
                         unfilled_required.append(raw["handle"])
                     _remember(conn, company.name, field_, None, today)
@@ -410,6 +427,14 @@ def fill_application(
 
             page.evaluate(_HIGHLIGHT_JS, unfilled_required)
 
+            if session is not None:
+                # Keyed by field key for the carry-over, because that is what survives a
+                # later reading; `rows_from` does the rest.
+                carried = {f.key: statuses.get(r["handle"], (live.PENDING, ""))
+                           for r, f in zip(found, fields)}
+                session.absorb(live.rows_from(found, fields, carried))
+                session.set_phase(live.READY, report.summary())
+
             if wait and not headless:
                 print(f"\n{report.summary()}")
                 _print_gaps(report)
@@ -418,8 +443,8 @@ def fill_application(
                     input("Press Enter here when you are done to close the browser… ")
                 except (EOFError, KeyboardInterrupt):
                     pass
-            elif hold and not headless:
-                _hold_until_closed(report, context)
+            elif (hold or session is not None) and not headless:
+                _hold_until_closed(report, context, session)
         finally:
             context.close()
 
@@ -428,8 +453,17 @@ def fill_application(
 
 HOLD_POLL_MS = 500
 
+# How often the preview is refreshed while somebody is watching. Two seconds is a
+# still-image cadence, not a video one — which is the whole point. The expensive path
+# this replaces shipped every frame of a remote X server.
+SHOT_EVERY_S = 2.0
 
-def _hold_until_closed(report: FillReport, context) -> None:
+# Cheap enough to send often, legible enough to read a form in. PNG would be several
+# times the bytes for a screenshot that is mostly flat white boxes.
+SHOT_QUALITY = 60
+
+
+def _hold_until_closed(report: FillReport, context, session=None) -> None:
     """Block until the window is gone. For a caller with no terminal to prompt at.
 
     **The wait has to happen inside a Playwright call.** The sync API only dispatches
@@ -444,6 +478,11 @@ def _hold_until_closed(report: FillReport, context) -> None:
     exception here means the browser is gone, which is the exit condition, not an error.
 
     The summary goes to the log because that is the only place a served run has to speak.
+
+    With a `session`, this is also where the dashboard's edits land. The tick was already
+    here and already inside a Playwright call, so draining the queue in it costs nothing
+    and inherits the one property that matters: every call to `page` happens on the
+    thread that made it. Nothing else in the process may touch it.
     """
     log.info("%s — the window is yours; it closes when you close it", report.summary())
     for field_ in report.gaps:
@@ -452,10 +491,104 @@ def _hold_until_closed(report: FillReport, context) -> None:
         try:
             pages = context.pages
             if not pages:
-                return
+                break
+            if session is not None:
+                _drain(session, pages[0])
             pages[0].wait_for_timeout(HOLD_POLL_MS)
         except Exception:  # noqa: BLE001 — the browser is gone, which is the exit
-            return
+            break
+    if session is not None:
+        # The window closing is the end of the session, and the page has to be able to
+        # tell that from "still working". Without this it polls a form nobody is holding
+        # any more and every edit queues into nothing.
+        session.set_phase(live.CLOSED)
+
+
+def _drain(session, page) -> None:
+    """Carry the dashboard's queued commands to the live page, then keep the preview up.
+
+    Runs on the browser thread, once per tick. Every command is one of four names and
+    carries a handle rather than a selector, so there is nothing here that can be pointed
+    at an arbitrary element or made to evaluate arbitrary text — see `live.py`.
+    """
+    while True:
+        try:
+            command = session.commands.get_nowait()
+        except queue.Empty:
+            break
+        try:
+            _obey(session, page, command)
+        except Exception as exc:  # noqa: BLE001 — one bad command is not a dead session
+            # Warning, not debug: `_write` already returns False for a field that simply
+            # would not take the value, so reaching here means something structural, and
+            # a mirror quietly dropping every edit is the failure-is-absence shape all
+            # over again.
+            log.warning("command %s failed: %s", command.kind, exc)
+
+    if session.watching() and session.due_for_shot(SHOT_EVERY_S):
+        _shoot(session, page)
+
+
+def _obey(session, page, command) -> None:
+    """One command. The epoch check is the load-bearing line."""
+    if command.kind == live.SHOOT:
+        _shoot(session, page)
+        return
+    if command.kind == live.REDISCOVER:
+        _reread(session, page)
+        return
+    if command.kind not in (live.SET, live.HIGHLIGHT):
+        return  # not in the vocabulary; `Session.submit` refused it too
+
+    if command.epoch != session.epoch:
+        # The form was read again since this was written, and the reading renumbered the
+        # handles, so this one may now name a different input. Dropping it is the entire
+        # purpose of the epoch: the alternative is putting an answer you did not give
+        # into a field you cannot see.
+        log.debug("stale %s for %s (epoch %s, now %s)",
+                  command.kind, command.handle, command.epoch, session.epoch)
+        return
+
+    row = next((r for r in session.fields if r["handle"] == command.handle), None)
+    if row is None:
+        return
+
+    if command.kind == live.HIGHLIGHT:
+        page.evaluate(_HIGHLIGHT_JS, [command.handle])
+        return
+
+    # `_write` is the only writer, here as in the fill. It takes the raw DOM finding, of
+    # which it reads exactly two keys — so the mirror row stands in for it directly and
+    # no second write path exists to keep in step with the first.
+    raw = {"handle": row["handle"], "type": row["type"], "label": row["label"]}
+    if _write(page, raw, command.value):
+        session.mark(command.handle, live.FILLED, command.value)
+        # A form that reveals a question once you answer another one is the ordinary
+        # case, not an exotic one. Reading it again here is what stops the mirror going
+        # stale exactly when you are making progress.
+        _reread(session, page)
+    else:
+        session.mark(command.handle, live.REFUSED, "")
+    _shoot(session, page)
+
+
+def _reread(session, page) -> None:
+    """Read the form again and republish it. Never navigates."""
+    found = page.evaluate(_DISCOVER_JS)
+    fields = _fields_from_dom(found)
+    if session.absorb(live.rows_from(found, fields, session.carried())):
+        log.info("the form changed shape — %d field(s), epoch %d",
+                 len(found), session.epoch)
+
+
+def _shoot(session, page) -> None:
+    """A still of the real page, for the preview.
+
+    A picture rather than a stream, deliberately: what this replaces was a stream, and
+    the reason it was slow is that a stream is what it was. Two seconds of staleness on
+    an image you glance at costs nothing; the fields you actually type into are local.
+    """
+    session.store_shot(page.screenshot(type="jpeg", quality=SHOT_QUALITY))
 
 
 def _write(page, raw: dict, value: str) -> bool:

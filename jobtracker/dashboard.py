@@ -465,7 +465,6 @@ _JS = """
     var label = b.textContent;
     var card = b.closest('.pick');
     var note = card.querySelector('.applymsg');
-    var view = card.querySelector('a.viewwin');
 
     b.addEventListener('click', function () {
       b.disabled = true;
@@ -477,10 +476,15 @@ _JS = """
         body: JSON.stringify({company: b.dataset.company, ats_job_id: b.dataset.job})
       }).then(function (r) { return r.json(); }).then(function (res) {
         if (res.ok) {
-          // Not opened for you automatically: a window.open() after an await has lost
-          // the user gesture and dies in a popup blocker, which would read as another
-          // dead button. The link is right there and it is yours to click.
-          b.textContent = view ? 'Opened — see View window →' : 'Opened — the window is yours';
+          // Straight to the page you fill it in on. Same tab, and a navigation rather
+          // than a window.open(): after an await the user gesture is gone and a popup
+          // blocker eats it, which would read as another dead button.
+          //
+          // The window itself is still opening on the server as this navigates. That is
+          // fine — /apply renders the session immediately and reports its phase, which
+          // is the progress report this button never had.
+          b.textContent = 'Opening…';
+          location.href = res.href || '/apply';
           return;
         }
         fail(res.error || 'failed');

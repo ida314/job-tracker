@@ -13,9 +13,9 @@ import inspect
 
 import pytest
 
-from jobtracker import browser, store
+from jobtracker import browser, live, store
 from jobtracker.answers import load_answers
-from jobtracker.models import Company
+from jobtracker.models import Company, FormField
 
 try:  # pragma: no cover - depends on the optional extra
     import playwright.sync_api  # noqa: F401
@@ -325,4 +325,202 @@ def test_a_dropdown_that_does_not_offer_our_answer_is_left_alone(tmp_path, answe
     )
     labels = {g.label for g in report.gaps}
     assert "Please select the country where you currently reside." in labels
+    conn.close()
+
+
+# -- the mirrored form ------------------------------------------------------------------
+# `serve` fills the form and then hands you the fields rather than the window. The
+# window still exists — it is where you read the application over and send it — but the
+# typing happens on a page with no video stream between you and the keyboard.
+
+
+class _Recorder:
+    """A page that records what was asked of it. Enough to drive `_drain` with no browser."""
+
+    def __init__(self, found=None):
+        self.found = found or []
+        self.filled = {}
+        self.shots = 0
+        self.evaluated = []
+
+    def evaluate(self, script, arg=None):
+        self.evaluated.append(arg)
+        return self.found
+
+    def fill(self, selector, value):
+        self.filled[selector] = value
+
+    def screenshot(self, **kwargs):
+        self.shots += 1
+        return b"\xff\xd8jpeg"
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+def _raw(handle, key, label, type_):
+    """A DOM finding shaped exactly as `_DISCOVER_JS` returns one."""
+    return {"handle": handle, "name": key, "elementId": "", "label": label,
+            "type": type_, "required": False, "options": []}
+
+
+def _mirror(*specs):
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    found = [_raw(f"jt{i}", k, lab, t) for i, (k, lab, t) in enumerate(specs)]
+    fields = [FormField(key=k, label=lab, type=t) for k, lab, t in specs]
+    session.absorb(live.rows_from(found, fields))
+    session.set_phase(live.READY)
+    return session, found
+
+
+def test_a_command_from_before_the_form_moved_is_never_written():
+    """The one way this feature could put an answer you did not give into a hidden field.
+
+    The page holds handles from the reading it rendered. If the form is read again and
+    the numbering shifts, those handles now name their neighbours — so a write in flight
+    has to land nowhere rather than somewhere plausible.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"),
+                             ("email", "Email", "text"))
+    page = _Recorder(found)
+    stale = session.epoch
+
+    # The form grows a question, which moves every handle below it.
+    grew = [_raw("jt0", "first_name", "First Name", "text"),
+            _raw("jt1", "sponsorship", "Sponsorship?", "select"),
+            _raw("jt2", "email", "Email", "text")]
+    session.absorb(live.rows_from(
+        grew,
+        [FormField(key="first_name", label="First Name", type="text"),
+         FormField(key="sponsorship", label="Sponsorship?", type="select"),
+         FormField(key="email", label="Email", type="text")],
+        session.carried(),
+    ))
+    assert session.epoch != stale
+
+    session.submit(live.Command(kind=live.SET, handle="jt1", value="dyd2008@nyu.edu",
+                                epoch=stale))
+    browser._drain(session, page)
+
+    assert page.filled == {}, "a stale handle reached the page"
+    by_key = {r["key"]: r for r in session.snapshot()["fields"]}
+    assert by_key["sponsorship"]["status"] == live.PENDING
+
+
+def test_a_current_command_is_written_through_the_one_writer():
+    session, found = _mirror(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="Dylan",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert page.filled == {'[data-jt-id="jt0"]': "Dylan"}
+    assert session.snapshot()["fields"][0]["status"] == live.FILLED
+
+
+def test_a_successful_write_reads_the_form_again():
+    """Forms reveal questions once you answer others. Without this the mirror goes stale
+    exactly when you are making progress."""
+    session, found = _mirror(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="Dylan",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+    # _DISCOVER_JS ran again — the re-read — and so did a screenshot.
+    assert len(page.evaluated) >= 1
+    assert page.shots >= 1
+
+
+def test_a_field_that_would_not_take_the_value_says_so_rather_than_going_quiet():
+    """Same rule the fill follows: a refusal is an outcome, not an error."""
+    session, found = _mirror(("country", "Country", "select"))
+    page = _Recorder(found)
+
+    def refuse(selector, label=None):
+        raise RuntimeError("no such option")
+
+    page.select_option = refuse
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="Atlantis",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+    assert session.snapshot()["fields"][0]["status"] == live.REFUSED
+
+
+def test_no_screenshots_are_taken_for_a_page_nobody_is_looking_at():
+    session, found = _mirror(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+    browser._drain(session, page)          # nobody watching
+    assert page.shots == 0
+
+    session.watch()
+    browser._drain(session, page)
+    assert page.shots == 1
+
+
+def test_the_drain_survives_a_command_that_fails():
+    """One bad command must not end a session you are halfway through filling in."""
+    session, found = _mirror(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+
+    def explode(script, arg=None):
+        raise RuntimeError("the page is busy")
+
+    page.evaluate = explode
+    session.submit(live.Command(kind=live.REDISCOVER))
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="Dylan",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+    assert page.filled == {'[data-jt-id="jt0"]': "Dylan"}
+
+
+def test_the_window_closing_ends_the_session():
+    """Otherwise the page polls a form nobody is holding and every edit queues into
+    nothing — a mirror that looks live over a browser that is gone."""
+    session, _ = _mirror(("first_name", "First Name", "text"))
+    browser._hold_until_closed(browser.FillReport(url="https://x"),
+                               _FakeContext(0), session)
+    assert session.snapshot()["phase"] == live.CLOSED
+    assert session.submit(live.Command(kind=live.SET, handle="jt0", value="x")) is False
+
+
+@needs_browser
+def test_the_mirror_writes_to_the_real_form(tmp_path, answers):
+    """End to end against a real browser: type on the page, land in the DOM.
+
+    The whole feature is this one hop — a value typed somewhere with no latency reaching
+    a form field on a machine that may be somewhere else entirely.
+    """
+    page_file = tmp_path / "form.html"
+    page_file.write_text(FORM_HTML)
+    session = live.start("Stripe", "1", "Backend Engineer", page_file.as_uri())
+
+    conn = store.connect(":memory:")
+    # The one gap this fixture leaves — "Why do you want to work here?" — is what a
+    # human would type, so it is what the mirror has to be able to send.
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        context = browser._launch(pw, tmp_path / "profile", headless=True)
+        try:
+            page = context.new_page()
+            page.goto(page_file.as_uri())
+            found = page.evaluate(browser._DISCOVER_JS)
+            fields = browser._fields_from_dom(found)
+            session.absorb(live.rows_from(found, fields))
+            session.set_phase(live.READY)
+
+            row = next(r for r in session.snapshot()["fields"]
+                       if r["label"] == "Why do you want to work here?")
+            session.submit(live.Command(kind=live.SET, handle=row["handle"],
+                                        value="Distributed systems, early.",
+                                        epoch=session.epoch))
+            session.watch()
+            browser._drain(session, page)
+
+            assert page.input_value("#why") == "Distributed systems, early."
+            assert session.shot, "no preview was taken while watching"
+            assert session.shot[:2] == b"\xff\xd8", "the preview is not a JPEG"
+        finally:
+            context.close()
     conn.close()

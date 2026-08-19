@@ -171,9 +171,14 @@ pip install 'jobtracker[browser]' && playwright install chrome
 
 Without it, `apply-to` and `serve`'s "Open prefilled" button say so; everything else
 works unchanged, and the `browser`-marked tests skip. The window opens **on the machine
-running the command**, so a headless host needs a display (`Xvfb :100`) and, if you want
-to watch it from elsewhere, a viewer named by `JOBTRACKER_BROWSER_VIEW_URL`. See
-`docs/prefill.md`.
+running the command**, so a headless host needs a display (`Xvfb :100`).
+
+Under `serve` you do not type in that window. "Open prefilled" opens it and sends you to
+**`/apply`**, which mirrors every field of the real form onto a page with no latency
+between you and the keyboard, plus a screenshot of what the browser actually sees. The
+window is still where you read the application over and submit it — nothing on `/apply`
+can — so a headless host still wants a viewer named by `JOBTRACKER_BROWSER_VIEW_URL` for
+that step and for captchas. See `docs/prefill.md`.
 
 ## Container
 

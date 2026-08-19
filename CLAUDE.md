@@ -452,7 +452,8 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   pointing at whatever shows that host's display (noVNC, xpra, …) — **a link and nothing
   more.** The app must never start, probe, or manage the viewer: it is deployment, it
   lives on the machine, and a dashboard that thought it owned a remote desktop would be a
-  second system to debug. Unset, the link does not render.
+  second system to debug. Unset, the link does not render. **Since 2026-08-18 that link is the
+  escape hatch, not the interface** — see "The mirrored form" below.
 - **The resume upload is base64 inside JSON, not multipart.** It reuses the one POST path
   this server has and keeps `form-action 'none'` in the CSP meaningful — the page never
   submits a form, it fetches. `MAX_UPLOAD` is applied per-route, so a decision POST still
@@ -877,6 +878,72 @@ Three things learned from live forms; all are handled and none is obvious:
   are known, and **zero fields discovered is reported as "no application form found",
   never as "0/0 filled, nothing left to do"** — absence read as success is the failure
   DESIGN.md §3.4 exists to prevent.
+## The mirrored form
+
+`/apply` under `serve`, `jobtracker/live.py`, and the drain in `browser._hold_until_closed`.
+Full guide in `docs/prefill.md` under "Filling it in". Added 2026-08-18.
+
+**The window is no longer where you type.** "Open prefilled" navigates to `/apply`, which
+renders one HTML field per field discovered on the real form; you type there, the value is
+pushed to the browser `serve` is holding, and a screenshot every couple of seconds shows
+the real page. What this replaces was VNC — a remote X server shipping video frames for a
+task that is fifteen text fields, slow because it is video rather than because it is badly
+tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` handle
+`_DISCOVER_JS` mints); all that was missing was a channel to it.
+
+- **`live.py` is pure.** No Playwright, no HTTP, no SQLite — so `browser.py` and
+  `server.py` both import it and neither imports the other, and every rule below is
+  testable with no browser and no socket. Same split as the task modules.
+- **The drain runs in the tick that was already there.** `_hold_until_closed` polls
+  `page.wait_for_timeout(500)`; the queue is drained in that same tick, and that is the
+  only code touching `page` outside the fill. **Playwright objects belong to the thread
+  that made them** — an HTTP handler calling into one is the bug this shape prevents. So a
+  write is queued and answered immediately and the outcome arrives on the next poll, the
+  same shape `_api_apply_to` already had and for the same reason.
+- **A command points, it does not write.** The vocabulary is exactly four names — `set`,
+  `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*, never a
+  selector and never anything the browser thread evaluates. That is `browser.py`'s
+  no-click-path rule carried across the new channel, and it needs its own test because the
+  existing one only scans that module's source. **Nothing on the page can submit**, and
+  there is a test asserting the page has no form, no submit control and no such endpoint.
+- **A handle is only valid for the discovery that minted it.** `_DISCOVER_JS` renumbers
+  `jt0…jtN` from scratch every pass, so once the form changes shape a handle names its
+  neighbour. Commands carry the `epoch` they were written against and are dropped on a
+  mismatch, in the drain, where nothing can bypass it. This is the one way this feature
+  could put an answer you did not give into a field you cannot see.
+- **But the epoch moves only when the handles actually moved.** A successful write
+  re-reads the form (questions get revealed by answers). Bumping every time would mean the
+  second field you typed is refused because the first one succeeded — every edit poisoning
+  the next. `live.signature` asks the one question the epoch is about: does every position
+  still report the same field under the same handle. Both halves have tests.
+- **Statuses carry over by key, not by handle.** The handle is positional and is exactly
+  what moves; the key is the ATS's field name. Carrying by handle would hand a new
+  question the answer that belonged to its predecessor.
+- **`PENDING` counts as "needs you".** A field the fill never reached, or one a re-reading
+  has only just revealed, is emphatically not "nothing left to type" — that is the
+  zero-discovered mistake one row at a time. Zero discovered is still *"no application
+  form found"*.
+- **`img-src 'self'` is as load-bearing as `connect-src 'self'`.** The CSP is
+  `default-src 'none'` and both fall back to it, failing the same silent way: the preview
+  becomes a broken image over a browser that is working perfectly. `_CSP` is one string
+  now, and the test asserts the value rather than `_send`'s source text.
+- **No screenshots for a page nobody is looking at.** Each poll refreshes a deadline; the
+  drain shoots only inside it. That is also the Pause button and the closed-tab case, for
+  free — a JPEG every two seconds forever on the box that also runs the nightly pipeline
+  is pure waste.
+- **The window closing must set `CLOSED`.** Otherwise the page polls a form nobody holds
+  and every edit queues into nothing — a mirror that looks live over a browser that is
+  gone. Failure-is-absence, in the UI again.
+- **`/api/session/file` is in `_UPLOAD_ROUTES`.** It has to be: the browser's file picker
+  shows the *server's* disk, so this upload is the file transfer, and a file route left
+  out of that set reads its body as `{}` and reports "no file". Validation, naming and the
+  atomic write are `resumes`', unchanged — there is no second way a file reaches this box.
+- **Handlers live in `server._APPLY_JS`**, emitted only by `render_apply` — the
+  button-and-handler-in-the-same-file rule, applied up front. There is a parity test.
+- **This did not remove `DISPLAY`, Xvfb or the viewer units**, and must not be read as
+  having done so. Chromium still draws somewhere, and captchas and the submit itself still
+  happen in the window. What changed is what you type into.
+
 ## Slug repair
 
 `jobtracker repair`, documented in `docs/repair.md`. The **second** of the model's four

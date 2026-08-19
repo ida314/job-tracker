@@ -342,6 +342,91 @@ The static dashboard shows the prefill counts — `prefill 13/16 fields · 3 nee
 and **no button**. The counts are useful offline; a button that cannot drive a browser is
 worse than no button, the same rule the disposition buttons follow.
 
+## Filling it in: `/apply`
+
+**The window is no longer where you type.** `serve`'s "Open prefilled" navigates to
+`/apply`, which renders one HTML field per field discovered on the real form. You type
+there, the value is pushed to the real browser, and a screenshot every couple of seconds
+shows what the page actually looks like. The window still exists, and it is still the only
+place an application can be submitted from.
+
+The reason is latency. The window opens where `serve` runs, so on a headless host you were
+watching it through VNC — a remote X server shipping video frames for a task that is
+fifteen text fields. That is slow because it is video, not because it is badly tuned. The
+fields, meanwhile, were already known: `_DISCOVER_JS` tags every input, `_fields_from_dom`
+names them, and `_write` puts a value into exactly one of them. All that was missing was a
+channel from the page you are looking at to that writer.
+
+```
+Cloudflare — Backend Engineer, New Grad          [Read the form again]
+
+┌─ preview ───────────── Pause ─┐   First Name   [ Dylan          ]  filled
+│  [jpeg of the real form]      │   Resume/CV    [ Choose file    ]  filled
+│                               │   Work auth?   [ Yes         ▾  ]  filled
+└───────────────────────────────┘   Why us?      [                ]  needs you
+                                      ☐ also save to my answer bank as `why_us`
+Review & submit
+View window ↗                       3/4 fields filled · 1 need you
+```
+
+### How it works
+
+`jobtracker/live.py` holds one `Session`: the mirrored rows, a command queue, and the
+latest screenshot. It is pure — no Playwright, no HTTP, no SQLite — so `browser.py` and
+`server.py` both import it, neither imports the other, and the whole mechanism is testable
+with neither a browser nor a socket.
+
+The fill publishes into it and then holds the window as before. `_hold_until_closed` was
+already ticking every 500ms inside `page.wait_for_timeout`, and it now drains the queue in
+that same tick. That placement is not incidental: **Playwright objects belong to the
+thread that made them**, and the drain is the only code that touches `page` outside the
+fill. An HTTP handler must never call into it.
+
+So a write from the page is queued and answered immediately, and the outcome arrives on
+the next poll. Same shape as `apply-to` itself, for the same reason — this is
+`HTTPServer`, one request in flight, and blocking on a browser would freeze every tab.
+
+### Rules that are load-bearing
+
+- **A command points, it does not write.** The vocabulary is exactly four names — `set`,
+  `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*, never a
+  selector and never anything the browser thread evaluates. That is `browser.py`'s
+  no-click-path rule carried across the new channel, and it has its own test.
+- **A handle is only valid for the discovery that minted it.** `_DISCOVER_JS` renumbers
+  `jt0…jtN` from scratch on every pass, so once the form changes shape the same handle
+  names a different input. Every command carries the `epoch` it was written against and is
+  dropped on a mismatch — on the browser thread, where it cannot be bypassed. This is the
+  one way this feature could put an answer you did not give into a field you cannot see.
+- **The epoch moves only when the handles actually moved.** A successful write re-reads
+  the form, because forms reveal questions once you answer others. If that always bumped
+  the epoch, the second field you typed would be refused because the first one succeeded —
+  every edit poisoning the next. `live.signature` asks the one question the epoch is
+  about: does every position still report the same field under the same handle.
+- **No screenshots for a page nobody is looking at.** Each poll refreshes a deadline and
+  the drain shoots only inside it. That is also the Pause button, and the closed-tab case.
+- **`img-src 'self'` is as load-bearing as `connect-src 'self'`.** The CSP is
+  `default-src 'none'`, both fall back to it, and both fail the same silent way — the
+  preview would be a broken image over a browser working perfectly.
+- **Nothing on the page can submit.** There is no control, no endpoint and no command that
+  could. An application is irreversible and goes out under your name — the same reason
+  `browser.py` has no click path.
+
+### What it cannot do
+
+- **Captchas, and the submit itself.** Both stay in the window, which is why
+  `JOBTRACKER_BROWSER_VIEW_URL` is still there and still only a link.
+- **Fields the DOM pass cannot see.** `_DISCOVER_JS` skips anything with no `offsetParent`
+  — a collapsed section — and anything that is not a real input, such as a rich-text
+  editor or a drag-and-drop dropzone. The page prints what it read and says so; it must
+  never imply the list is the whole form. Zero fields is still *"no application form
+  found"*, never "nothing left to type".
+- **A form that rewrites itself while you are in it.** Re-reading after each write narrows
+  the window; when the shape does change, the page says so and stops rather than pushing
+  into whatever is there now. "Read the form again" is one click.
+
+None of this removes the need for `DISPLAY`, `Xvfb` or the viewer. Chromium still draws
+somewhere, and the escape hatch has to show something. What changed is what you type into.
+
 ## `prepare`: is tomorrow morning actually useful?
 
 ```

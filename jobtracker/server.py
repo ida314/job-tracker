@@ -43,9 +43,11 @@ from typing import Optional
 import yaml
 
 from . import (
+    answers as answers_mod,
     applications as apps_mod,
     config,
     dashboard as dashboard_mod,
+    live,
     rank as rank_mod,
     resumes,
     safewrite,
@@ -63,8 +65,24 @@ MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
 # The body cap for routes that carry a file. It is a *set*, not one path: a second upload
 # route added without joining this set silently reads its body as `{}` and reports "no
 # file" — a correct-looking error for entirely the wrong reason.
-_UPLOAD_ROUTES = {"/api/resume", "/api/posting-resume"}
+_UPLOAD_ROUTES = {"/api/resume", "/api/posting-resume", "/api/session/file"}
 MAX_UPLOAD = resumes.MAX_UPLOAD
+
+# No external anything, matching the static dashboard's guarantee.
+#
+# `connect-src 'self'` is required, not optional: every write on this server goes out as
+# a fetch() to /api/..., and connect-src falls back to default-src when unset — which is
+# 'none' here. Without it the browser blocks the request and the buttons silently do
+# nothing.
+#
+# `img-src 'self'` is required for exactly the same reason and fails exactly the same
+# way. The apply page's preview is a same-origin JPEG this server renders; under
+# default-src 'none' it is blocked with no error anywhere, and the page shows a broken
+# image over a browser that is working fine.
+_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+    "img-src 'self'; connect-src 'self'; form-action 'none'"
+)
 
 # Held for as long as a prefilled window is open. One browser profile directory, which
 # Chromium locks, so two at once is not a thing that can work — and the second failure
@@ -300,6 +318,199 @@ def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
 
     p.append(f"<script>{_JS}</script></div></body></html>")
     return "\n".join(p)
+
+
+def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
+    """The live application form, mirrored into fields you can actually type in.
+
+    Pure read — it never writes to `conn`, and it never touches the browser. Everything
+    it renders comes from the `live.Session` the worker thread publishes into.
+
+    Why this page exists at all: the window is on the machine running `serve`, which on a
+    headless host means watching it through VNC. Every keystroke was a round trip to a
+    remote X server rendered as video, for a task that is fifteen text fields. Here the
+    typing is local and instant and only the finished value crosses the wire.
+
+    What it deliberately does not do is submit. There is no control on this page that
+    can, for the same reason `browser.py` has no click path: an application is
+    irreversible and goes out under your name. The window is still where you read it over
+    and send it, which is why the viewer link is kept and pointed at exactly that job.
+    """
+    p = [
+        "<!doctype html><meta charset=utf-8><title>Fill in</title>",
+        f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_APPLY_CSS}</style>",
+        "<body><div class=wrap>",
+        f"<h1>Fill in {dashboard_mod.version_chip()}</h1>", _NAV,
+    ]
+
+    if session is None:
+        p.append(
+            "<p class=note>No window is open. Pick a job on the "
+            '<a href="/">dashboard</a> and press <b>Open prefilled</b> — this page is '
+            "where you fill it in.</p>"
+        )
+        p.append(f"<script>{_APPLY_JS}</script></div></body></html>")
+        return "\n".join(p)
+
+    snap = session.snapshot()
+    p.append(
+        f'<h2 class="who">{html.escape(snap["company"])} — '
+        f'{html.escape(snap["title"])}</h2>'
+    )
+    p.append(
+        f'<p class="phase" data-epoch="{html.escape(str(snap["epoch"]), quote=True)}">'
+        f'<span class="pill" id="phase">{html.escape(snap["phase"])}</span> '
+        f'<span id="summary">{html.escape(live.summary(snap))}</span></p>'
+    )
+
+    # The form changed shape under the page. Rendered here, hidden, so the script only
+    # ever unhides it — the same rule that keeps `.applymsg` server-rendered: a script
+    # that writes markup is a script that can be made to write somebody else's markup.
+    p.append(
+        '<p class="banner bad" id="moved" hidden>The form changed while you were '
+        "typing, so the fields below no longer point at it. Reload to read it again — "
+        'nothing you already pushed is lost. <button id="reload">Reload</button></p>'
+    )
+
+    p.append('<div class="split">')
+
+    # -- the preview ------------------------------------------------------------------
+    p.append('<div class="pane">')
+    p.append(
+        '<div class="phead">Preview '
+        '<button id="pause" data-paused="0">Pause</button>'
+        '<span class="ago" id="ago"></span></div>'
+    )
+    # A still, refreshed on a cadence — not a stream. What this page replaces was a
+    # stream, and being a stream is why it was slow.
+    p.append('<img id="preview" alt="the application form as the browser sees it">')
+    p.append(
+        '<p class=note>The picture is a couple of seconds behind. The fields are not.</p>'
+    )
+    if view_url:
+        # Kept, and pointed at the two things a mirrored form genuinely cannot do:
+        # solve a captcha, and let you read the whole application before you send it.
+        # Still only a link — this app does not start, probe or manage the viewer.
+        p.append(
+            "<h3>Review &amp; submit</h3>"
+            "<p class=note>When it is right, open the window and send it yourself. "
+            "Nothing on this page can submit an application.</p>"
+            f'<p><a class="viewwin" href="{dashboard_mod._safe_url(view_url)}" '
+            'target="_blank" rel="noopener">View window ↗</a></p>'
+        )
+    else:
+        p.append(
+            "<h3>Review &amp; submit</h3>"
+            "<p class=note>Nothing on this page can submit an application — that is "
+            "deliberate. Set <code>JOBTRACKER_BROWSER_VIEW_URL</code> to get a link to "
+            "the window from here, or use the screen the browser is drawing on.</p>"
+        )
+    p.append("</div>")
+
+    # -- the fields -------------------------------------------------------------------
+    p.append('<div class="pane fields">')
+    p.append(
+        '<div class="phead">Fields '
+        '<button id="reread">Read the form again</button></div>'
+    )
+    if not snap["discovered"]:
+        # Zero is a finding, not a finished job. Said the same way `FillReport` says it.
+        p.append(
+            f'<p class="banner bad">{html.escape(live.summary(snap))}</p>'
+            "<p class=note>Nothing was found to fill in: the page may not have "
+            "rendered, may only link to the real application, or may be behind a login. "
+            "Open the window and look.</p>"
+        )
+    for row in snap["fields"]:
+        p.extend(_live_field(row, snap["epoch"]))
+    p.append(
+        f'<p class=note id="counts">{html.escape(live.summary(snap))}</p>'
+    )
+    # The mirror can only show what the discovery pass could see — a collapsed section,
+    # a drag-and-drop dropzone or a rich-text editor is not an input and never appears
+    # here. Saying so beats implying the list is the whole form.
+    p.append(
+        "<p class=note>These are the fields read off the page. Anything it could not "
+        "read — a custom widget, a collapsed section, a captcha — is only in the "
+        "window.</p>"
+    )
+    p.append("</div>")
+
+    p.append("</div>")
+    p.append(f"<script>{_APPLY_JS}</script></div></body></html>")
+    return "\n".join(p)
+
+
+def _live_field(row: dict, epoch: int) -> list:
+    """One mirrored form field.
+
+    Everything here is third-party text off an ATS page — labels, option values, the
+    value we put in — so all of it is escaped, exactly like the posting titles on the
+    dashboard.
+
+    The control is server-rendered rather than built in JS so the page is legible and
+    complete with the script off; the script only reads values out of it and writes
+    statuses back in.
+    """
+    handle = html.escape(row["handle"], quote=True)
+    label = html.escape(row["label"] or row["key"] or row["handle"])
+    status = row["status"]
+    out = [
+        f'<div class="lf" data-handle="{handle}" '
+        f'data-epoch="{html.escape(str(epoch), quote=True)}" '
+        f'data-type="{html.escape(row["type"], quote=True)}">',
+        f'<div class="lab">{label}',
+    ]
+    if row["required"]:
+        out.append(' <span class="req">required</span>')
+    out.append(f' <span class="st st-{html.escape(status, quote=True)}">'
+               f'{html.escape(_STATUS_WORD.get(status, status))}</span>')
+    out.append("</div>")
+
+    value = html.escape(row["value"] or "")
+    if row["type"] in ("select", "multiselect"):
+        out.append('<select class="lv">')
+        # A blank first option, always. Without one, opening the page would look like
+        # every dropdown already holds its first value — and a dropdown we could not
+        # answer is a gap, which is a thing to see rather than a thing to hide.
+        out.append('<option value="">— choose —</option>')
+        for option in row["options"]:
+            sel = " selected" if option == row["value"] else ""
+            o = html.escape(option, quote=True)
+            out.append(f'<option value="{o}"{sel}>{html.escape(option)}</option>')
+        out.append("</select>")
+    elif row["type"] == "file":
+        out.append('<input class="lf-file" type="file">')
+        if row["value"]:
+            out.append(f'<p class=note>attached: <code>{value}</code></p>')
+    elif row["type"] == "checkbox":
+        checked = " checked" if row["status"] == live.FILLED else ""
+        out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}> yes'
+                   "</label>")
+    elif row["type"] == "textarea":
+        out.append(f'<textarea class="lv" rows="4">{value}</textarea>')
+    else:
+        out.append(f'<input class="lv" type="text" value="{value}">')
+
+    # Answering it here can also answer it everywhere. Offered only where there is
+    # something to learn — a field the fill could not answer — and it goes through
+    # `/api/answer`, the same writer the Settings tab uses. No second path into the bank.
+    if status in (live.GAP, live.REFUSED) and row["type"] != "file":
+        key = html.escape(answers_mod.slugify(row["label"] or row["key"]), quote=True)
+        out.append(
+            '<label class="bank"><input type="checkbox" class="tobank"> also save to my '
+            f'answer bank as <input class="bankkey" type="text" value="{key}"></label>'
+        )
+    out.append("</div>")
+    return out
+
+
+_STATUS_WORD = {
+    live.FILLED: "filled",
+    live.GAP: "needs you",
+    live.REFUSED: "would not take it",
+    live.PENDING: "…",
+}
 
 
 def _mail_proposals_card(conn: sqlite3.Connection) -> list:
@@ -648,17 +859,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        # No external anything, matching the static dashboard's guarantee.
-        #
-        # `connect-src 'self'` is required, not optional: every write on this server
-        # goes out as a fetch() to /api/..., and connect-src falls back to default-src
-        # when unset — which is 'none' here. Without it the browser blocks the request
-        # and the buttons silently do nothing.
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; "
-            "script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
-        )
+        self.send_header("Content-Security-Policy", _CSP)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_bytes(self, data: bytes, ctype: str, status: int = 200) -> None:
+        """A response that is not text. Today that is exactly one thing: the preview.
+
+        `_send` encodes UTF-8, so it cannot carry a JPEG. Kept to the same CSP and given
+        `no-store` because the image changes every couple of seconds and a cached one is
+        a picture of a form you already filled in.
+        """
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Security-Policy", _CSP)
         self.end_headers()
         self.wfile.write(data)
 
@@ -711,6 +927,17 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._send(page)
+            elif path == "/apply":
+                conn = self._conn()
+                try:
+                    page = render_apply(conn, live.current(), config.BROWSER_VIEW_URL)
+                finally:
+                    conn.close()
+                self._send(page)
+            elif path == "/api/session":
+                self._send_json(self._api_session())
+            elif path == "/api/session/preview.jpg":
+                self._send_preview()
             else:
                 self._send("<h1>404</h1>", 404)
         except Exception:  # noqa: BLE001
@@ -745,6 +972,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_prefill(payload))
             elif path == "/api/apply-to":
                 self._send_json(self._api_apply_to(payload))
+            elif path == "/api/session/set":
+                self._send_json(self._api_session_set(payload))
+            elif path == "/api/session/rediscover":
+                self._send_json(self._api_session_command(live.REDISCOVER))
+            elif path == "/api/session/file":
+                self._send_json(self._api_session_file(payload))
             elif path == "/api/application":
                 self._send_json(self._api_application(payload))
             elif path == "/api/application/meta":
@@ -1535,6 +1768,11 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False,
                     "error": "a prefilled window is already open — close it first"}
 
+        # The page the click is about to land on reads this, so it exists before the
+        # thread does — a session created on the worker would leave `/apply` reporting
+        # "no window is open" for the first second of every session.
+        session = live.start(company_name, job_id, row["title"], url)
+
         def _run() -> None:
             worker_conn = store.connect(self.server.db_path)
             try:
@@ -1554,17 +1792,117 @@ class Handler(BaseHTTPRequestHandler):
                     # browser yourself; without it the window opens and vanishes.
                     wait=False,
                     hold=True,
+                    # Mirror the form into the page rather than leaving it to be typed
+                    # through a video stream of this window. `hold` still governs how
+                    # long the window lives; this governs what you type into.
+                    session=session,
                 )
             except Exception:  # noqa: BLE001 — a browser failure must not kill serve
                 log.exception("apply-to %s/%s failed", company_name, job_id)
+                session.set_phase(live.CLOSED, "the window could not be opened — "
+                                               "see the server log")
             finally:
+                session.set_phase(live.CLOSED)
                 worker_conn.close()
                 _APPLY_LOCK.release()
 
         threading.Thread(
             target=_run, name=f"jobtracker-apply-{job_id}", daemon=True
         ).start()
-        return {"ok": True, "detail": f"opening {row['title'][:60]}…"}
+        # Where to go to fill it in. The button navigates rather than relabelling
+        # itself: the form is now typed on that page, not in the window.
+        return {"ok": True, "href": "/apply",
+                "detail": f"opening {row['title'][:60]}…"}
+
+    # -- the live form -------------------------------------------------------------
+    #
+    # Five small endpoints, and every one of them returns without touching a browser.
+    # That is not a style choice: this is `HTTPServer`, one request in flight, and the
+    # browser lives on a daemon thread that owns its Playwright objects exclusively. So
+    # a write here queues a command and answers immediately, and the outcome arrives on
+    # the next poll — the same shape `_api_apply_to` already has, for the same reason.
+    def _api_session(self) -> dict:
+        """The poll. Also what tells the browser thread somebody is still watching."""
+        session = live.current()
+        if session is None:
+            return {"ok": False, "error": "no window is open"}
+        session.watch()
+        return {"ok": True, "session": session.snapshot()}
+
+    def _send_preview(self) -> None:
+        session = live.current()
+        blob = session.shot if session is not None else None
+        if blob is None:
+            # Not an error worth a body: for the first couple of seconds of a session
+            # there genuinely is no picture yet, and the page just tries again.
+            self._send_bytes(b"", "image/jpeg", 404)
+            return
+        self._send_bytes(blob, "image/jpeg")
+
+    def _api_session_command(self, kind: str, handle: str = "",
+                             value: str = "", epoch: int = -1) -> dict:
+        session = live.current()
+        if session is None:
+            return {"ok": False, "error": "no window is open"}
+        command = live.Command(kind=kind, handle=handle, value=value, epoch=epoch)
+        if not session.submit(command):
+            return {"ok": False, "error": f"cannot {kind} — the window is closed"}
+        return {"ok": True}
+
+    def _api_session_set(self, payload: dict) -> dict:
+        """Put one value in one field of the live form.
+
+        The payload is a handle, a value and the epoch it was written against — no
+        selector, and nothing the browser thread evaluates. The epoch is carried rather
+        than checked here on purpose: only the browser thread knows whether the form has
+        been re-read since, and checking it anywhere else is a race.
+        """
+        handle = str(payload.get("handle") or "")
+        if not handle:
+            return {"ok": False, "error": "no field"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        return self._api_session_command(
+            live.SET, handle, str(payload.get("value") or ""), epoch
+        )
+
+    def _api_session_file(self, payload: dict) -> dict:
+        """Attach a file to a file field of the live form.
+
+        The browser runs on *this* host, so its file picker shows this host's disk, not
+        yours. This upload is the file transfer — the same reason the per-posting resume
+        travels as base64 through the one JSON POST path this server has.
+
+        Validation, naming and the write are `resumes`', unchanged: suffix allowlist
+        before decode, magic bytes after, and a name minted here rather than taken from
+        the client.
+        """
+        session = live.current()
+        if session is None:
+            return {"ok": False, "error": "no window is open"}
+        handle = str(payload.get("handle") or "")
+        if not handle:
+            return {"ok": False, "error": "no field"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        try:
+            blob, suffix = resumes.validate_upload(
+                str(payload.get("filename") or ""), str(payload.get("content") or "")
+            )
+        except resumes.RefusedUpload as exc:
+            return {"ok": False, "error": str(exc)}
+
+        name = resumes.stored_name(session.company, f"{session.ats_job_id}-{handle}",
+                                   suffix)
+        path = resumes.path_for(name)
+        resumes.write_atomic(path, blob)
+        out = self._api_session_command(live.SET, handle, str(path), epoch)
+        out["filename"] = name
+        return out
 
     def _api_rematch(self) -> dict:
         """Re-apply criteria to every open posting — same logic as `jobtracker rematch`."""
@@ -1666,6 +2004,47 @@ font-size:.88rem;color:var(--ink-2)}
 .app.prop select{margin-left:.4rem}
 """
 
+_APPLY_CSS = """
+.split{display:grid;grid-template-columns:minmax(280px,1fr) minmax(320px,1.1fr);
+gap:1.2rem;align-items:start}
+@media (max-width:820px){.split{grid-template-columns:1fr}}
+.pane{min-width:0}
+.phead{display:flex;gap:.6rem;align-items:center;font-weight:600;margin:.2rem 0 .6rem}
+.phead .ago{font-weight:400;font-size:.8rem;opacity:.7;margin-left:auto}
+#preview{width:100%;border:1px solid rgba(127,127,127,.35);border-radius:6px;
+background:rgba(127,127,127,.08);display:block;min-height:120px}
+.who{margin:.2rem 0 .1rem}
+.phase{margin:.1rem 0 1rem;font-size:.9rem}
+.phase .pill{padding:.1rem .5rem;border-radius:99px;background:rgba(127,127,127,.18);
+font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
+.lf{padding:.55rem .7rem;margin:.45rem 0;border:1px solid rgba(127,127,127,.3);
+border-radius:6px}
+.lf .lab{font-size:.86rem;margin-bottom:.35rem;display:flex;gap:.45rem;
+align-items:baseline;flex-wrap:wrap}
+.lf .lv,.lf input[type=file]{width:100%;padding:.35rem .5rem;border-radius:5px;
+border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+font-size:.9rem}
+.lf textarea.lv{resize:vertical}
+.lf .cbx{display:flex;gap:.4rem;align-items:center;font-size:.9rem}
+.lf .cbx .lv{width:auto}
+.lf .bank{display:flex;gap:.4rem;align-items:center;margin-top:.45rem;font-size:.78rem;
+opacity:.85;flex-wrap:wrap}
+.lf .bank .bankkey{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:4px;
+border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+font-size:.78rem}
+.lf .bank input[type=checkbox]{width:auto}
+/* Status is a word, not a colour: a red dot alone does not say whether the field is
+   waiting on you or was refused by the page, and those need different actions. */
+.st{margin-left:auto;font-size:.74rem;text-transform:uppercase;letter-spacing:.04em;
+padding:.05rem .4rem;border-radius:99px}
+.st-filled{color:var(--good);background:rgba(25,135,84,.14)}
+.st-gap{color:#d97706;background:rgba(217,119,6,.14)}
+.st-refused{color:#dc3545;background:rgba(220,53,69,.14)}
+.st-pending{opacity:.6;background:rgba(127,127,127,.14)}
+.lf.busy{opacity:.6}
+.viewwin{font-weight:600}
+"""
+
 _EXTRA_CSS = """
 .nav{margin:0 0 1rem;font-size:.9rem}
 .banner{padding:.6rem .8rem;border-radius:6px;font-weight:600}
@@ -1678,6 +2057,205 @@ button{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid cu
 background:transparent;color:inherit;font:inherit}
 button:hover{opacity:.7}
 """
+
+# Every control on the apply page has its handler here, in the file that renders it.
+# That rule is not stylistic: "Open prefilled" once had its markup in dashboard.py and
+# its handler in server._JS, which the dashboard never loads, so every click did nothing
+# at all and nothing logged. There is a test asserting these two lists match.
+#
+# Values are read out of the DOM the server rendered. Nothing here builds markup.
+_APPLY_JS = """
+(function () {
+  var root = document.querySelector('.phase');
+  if (!root) return;                       // no session; the page is just a note
+
+  var POLL_MS = 2000;
+  var DEBOUNCE_MS = 400;
+  var epoch = parseInt(root.dataset.epoch, 10);
+  var paused = false;
+  var moved = document.getElementById('moved');
+
+  function post(url, body) {
+    return fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                       body: JSON.stringify(body || {})}).then(function (r) {
+      return r.json();
+    });
+  }
+
+  // -- pushing a value ---------------------------------------------------------------
+  // The value goes with the epoch it was typed against. The browser thread drops it if
+  // the form has been read again since, because the handle would by then name a
+  // different input — see live.py. So a refusal here is a correct refusal.
+  function push(card, value) {
+    var st = card.querySelector('.st');
+    setStatus(st, 'pending', '…');
+    card.classList.add('busy');
+    return post('/api/session/set', {
+      handle: card.dataset.handle, value: value, epoch: epoch
+    }).then(function (res) {
+      card.classList.remove('busy');
+      if (!res.ok) setStatus(st, 'refused', res.error || 'refused');
+      return res;
+    }).catch(function () {
+      card.classList.remove('busy');
+      setStatus(st, 'refused', 'the server did not answer');
+    });
+  }
+
+  function setStatus(st, kind, word) {
+    if (!st) return;
+    st.className = 'st st-' + kind;
+    st.textContent = word;
+  }
+
+  // Also answer it everywhere, if you said so. Same endpoint the Settings tab writes
+  // through — there is no second way into the answer bank.
+  function bank(card, value) {
+    var tick = card.querySelector('.tobank');
+    if (!tick || !tick.checked || !value) return;
+    var key = card.querySelector('.bankkey');
+    post('/api/answer', {question_key: key ? key.value : '', value: value})
+      .then(function (res) { if (res.ok) tick.checked = false; });
+  }
+
+  var timers = {};
+  function schedule(card, value) {
+    var handle = card.dataset.handle;
+    if (timers[handle]) clearTimeout(timers[handle]);
+    timers[handle] = setTimeout(function () {
+      delete timers[handle];
+      push(card, value).then(function () { bank(card, value); });
+    }, DEBOUNCE_MS);
+  }
+
+  document.addEventListener('input', function (e) {
+    var card = e.target.closest('.lf');
+    if (!card || !e.target.classList.contains('lv')) return;
+    if (card.dataset.type === 'select' || card.dataset.type === 'multiselect') return;
+    if (card.dataset.type === 'checkbox') return;
+    schedule(card, e.target.value);
+  });
+
+  // Blur beats the timer: leaving a field is the clearest statement that you are done
+  // with it, and waiting out the debounce after that just looks like lag.
+  document.addEventListener('focusout', function (e) {
+    var card = e.target.closest('.lf');
+    if (!card || !e.target.classList.contains('lv')) return;
+    var handle = card.dataset.handle;
+    if (!timers[handle]) return;
+    clearTimeout(timers[handle]);
+    delete timers[handle];
+    push(card, e.target.value).then(function () { bank(card, e.target.value); });
+  }, true);
+
+  // A dropdown or a tickbox is one decision, so it goes at once rather than on a timer.
+  document.addEventListener('change', function (e) {
+    var card = e.target.closest('.lf');
+    if (!card) return;
+    if (e.target.classList.contains('lv')) {
+      if (card.dataset.type === 'checkbox') {
+        push(card, e.target.checked ? 'yes' : '');
+      } else if (card.dataset.type === 'select' ||
+                 card.dataset.type === 'multiselect') {
+        var v = e.target.value;
+        if (v) push(card, v).then(function () { bank(card, v); });
+      }
+      return;
+    }
+    // The browser's file picker shows the *server's* disk, not yours. So the file
+    // travels as base64 through the one JSON POST path this server has, exactly like
+    // the per-posting resume does.
+    if (e.target.classList.contains('lf-file') && e.target.files.length) {
+      var file = e.target.files[0];
+      var st = card.querySelector('.st');
+      setStatus(st, 'pending', 'uploading…');
+      var reader = new FileReader();
+      reader.onload = function () {
+        post('/api/session/file', {
+          handle: card.dataset.handle, epoch: epoch, filename: file.name,
+          content: String(reader.result).split(',')[1] || ''
+        }).then(function (res) {
+          if (!res.ok) setStatus(st, 'refused', res.error || 'refused');
+        });
+      };
+      reader.readAsDataURL(file);
+    }
+  });
+
+  // -- the two buttons ---------------------------------------------------------------
+  document.getElementById('reread').addEventListener('click', function () {
+    post('/api/session/rediscover', {});
+  });
+
+  var pause = document.getElementById('pause');
+  pause.addEventListener('click', function () {
+    paused = !paused;
+    pause.textContent = paused ? 'Resume' : 'Pause';
+    pause.dataset.paused = paused ? '1' : '0';
+  });
+
+  var reload = document.getElementById('reload');
+  if (reload) reload.addEventListener('click', function () { location.reload(); });
+
+  // -- the poll ----------------------------------------------------------------------
+  // This is also what tells the browser thread somebody is watching, which is the only
+  // thing that makes it take screenshots. Stop polling and the work stops.
+  var img = document.getElementById('preview');
+  var ago = document.getElementById('ago');
+
+  function tick() {
+    fetch('/api/session').then(function (r) { return r.json(); }).then(function (res) {
+      if (!res.ok) {
+        document.getElementById('phase').textContent = 'closed';
+        return;
+      }
+      var s = res.session;
+      document.getElementById('phase').textContent = s.phase;
+      var line = s.discovered
+        ? s.filled + '/' + s.discovered + ' fields filled' +
+          (s.need ? ' · ' + s.need + ' need you' : ' · nothing left to type')
+        : 'no application form found on ' + s.url;
+      document.getElementById('summary').textContent = line;
+      var counts = document.getElementById('counts');
+      if (counts) counts.textContent = line;
+
+      // The form was read again and the handles moved, so every field on this page now
+      // points at the wrong input. Say so and stop — silently pushing into whatever is
+      // there now is the one outcome this whole mechanism exists to prevent.
+      if (s.epoch !== epoch) {
+        moved.hidden = false;
+        document.querySelectorAll('.lf .lv, .lf .lf-file').forEach(function (el) {
+          el.disabled = true;
+        });
+        return;
+      }
+      paint(s);
+      if (!paused && s.has_shot) {
+        img.src = '/api/session/preview.jpg?t=' + s.shot_at;
+        ago.textContent = 'refreshed just now';
+      } else if (paused) {
+        ago.textContent = 'paused';
+      }
+    }).catch(function () {}).then(function () { setTimeout(tick, POLL_MS); });
+  }
+
+  // Statuses only, and only for fields you are not in the middle of typing into. The
+  // rows themselves were rendered by the server and are not rebuilt here.
+  function paint(s) {
+    s.fields.forEach(function (f) {
+      var card = document.querySelector('.lf[data-handle="' + f.handle + '"]');
+      if (!card || card.contains(document.activeElement)) return;
+      if (card.classList.contains('busy')) return;
+      var word = {filled: 'filled', gap: 'needs you',
+                  refused: 'would not take it', pending: '…'}[f.status] || f.status;
+      setStatus(card.querySelector('.st'), f.status, word);
+    });
+  }
+
+  tick();
+})();
+"""
+
 
 # Values come from data-* attributes rather than being interpolated into onclick
 # handlers: a title containing a quote would otherwise break out of the attribute,

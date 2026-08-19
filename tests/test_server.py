@@ -5,7 +5,9 @@ escaping is the most security-relevant behaviour here and testing it should not
 require standing up HTTP.
 """
 
+import inspect
 import json
+import re
 from html.parser import HTMLParser
 
 import pytest
@@ -261,17 +263,20 @@ def test_disposition_on_an_unknown_posting_is_refused(tmp_path):
     assert res["ok"] is False and "no such posting" in res["error"]
 
 
-def test_csp_allows_the_fetch_the_buttons_depend_on():
-    """connect-src falls back to default-src, which is 'none' here.
+def test_csp_allows_the_fetch_and_the_image_the_pages_depend_on():
+    """Every fetch-and-fallback trap in one header, asserted on the value not the source.
 
-    Without an explicit connect-src every write on this server — the tuning page's
-    reject button included — is blocked by the browser and silently does nothing.
+    `connect-src` and `img-src` both fall back to `default-src`, which is 'none' here,
+    and both fail the same silent way: the browser blocks the request and the feature
+    just does not happen. Without connect-src every write on this server is dropped;
+    without img-src the apply page's preview is a broken image over a browser that is
+    working perfectly.
     """
-    import inspect
-
-    src = inspect.getsource(server.Handler._send)
-    assert "connect-src 'self'" in src
-    assert "default-src 'none'" in src
+    assert "default-src 'none'" in server._CSP
+    assert "connect-src 'self'" in server._CSP
+    assert "img-src 'self'" in server._CSP
+    # The preview is a JPEG, so it cannot go through the UTF-8 text sender.
+    assert "_CSP" in inspect.getsource(server.Handler._send_bytes)
 
 
 # -- settings ------------------------------------------------------------------------
@@ -1212,7 +1217,9 @@ def test_a_missing_override_file_reads_as_no_override_not_as_an_error(tmp_path, 
 def test_the_upload_cap_applies_to_every_route_that_carries_a_file():
     """A second upload route left out of the set reads its body as {} and reports "no
     file" — a correct-looking error for entirely the wrong reason."""
-    assert server._UPLOAD_ROUTES == {"/api/resume", "/api/posting-resume"}
+    assert server._UPLOAD_ROUTES == {
+        "/api/resume", "/api/posting-resume", "/api/session/file",
+    }
 
 
 # -- the gap split ------------------------------------------------------------------
@@ -1268,3 +1275,230 @@ def test_every_gap_keeps_its_answer_box_and_save_button_in_both_lists(tmp_path):
     for key in ("how_did_you_hear", "why_stripe"):
         assert f'<input class=answer type=text placeholder=\'Your answer\' data-key="{key}"' in page
         assert f'<button class=save data-key="{key}">' in page
+
+
+# -- the mirrored form ----------------------------------------------------------------
+# `/apply` is where an application is actually typed now. The window still exists and is
+# still the only place it can be submitted from — see the last test in this block.
+
+def _live_session():
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    s = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    found = [{"handle": "jt0"}, {"handle": "jt1"}]
+    fields = [FormField(key="first_name", label="First Name", type="text",
+                        required=True),
+              FormField(key="why", label="Why do you want to work here?",
+                        type="textarea")]
+    s.absorb(live.rows_from(found, fields,
+                            {"first_name": ("filled", "Dylan"), "why": ("gap", "")}))
+    s.set_phase("ready", "1/2 fields filled")
+    return s
+
+
+def test_the_apply_page_is_a_pure_read(tmp_path):
+    """Opening a view of your data must not change it — the same rule the dashboard,
+    the tuning page and the applications tab all follow."""
+    from jobtracker import live
+
+    db = tmp_path / "state.db"
+    conn = store.connect(db)
+    session = _live_session()
+    before = session.snapshot()
+    server.render_apply(conn, session, "")
+    assert session.snapshot() == before
+    # And nothing was written: a fresh DB has no tables' worth of rows to lose, so
+    # assert on the one thing rendering could plausibly have touched.
+    assert live.current() is session
+    conn.close()
+
+
+def test_the_apply_page_says_so_when_no_window_is_open(tmp_path):
+    """Never a 500, and never a blank form implying there is one."""
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, None, "")
+    assert "No window is open" in page
+    assert 'class="lf"' not in page
+    conn.close()
+
+
+def test_zero_fields_renders_as_no_form_found(tmp_path):
+    """Absence read as success, in the one sentence where it would happen."""
+    from jobtracker import live
+
+    conn = store.connect(tmp_path / "state.db")
+    session = live.start("Acme", "1", "SWE", "https://x/apply")
+    page = server.render_apply(conn, session, "")
+    # The body, not the script: the script carries both branches of that sentence and
+    # picks between them at runtime, exactly as this function does.
+    body = page[:page.rindex("<script>")]
+    assert "no application form found on https://x/apply" in body
+    assert "nothing left to type" not in body
+    conn.close()
+
+
+def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_path):
+    """A button whose handler is on another page is indistinguishable from a broken one.
+
+    That is not hypothetical here: "Open prefilled" shipped with its markup in
+    dashboard.py and its handler in server._JS, which the dashboard never loads, and
+    every click did nothing at all with nothing logged.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session(), "https://viewer.example/vnc")
+    conn.close()
+
+    script = page[page.rindex("<script>"):]
+    ids = set(re.findall(r'id="([a-z]+)"', page))
+    assert {"pause", "reread", "reload", "preview"} <= ids
+    for element in ("pause", "reread", "reload", "preview"):
+        assert f"getElementById('{element}')" in script, element
+    for hook in ("lf-file", "tobank", "bankkey", ".lv"):
+        assert hook in script, hook
+    for endpoint in ("/api/session", "/api/session/set", "/api/session/rediscover",
+                     "/api/session/file", "/api/answer"):
+        assert endpoint in script, endpoint
+
+
+def test_the_apply_page_carries_no_control_that_can_submit(tmp_path):
+    """The invariant `browser.py` protects, restated on the page that drives it.
+
+    An application is irreversible and goes out under your name. The mirror exists to
+    make typing fast, not to make sending it one click away.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session(), "https://viewer.example/vnc")
+    conn.close()
+    assert "<form" not in page
+    assert 'type="submit"' not in page
+    assert "/api/session/submit" not in page
+    # The vocabulary the page can reach is the four in live.py, and none of them clicks.
+    from jobtracker import live
+
+    assert live.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+
+
+def test_a_hostile_label_cannot_break_out_of_the_mirrored_form(tmp_path):
+    """Labels and options come from a third-party ATS, like every posting title."""
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    s = live.start("Acme", "1", "SWE", "https://x/apply")
+    s.absorb(live.rows_from(
+        [{"handle": "jt0"}],
+        [FormField(key="k", label='"><script>alert(1)</script>', type="select",
+                   options=('"><img onerror=alert(1)>',))],
+    ))
+    page = server.render_apply(conn, s, "")
+    conn.close()
+    # Parsed, not grepped. A substring assertion would fail on the *escaped* form,
+    # which is the outcome we want — what matters is whether the browser ends up with
+    # an element it did not get from us.
+    body = page[:page.rindex("<script>")]
+
+    class _Tags(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.names = []
+            self.attrs = []
+
+        def handle_starttag(self, tag, attrs):
+            self.names.append(tag)
+            self.attrs.extend(name for name, _ in attrs)
+
+    tags = _Tags()
+    tags.feed(body)
+    # No element the page did not write itself, and no event handler on any of them.
+    # (`img` is here legitimately — it is the preview.)
+    assert "script" not in tags.names
+    assert tags.names.count("img") == 1
+    assert not [a for a in tags.attrs if a.startswith("on")]
+    # The label and the option are still present, as inert text.
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+
+
+def test_the_session_endpoints_refuse_when_no_window_is_open(tmp_path):
+    from jobtracker import live
+
+    live.CURRENT = None
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    assert h._api_session()["ok"] is False
+    assert h._api_session_set({"handle": "jt0", "value": "x", "epoch": 0})["ok"] is False
+    assert h._api_session_command(live.REDISCOVER)["ok"] is False
+
+
+def test_setting_a_field_queues_it_rather_than_touching_a_browser(tmp_path):
+    """The handler thread may never call into Playwright — that is the whole reason the
+    queue exists. So this returns before anything has happened to the page."""
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    res = h._api_session_set({"handle": "jt1", "value": "Because scale.",
+                              "epoch": session.epoch})
+    assert res["ok"] is True
+    command = session.commands.get_nowait()
+    assert (command.kind, command.handle, command.value) == (
+        "set", "jt1", "Because scale.")
+    assert command.epoch == session.epoch
+    # Untouched: only the browser thread may mark a row.
+    assert session.snapshot()["fields"][1]["status"] == "gap"
+
+
+def test_a_set_with_an_unreadable_epoch_is_refused_rather_than_guessed(tmp_path):
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    _live_session()
+    assert h._api_session_set({"handle": "jt0", "value": "x", "epoch": "soon"})[
+        "ok"] is False
+    assert h._api_session_set({"value": "x", "epoch": 0})["ok"] is False
+
+
+def test_an_upload_for_the_live_form_is_validated_before_it_is_stored(tmp_path,
+                                                                     monkeypatch):
+    """Same validator, same naming, same atomic write as the per-posting resume — there
+    is no second way a file gets onto this box."""
+    import base64
+
+    from jobtracker import live, resumes
+
+    monkeypatch.setattr(config, "RESUMES_DIR", tmp_path / "resumes")
+    monkeypatch.setattr(resumes.config, "RESUMES_DIR", tmp_path / "resumes")
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    bad = h._api_session_file({
+        "handle": "jt0", "epoch": session.epoch, "filename": "resume.exe",
+        "content": base64.b64encode(b"MZ").decode(),
+    })
+    assert bad["ok"] is False
+    assert session.commands.empty()
+
+    good = h._api_session_file({
+        "handle": "jt0", "epoch": session.epoch, "filename": "cv.pdf",
+        "content": base64.b64encode(b"%PDF-1.4 real").decode(),
+    })
+    assert good["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.kind == live.SET
+    assert command.value.endswith(good["filename"])
+    assert good["filename"].endswith(".pdf")
+
+
+def test_opening_a_prefilled_window_creates_the_session_before_it_answers(tmp_path,
+                                                                         monkeypatch):
+    """The click navigates straight to /apply, so the session has to exist by the time
+    the response is written — one created on the worker leaves the page reporting "no
+    window is open" for the first second of every session."""
+    from jobtracker import browser, live
+
+    live.CURRENT = None
+    h = _apply_handler(tmp_path, monkeypatch)
+    # The thread is where the browser would be; it is not what this is about.
+    monkeypatch.setattr(server.threading, "Thread",
+                        lambda *a, **k: type("T", (), {"start": lambda self: None})())
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    res = h._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is True
+    assert res["href"] == "/apply"
+    assert live.current() is not None
+    assert live.current().company == "Acme"
