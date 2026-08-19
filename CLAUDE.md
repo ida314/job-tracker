@@ -995,11 +995,82 @@ only about pages they could not parse.
   long strings to its own width, so a round-trip to change one `slug:` re-wraps `notes:`
   prose on unrelated entries — measured, ten of them. The deliverable here is a diff
   somebody reads, and reflow noise destroys that. `verify-slugs --write` shares the writer
-  and got the same fix.
+  and got the same fix; `add-company` was still round-tripping until 2026-08-19 and now
+  shares it too. All of it lives in `jobtracker/curation.py` — see "Adding a company".
 - **Known blind spot, do not "fix" it in the regexes.** A careers page that renders its
   board link in JavaScript often contains no identifier at all — HubSpot's is 519 KB with
   neither `greenhouse` nor `hubspotjobs` in it. Those report `no_candidates` and stay
   visible.
+## Adding a company
+
+`jobtracker add-company`, and the `/companies` page under `serve`. Full guide in
+`docs/companies.md`. Added 2026-08-19. Both doors share `jobtracker/curation.py` — one
+appender and one validator, because two implementations of "append a curated entry" is how
+the button and the terminal end up disagreeing about the file they both own.
+
+- **`companies.yaml` has five writers, and every one is something you did on purpose.**
+  `migrate` (once), `add-company`, `verify-slugs --write`, `repair --write`, and
+  `POST /api/company`. No *scheduled* run writes it. That is the invariant DESIGN.md §2.3
+  actually protects and it still holds — `serve` is a foreground process you started, and
+  the write happens on a click you made.
+- **The click is allowed here and still refused on a repair proposal.** Adding **appends
+  an entry that did not exist**, from values you typed, and renders the exact unified diff
+  it applied, computed from the same string handed to `safewrite`. Applying a repair
+  **rewrites a hand-verified slug** on the machine's say-so, which is the case where the
+  reviewable diff has to come *before* the write. `dashboard._proposal_cell` still has no
+  apply button and must not grow one.
+- **Appending is a third operation, not the existing writer.** `_edit_entry` cannot create
+  a `- name:` block — an unknown name is a `KeyError`, by design — so `insert_entry`
+  renders the new block alone and splices it in. Every pre-existing line survives
+  byte-for-byte; there is a test asserting exactly that, and it is the same property
+  `test_the_write_touches_only_the_lines_it_changes` guards for edits.
+- **Placement is "before the first entry that sorts after me"**, not "after the last entry
+  with my tier, else end of file". The second has no last entry for a tier the file does
+  not use yet, so a tier-4 company falls past everything and lands under the untiered
+  aggregator feeds. Untiered entries sort last, which is where all three already are.
+- **`has_inline_comments` deliberately does not guard an append.** It exists for a
+  round-trip that discards comments; an append rewrites no line and has none to lose.
+  Adding it "for consistency" refuses a write that is provably safe.
+- **`validate_new` is stricter than `load_companies`, and a test keeps it honest.** The
+  loader must keep loading whatever is on disk; a new entry gets the strict pass, because
+  `check_method: api` on an ats with no adapter is a board skipped behind one log line —
+  indistinguishable from a board with nothing open. But **stricter than the live file is a
+  rule that gets deleted the first time it fires**: two were already wrong when written.
+  A `slug` on a `manual` entry is documentation (Red Hat's is a Workday tenant triple),
+  and an aggregator with no `board_url` is parked on purpose.
+- **A typed slug is labelled `reachable`, never `provenance`.** `judge_board` is the rule
+  body shared with `judge_candidate`, and it takes the weak-evidence label as a
+  *parameter* because the two callers claim different things. `provenance` means a careers
+  page served the link. Nothing served a slug you typed, so the honest claim is only "the
+  board answered and it is not empty" — and the page says so every time, with sample
+  titles, because reading a few titles is the check that is left. Only Greenhouse gives
+  real `identity`.
+- **"Not verified" never renders as "verified".** A skipped check — `manual`, or
+  *Add without verifying* — writes `expected_board_name: null` and says so. Writing the
+  typed name would make the first nightly run either drift-alert on a name nobody checked
+  or, because `identity_matches` returns True when either side is empty, silently pass. A
+  verified save seeds it from **the name the ATS returned**, the way `verify-slugs --write`
+  does, so the fuzzy comparison happens once under human eyes.
+- **`/api/company` is the one endpoint on this server that opens a socket, and it is
+  bounded.** Everything else is CPU + SQLite (`_rebuild_plan`) or hands the blocking work
+  to a daemon thread (`_api_apply_to`), because `HTTPServer` runs one request at a time.
+  Verification cannot go on a thread: it decides whether the write happens, and nothing on
+  a thread can answer the click that started it. So it stays inline and is capped —
+  `Fetcher(max_workers=1, timeout=8, max_retries=1)`, at most two requests. `min_interval`
+  is **not** overridden; per-host pacing is not something a waiting page gets to skip. A
+  second verification is **refused, not queued** (`_VERIFY_LOCK`). There is a test pinning
+  the bound — widen it there first.
+- **`ok` and `saved` are two axes.** A refused *board* is `ok:true, saved:false` with the
+  evidence attached, because every `_JS` handler here opens `if (!res.ok) alert()` — return
+  `ok:false` and the page swallows the escape hatch it is supposed to offer. `ok:false` is
+  for a refused *request*, and validation failures have no "add anyway".
+- **The file is re-read after verification, not before.** A fetch takes seconds, and a
+  `repair --write` landing in that window would otherwise be clobbered by a splice computed
+  against stale text.
+- **Both buttons are rendered server-side**, `co-force` merely `hidden` until the script
+  reveals it. The parity test reads button classes off the markup, so a button the JS mints
+  is one nothing checks has a handler — the same mechanism `.tabs` and `.cotoggle` use.
+
 ## Aggregator sources
 
 `jobtracker/sources/aggregator.py`. Community new-grad list repos (SimplifyJobs-style) are

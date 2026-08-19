@@ -5,14 +5,17 @@ escaping is the most security-relevant behaviour here and testing it should not
 require standing up HTTP.
 """
 
+import collections
+import html
 import inspect
 import json
 import re
 from html.parser import HTMLParser
 
 import pytest
+import yaml
 
-from jobtracker import config, server, store
+from jobtracker import config, curation, models, server, store
 from jobtracker.criteria import load_criteria
 
 # Titles, locations and URLs all arrive from third-party ATS APIs and are
@@ -138,16 +141,19 @@ def test_regressions_are_surfaced(criteria):
 # _readiness is the meaningful health logic (liveness is a constant), and like
 # render_tuning it needs no socket: a Handler carries only the paths off .server.
 class _FakeServer:
-    def __init__(self, db_path, criteria_path, answers_path=None):
+    def __init__(self, db_path, criteria_path, answers_path=None, companies_path=None):
         self.db_path = db_path
         self.criteria_path = criteria_path
-        self.companies_path = None
+        # None is the real default — `serve` only sets it when --companies was passed —
+        # so reads fall back to config.COMPANIES_YAML. The add-a-company endpoint writes,
+        # which needs a concrete path, so its tests pass one.
+        self.companies_path = companies_path
         self.answers_path = answers_path or config.ANSWERS_YAML
 
 
-def _handler_for(db_path, criteria_path, answers_path=None):
+def _handler_for(db_path, criteria_path, answers_path=None, companies_path=None):
     h = server.Handler.__new__(server.Handler)
-    h.server = _FakeServer(db_path, criteria_path, answers_path)
+    h.server = _FakeServer(db_path, criteria_path, answers_path, companies_path)
     return h
 
 
@@ -1502,3 +1508,324 @@ def test_opening_a_prefilled_window_creates_the_session_before_it_answers(tmp_pa
     assert res["href"] == "/apply"
     assert live.current() is not None
     assert live.current().company == "Acme"
+
+
+# ---------------------------------------------------------------------------------
+# The companies page: the tracked list, and the form that writes companies.yaml.
+#
+# This is the one endpoint on this server that opens a socket, so several of these
+# tests are about the socket NOT being opened — for a manual entry, for a forced save,
+# and for the page itself.
+
+_CO_YAML = """- name: Stripe
+  ats: greenhouse
+  slug: stripe
+  tier: 1
+  check_method: api
+  notes: A note long enough that a PyYAML round trip would refold it across two lines,
+    which is the diff noise the line-oriented writer exists to prevent.
+  expected_board_name: Stripe
+- name: Bloomberg
+  ats: bespoke
+  tier: 3
+  check_method: manual
+  expected_board_name: null
+"""
+
+
+def _companies_handler(tmp_path):
+    from jobtracker.migrate import _HEADER
+
+    path = tmp_path / "companies.yaml"
+    path.write_text(_HEADER + _CO_YAML)
+    h = _handler_for(tmp_path / "c.db", config.CRITERIA_YAML, companies_path=path)
+    return path, h
+
+
+def _no_sockets(monkeypatch):
+    import socket
+
+    def _refuse(*a, **k):
+        raise AssertionError("this path opened a socket")
+
+    monkeypatch.setattr(socket.socket, "connect", _refuse)
+
+
+def _page(tmp_path, companies=None):
+    conn = store.connect(tmp_path / "c.db")
+    try:
+        return server.render_companies(
+            conn, config.load_companies() if companies is None else companies
+        )
+    finally:
+        conn.close()
+
+
+def test_nav_reaches_the_companies_page():
+    assert 'href="/companies"' in server._NAV
+
+
+def test_the_companies_page_lists_every_tracked_company_grouped_by_tier(tmp_path):
+    companies = config.load_companies()
+    page = _page(tmp_path, companies)
+    for c in companies:
+        assert html.escape(c.name) in page
+    # Tiers ascend down the page, the order companies.yaml itself is kept in.
+    tiers = re.findall(r">T(\d|\?)<", page)
+    numeric = [int(t) for t in tiers if t != "?"]
+    assert numeric == sorted(numeric)
+
+
+def test_the_companies_page_says_so_when_companies_yaml_will_not_load(tmp_path):
+    """Unlike /applications, an unreadable file may not degrade to an empty list here —
+    "nothing tracked" over a broken file is absence read as success."""
+    page = _page_with_error(tmp_path, "mapping values are not allowed here")
+    assert "companies.yaml did not load" in page
+    assert "mapping values are not allowed here" in page
+
+
+def _page_with_error(tmp_path, error):
+    conn = store.connect(tmp_path / "c.db")
+    try:
+        return server.render_companies(conn, [], error)
+    finally:
+        conn.close()
+
+
+def test_the_companies_page_is_a_pure_read(tmp_path, monkeypatch):
+    path, _ = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    before = path.read_text()
+    conn = store.connect(tmp_path / "c.db")
+    try:
+        server.render_companies(conn, config.load_companies(path))
+    finally:
+        conn.close()
+    assert path.read_text() == before
+
+
+def test_the_add_form_is_not_a_form_element(tmp_path):
+    """The CSP is `form-action 'none'`, so a real <form> would submit into a wall. Every
+    page here collects data-key inputs and POSTs JSON instead."""
+    page = _page(tmp_path)
+    assert "<form" not in page
+
+
+def test_every_button_on_the_companies_page_has_a_handler_in_its_own_script(tmp_path):
+    """Both buttons are rendered unconditionally — `co-force` is `hidden` until the
+    script reveals it. A button the JS creates on the fly is one this equality cannot
+    see, which would make the guard look like it was working."""
+    page = _page(tmp_path)
+    script = page[page.rindex("<script>"):]
+    classes = set(re.findall(r"class=[\"']?(co-[a-z]+)", page))
+    assert classes == {"co-save", "co-force"}
+    for cls in classes:
+        assert f"button.{cls}" in script, cls
+    assert "/api/company" in script
+    assert page.count("<script>") == 1
+
+
+def test_a_manual_company_is_never_fetched(tmp_path, monkeypatch):
+    """Older than this page: a bespoke portal or Workday tenant has no keyless board, and
+    surfacing it for a human to check is correct where pretending to have checked it is
+    not."""
+    path, h = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    res = h._api_company({"name": "Acme", "ats": "workday", "check_method": "manual",
+                          "tier": "4"})
+    assert res["ok"] and res["saved"]
+    assert "never fetched" in res["skipped_because"]
+    assert "- name: Acme\n" in path.read_text()
+
+
+def test_saving_anyway_opens_no_socket_and_writes_a_null_board_name(tmp_path, monkeypatch):
+    path, h = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    res = h._api_company({"name": "Acme", "ats": "greenhouse", "slug": "acme",
+                          "check_method": "api", "tier": "2",
+                          "expected_board_name": "Acme Inc", "force": True})
+    assert res["ok"] and res["saved"]
+    entry = [e for e in yaml.safe_load(path.read_text()) if e["name"] == "Acme"][0]
+    assert entry["expected_board_name"] is None
+
+
+def test_an_unverified_entry_never_stores_the_typed_board_name(tmp_path, monkeypatch):
+    """Writing it would make the first nightly run either alert on a name nobody checked
+    or — because identity_matches returns True when either side is empty — quietly pass."""
+    path, h = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    h._api_company({"name": "Manual Co", "ats": "bespoke", "check_method": "manual",
+                    "expected_board_name": "Something Made Up"})
+    assert "Something Made Up" not in path.read_text()
+
+
+def _fake_verify(monkeypatch, verification):
+    monkeypatch.setattr(
+        server.Handler, "_verify_board", lambda self, company: (verification, "")
+    )
+
+
+def test_a_board_that_belongs_to_someone_else_blocks_the_save(tmp_path, monkeypatch):
+    """The ashby/cedar rule, at this door. The save is refused, the evidence comes back,
+    and nothing is written."""
+    from jobtracker.repair import Verification
+
+    path, h = _companies_handler(tmp_path)
+    before = path.read_text()
+    _fake_verify(monkeypatch, Verification(
+        False, "wrong_company", job_count=12, board_name="Someone Else",
+        sample_titles=("Mortgage Analyst",)))
+    res = h._api_company({"name": "Cedar", "ats": "greenhouse", "slug": "cedar",
+                          "check_method": "api", "tier": "3"})
+    # ok:true — the REQUEST was fine and the BOARD was not. Returning ok:false would make
+    # every handler's `if (!res.ok) alert()` swallow the escape hatch.
+    assert res["ok"] is True and res["saved"] is False
+    assert res["verification"]["reason"] == "wrong_company"
+    assert res["verification"]["sample_titles"] == ["Mortgage Analyst"]
+    assert path.read_text() == before
+
+
+def test_an_empty_board_blocks_the_save(tmp_path, monkeypatch):
+    """The greenhouse/hubspot rule. A real-but-dead board answers 200 with an empty array
+    forever, and a candidate has no history to tell that from "emptied on Tuesday"."""
+    from jobtracker.repair import Verification
+
+    path, h = _companies_handler(tmp_path)
+    before = path.read_text()
+    _fake_verify(monkeypatch, Verification(False, "zero_jobs", board_name="HubSpot Product"))
+    res = h._api_company({"name": "HubSpot", "ats": "greenhouse", "slug": "hubspot",
+                          "check_method": "api", "tier": "2"})
+    assert res["saved"] is False and res["verification"]["reason"] == "zero_jobs"
+    assert path.read_text() == before
+
+
+def test_a_verified_save_seeds_the_board_name_the_ats_returned(tmp_path, monkeypatch):
+    """Not the typed one. The fuzzy comparison then happens exactly once, under human
+    eyes; every nightly check afterwards is against the exact string the ATS gave us."""
+    from jobtracker.repair import Verification
+
+    path, h = _companies_handler(tmp_path)
+    _fake_verify(monkeypatch, Verification(
+        True, "ok", evidence_kind="identity", job_count=40, board_name="Duolingo, Inc."))
+    res = h._api_company({"name": "Duolingo", "ats": "greenhouse", "slug": "duolingo",
+                          "check_method": "api", "tier": "2"})
+    assert res["saved"] is True
+    entry = [e for e in yaml.safe_load(path.read_text()) if e["name"] == "Duolingo"][0]
+    assert entry["expected_board_name"] == "Duolingo, Inc."
+
+
+def test_the_diff_returned_is_the_diff_that_was_applied(tmp_path, monkeypatch):
+    path, h = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    before = path.read_text()
+    res = h._api_company({"name": "Acme", "ats": "bespoke", "check_method": "manual",
+                          "tier": "3"})
+    assert res["diff"] == curation.diff(str(path), before, path.read_text())
+    assert res["backup"].endswith(".bak")
+
+
+def test_adding_a_company_reflows_nothing_else(tmp_path, monkeypatch):
+    """The property the whole writer exists for, asserted through the endpoint."""
+    path, h = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    before = path.read_text().splitlines()
+    h._api_company({"name": "Acme", "ats": "bespoke", "check_method": "manual", "tier": "2"})
+    after = path.read_text().splitlines()
+    assert not (collections.Counter(before) - collections.Counter(after))
+
+
+@pytest.mark.parametrize("payload, fragment", [
+    ({"ats": "greenhouse"}, "name is required"),
+    ({"name": "Stripe", "ats": "greenhouse", "slug": "s2"}, "already tracked"),
+    ({"name": "X", "ats": "workday", "slug": "x", "check_method": "api"}, "adapter"),
+    ({"name": "X", "ats": "greenhouse", "check_method": "api"}, "needs a slug"),
+    ({"name": "X", "ats": "bespoke", "tier": "nine"}, "tier must be"),
+    ({"name": "X", "ats": "bespoke", "careers_page": "javascript:alert(1)"}, "http(s) URL"),
+])
+def test_a_refused_company_writes_nothing(tmp_path, monkeypatch, payload, fragment):
+    path, h = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    before = path.read_text()
+    res = h._api_company(payload)
+    assert res["ok"] is False and fragment in res["error"]
+    assert path.read_text() == before
+
+
+def test_validation_failures_get_no_escape_hatch(tmp_path, monkeypatch):
+    """`force` skips verification, never validation. An incoherent entry stays refused —
+    "add anyway" is about whether the world agrees, not about whether the entry is
+    coherent."""
+    path, h = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    res = h._api_company({"name": "X", "ats": "workday", "slug": "x",
+                          "check_method": "api", "force": True})
+    assert res["ok"] is False
+
+
+def test_the_inline_verification_is_bounded(tmp_path, monkeypatch):
+    """This server handles one request at a time, so the one place it opens a socket is
+    capped: one attempt on an 8-second timeout, against the nightly Fetcher's three
+    attempts on twenty. Widening it freezes every other tab for as long as you widen it.
+
+    `min_interval` is deliberately NOT overridden — per-host pacing costs 0.34s across
+    two requests and is not something to skip because a page is waiting.
+    """
+    from jobtracker import fetch as fetch_mod
+
+    seen = {}
+    real = fetch_mod.Fetcher.__init__
+
+    def spy(self, *a, **kw):
+        seen.update(kw)
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(fetch_mod.Fetcher, "__init__", spy)
+    monkeypatch.setattr(fetch_mod.Fetcher, "fetch_company",
+                        lambda self, c: models.FetchResult(c.name, c.ats, c.slug, ok=True,
+                                                           status_code=200))
+    _, h = _companies_handler(tmp_path)
+    h._api_company({"name": "X", "ats": "greenhouse", "slug": "x",
+                    "check_method": "api", "tier": "2"})
+    assert seen["max_retries"] == 1
+    assert seen["timeout"] <= 8
+    assert "min_interval" not in seen
+
+
+def test_a_second_verification_is_refused_rather_than_queued(tmp_path):
+    """Queuing would stack a second multi-second freeze behind the first on a server that
+    handles one request at a time."""
+    _, h = _companies_handler(tmp_path)
+    assert server._VERIFY_LOCK.acquire(blocking=False)
+    try:
+        res = h._api_company({"name": "X", "ats": "greenhouse", "slug": "x",
+                              "check_method": "api", "tier": "2"})
+        assert res["ok"] is False and "already running" in res["error"]
+    finally:
+        server._VERIFY_LOCK.release()
+
+
+def test_a_typed_slug_is_never_labelled_provenance(tmp_path, monkeypatch):
+    """`provenance` means the link was read off the company's own careers page. Nothing
+    served a slug somebody typed, so claiming it would be a claim nobody made — about the
+    one thing DESIGN.md §7.2 asks a human to check by hand."""
+    from jobtracker import fetch as fetch_mod
+
+    posting = models.Posting("X", "1", "Backend Engineer", "https://x.invalid", "NY", None)
+    monkeypatch.setattr(
+        fetch_mod.Fetcher, "fetch_company",
+        lambda self, c: models.FetchResult(c.name, c.ats, c.slug, ok=True, status_code=200,
+                                           observed_board_name="x", postings=[posting]),
+    )
+    _, h = _companies_handler(tmp_path)
+    res = h._api_company({"name": "X", "ats": "ashby", "slug": "x",
+                          "check_method": "api", "tier": "2"})
+    assert res["saved"] is True
+    assert res["verification"]["evidence_kind"] == "reachable"
+
+
+def test_the_page_warns_that_a_reachable_board_was_not_identity_checked(tmp_path):
+    """repair.render says it every time for the same reason; so does this page."""
+    page = _page(tmp_path)
+    script = page[page.rindex("<script>"):]
+    assert "reachable" in script
+    assert "NOT an identity check" in script

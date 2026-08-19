@@ -2,7 +2,10 @@
 
 DB path comes from $JOBTRACKER_DB so the container can point it at a mounted volume
 (/data/state.db) while local dev uses ./data/state.db. Curated inputs (companies.yaml,
-criteria.yaml) live next to the package root and are read-only at runtime.
+criteria.yaml) live next to the package root. They are never written by a *scheduled*
+run — that separation is DESIGN.md §2.3 — but they are not read-only: `serve` edits
+criteria.yaml from /tuning and appends to companies.yaml from /companies, both through
+`safewrite`, and both on a click somebody made.
 """
 
 from __future__ import annotations

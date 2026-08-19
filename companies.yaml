@@ -1,7 +1,9 @@
 # Curated target list. Human-authored and git-tracked. NO SCHEDULED RUN WRITES
-# THIS FILE — every writer is a foreground command you typed, leaving a diff you
-# read: `migrate` (once), `add-company`, `verify-slugs --write`, `repair --write`.
-# No status / last_checked here — run state lives in state.db (DESIGN.md §5).
+# THIS FILE — every writer is something you did in the foreground, leaving a diff
+# you read: `migrate` (once), `add-company`, `verify-slugs --write`,
+# `repair --write`, and the add form on /companies under `serve`, which shows you
+# the diff it applied. No status / last_checked here — run state lives in state.db
+# (DESIGN.md §5).
 
 - name: Stripe
   ats: greenhouse

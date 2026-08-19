@@ -46,6 +46,7 @@ from . import (
     answers as answers_mod,
     applications as apps_mod,
     config,
+    curation,
     dashboard as dashboard_mod,
     live,
     rank as rank_mod,
@@ -56,7 +57,8 @@ from . import (
 )
 from .criteria import _LIST_KEYS, load_criteria
 from .match import location_label, location_rank, match
-from .models import Decision, Posting, Verdict
+from .migrate import _HEADER
+from .models import Company, Decision, Posting, Verdict
 
 log = logging.getLogger("jobtracker.serve")
 
@@ -89,6 +91,12 @@ _CSP = (
 # would happen on a worker thread where nothing can report it back to the click.
 _APPLY_LOCK = threading.Lock()
 
+# Held while the add-a-company form verifies a slug against the live board. That check is
+# the one place this server opens a socket, and it is bounded rather than threaded (see
+# `_api_company`) — so a second click, or a second tab, is REFUSED rather than queued.
+# Queuing would stack a second multi-second freeze behind the first on a server that
+# handles one request at a time, which is the shape this whole file avoids.
+_VERIFY_LOCK = threading.Lock()
 
 # -- rendering (pure reads, testable without a server) ------------------------------
 def render_tuning(conn: sqlite3.Connection, criteria) -> str:
@@ -319,6 +327,169 @@ def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
     p.append(f"<script>{_JS}</script></div></body></html>")
     return "\n".join(p)
 
+
+
+_COMPANIES_CSS = """
+.cocard{border:1px solid var(--line);border-radius:10px;padding:1rem;margin:1rem 0;
+        background:var(--card)}
+.cocard .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+        gap:.6rem .9rem;margin-top:.7rem}
+.cocard label{display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;
+        color:var(--muted)}
+.cocard input,.cocard select,.cocard textarea{font:inherit;font-size:.85rem;padding:.35rem;
+        border:1px solid var(--line);border-radius:6px;background:var(--bg);
+        color:var(--fg)}
+.cocard textarea{min-height:3.4rem;resize:vertical}
+.cocard .wide{grid-column:1/-1}
+.hint{font-size:.75rem;color:var(--muted);margin:.15rem 0 0}
+.coresult{margin-top:.9rem;padding:.7rem;border-radius:8px;border:1px solid var(--line)}
+.coresult pre{overflow-x:auto;font-size:.75rem;margin:.5rem 0 0;white-space:pre;
+        max-height:22rem}
+.coresult.bad{border-color:var(--warn)}
+.cotable{width:100%;border-collapse:collapse;font-size:.85rem}
+.cotable td,.cotable th{padding:.3rem .5rem;border-bottom:1px solid var(--line);
+        text-align:left}
+.cotable .muted{color:var(--muted)}
+"""
+
+# The `ats` values a new entry may name, with the four that have adapters first — the
+# order is the answer to "which of these can I actually check automatically?".
+_ATS_CHOICES = ("greenhouse", "ashby", "lever", "aggregator",
+                "workday", "gem", "bespoke", "unknown")
+
+
+def render_companies(conn: sqlite3.Connection, companies, error: str = "") -> str:
+    """Every tracked company, and the form that adds one. Pure read.
+
+    Connection-in / string-out like `render_tuning` and `render_settings`.
+
+    Unlike `/applications`, this page must NOT fall back to an empty company list when
+    companies.yaml will not parse. There a missing file costs a tier badge; here it would
+    render "nothing tracked" over a file that exists and is broken — absence read as
+    success, which is the failure DESIGN.md §3.4 exists to prevent. The caller passes the
+    loader's own message instead and it renders in place of the table.
+    """
+    p = [
+        "<!doctype html><meta charset=utf-8><title>Companies</title>",
+        f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_COMPANIES_CSS}</style>",
+        "<body><div class=wrap>"
+        f"<h1>Companies {dashboard_mod.version_chip()}</h1>", _NAV,
+    ]
+    p.extend(_add_company_card())
+    if error:
+        p.append(
+            '<div class="coresult bad"><strong>companies.yaml did not load.</strong>'
+            f"<pre>{html.escape(error)}</pre></div>"
+        )
+    else:
+        p.extend(_tracked_companies(conn, companies))
+    p.append(f"<script>{_JS}</script></div></body></html>")
+    return "\n".join(p)
+
+
+def _add_company_card() -> list:
+    """The form. Not a `<form>` element — the CSP is `form-action 'none'`, so every page
+    here collects `data-key` inputs and POSTs JSON, and a real form would silently do
+    nothing on submit."""
+    p = ["<div class=cocard>",
+         "<strong>Add a company</strong>",
+         "<p class=note>Written straight to companies.yaml, with the diff shown below. "
+         "An <code>api</code> board is fetched and checked before anything is written; "
+         "<code>manual</code> entries are never fetched, by rule.</p>",
+         "<div class=grid>"]
+    for key, label, placeholder in (
+        ("name", "Name", "OpenRouter"),
+        ("slug", "Slug", "openrouter"),
+        ("category", "Category", "ai-infra"),
+        ("careers_page", "Careers page", "https://openrouter.ai/careers"),
+        ("board_url", "Board URL (aggregator feeds only)", "https://raw.githubusercontent.com/…"),
+        ("expected_board_name", "Expected board name (optional)", "seeded from the board"),
+    ):
+        p.append(
+            f"<label>{html.escape(label)}"
+            f'<input class=newco data-key="{html.escape(key, quote=True)}" type=text '
+            f'placeholder="{html.escape(placeholder, quote=True)}"></label>'
+        )
+    p.append("<label>ATS" + _select("newco", "ats", _ATS_CHOICES, "greenhouse") + "</label>")
+    p.append(
+        "<label>Check method"
+        + _select("newco", "check_method", ("api", "manual", "aggregator"), "api")
+        + '<p class=hint>An aggregator with no board URL is skipped rather than fetched — '
+          "that is how an unconfirmed feed is parked.</p></label>"
+    )
+    p.append(
+        "<label>Tier"
+        + _select("newco", "tier", ("", "1", "2", "3", "4", "5", "6", "7"), "")
+        + "</label>"
+    )
+    p.append(
+        '<label class=wide>Notes<textarea class=newco data-key="notes" '
+        'placeholder="Why this entry is what it is — especially after a fix."></textarea>'
+        "</label>"
+    )
+    p.append("</div>")
+    p.append("<div class=row style='margin-top:.8rem'>"
+             "<button class=co-save>Verify and add</button> "
+             # Rendered always and revealed by the script, never created by it: the parity
+             # test reads the buttons off the markup, so a button the JS mints is a button
+             # nothing checks has a handler. Same mechanism as `.tabs` and `.cotoggle`.
+             '<button class=co-force hidden>Add without verifying</button></div>')
+    p.append('<div class=coresult id=coout hidden></div>')
+    p.append("</div>")
+    return p
+
+
+def _select(cls: str, key: str, options, current: str) -> str:
+    opts = "".join(
+        f'<option value="{html.escape(o, quote=True)}"'
+        f'{" selected" if o == current else ""}>{html.escape(o or "—")}</option>'
+        for o in options
+    )
+    return (f'<select class={cls} data-key="{html.escape(key, quote=True)}">'
+            f"{opts}</select>")
+
+
+def _tracked_companies(conn: sqlite3.Connection, companies) -> list:
+    """The list, grouped by tier and in tier order — the order companies.yaml itself is
+    kept in, and the one `insert_entry` maintains when it writes."""
+    if not companies:
+        return ['<div class=empty>No companies tracked yet.</div>']
+    groups: dict = {}
+    for c in companies:
+        groups.setdefault(c.tier, []).append(c)
+    # None last: the aggregator feeds sort after every tiered entry, on the page for the
+    # same reason they do in the file.
+    order = sorted((t for t in groups if t is not None)) + ([None] if None in groups else [])
+
+    p = [f"<h2>Tracked <span class=count>{len(companies)}</span></h2>"]
+    for tier in order:
+        rows = groups[tier]
+        var = dashboard_mod._band_var(tier)
+        p.append(
+            f'<h3><span class="tier" style="background:var({var});color:var({var}-ink)">'
+            f'T{tier if tier is not None else "?"}</span> '
+            f'<span class=count>{len(rows)}</span></h3>'
+        )
+        p.append('<table class=cotable><tbody>')
+        for c in rows:
+            health = store.get_health(conn, c.name)
+            status = health.status.value if health else "never checked"
+            board = (health.observed_board_name if health else "") or ""
+            target = f"{c.ats}/{c.slug}" if c.slug else c.ats
+            link = c.careers_page or c.board_url
+            name = html.escape(c.name)
+            if link:
+                name = (f'<a href="{dashboard_mod._safe_url(link)}" target="_blank" '
+                        f'rel="noopener">{name}</a>')
+            p.append(
+                f"<tr><td>{name}</td>"
+                f"<td class=muted><code>{html.escape(target)}</code></td>"
+                f"<td class=muted>{html.escape(c.check_method)}</td>"
+                f"<td class=muted>{html.escape(status)}"
+                f"{' · ' + html.escape(board) if board else ''}</td></tr>"
+            )
+        p.append("</tbody></table>")
+    return p
 
 def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
     """The live application form, mirrored into fields you can actually type in.
@@ -927,6 +1098,21 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._send(page)
+            elif path == "/companies":
+                conn = self._conn()
+                try:
+                    # Not self._companies(): that swallows a load failure and returns [],
+                    # which on this page would render "nothing tracked" over a file that
+                    # is merely broken. Here the failure is the news.
+                    error = ""
+                    try:
+                        companies = config.load_companies(self.server.companies_path)
+                    except Exception as exc:  # noqa: BLE001
+                        companies, error = [], str(exc)
+                    page = render_companies(conn, companies, error)
+                finally:
+                    conn.close()
+                self._send(page)
             elif path == "/apply":
                 conn = self._conn()
                 try:
@@ -978,6 +1164,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_session_command(live.REDISCOVER))
             elif path == "/api/session/file":
                 self._send_json(self._api_session_file(payload))
+            elif path == "/api/company":
+                self._send_json(self._api_company(payload))
             elif path == "/api/application":
                 self._send_json(self._api_application(payload))
             elif path == "/api/application/meta":
@@ -1690,6 +1878,149 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
 
+
+    def _companies_path(self) -> Path:
+        """The file to write. `companies_path` is None unless --companies was passed, and
+        reads tolerate that (`load_companies(None)` defaults) while a write cannot."""
+        return Path(self.server.companies_path or config.COMPANIES_YAML)
+
+    def _api_company(self, payload: dict) -> dict:
+        """Add one company to companies.yaml, verifying the board first.
+
+        Three outcomes, and the middle one is why `ok` alone is not enough:
+
+          ok:false                    the request was wrong — validation, a duplicate, a
+                                      file that will not parse. Nothing was written and
+                                      there is nothing to retry but the form.
+          ok:true, saved:false        the request was fine and the BOARD did not check
+                                      out. Nothing was written; the page shows the
+                                      evidence and offers to add it anyway. Folding this
+                                      into ok:false would make every handler's
+                                      `if (!res.ok) alert()` swallow the escape hatch.
+          ok:true, saved:true         written, with the diff that was applied.
+
+        This is the one endpoint on this server that opens a socket. It cannot go on a
+        daemon thread the way `_api_apply_to` does, because the whole point is that the
+        answer decides whether the write happens, and nothing on a thread can answer the
+        click that started it. So it stays inline and is bounded instead — see the
+        Fetcher call below — and a concurrent one is refused rather than queued.
+        """
+        from dataclasses import replace
+
+        raw_tier = str(payload.get("tier") or "").strip()
+        try:
+            tier = int(raw_tier) if raw_tier else None
+        except ValueError:
+            return {"ok": False, "error": "tier must be a whole number from 1 to 7"}
+
+        def field(key: str) -> str:
+            return str(payload.get(key) or "").strip()
+
+        company = Company(
+            name=field("name"),
+            ats=field("ats"),
+            slug=field("slug"),
+            tier=tier,
+            category=field("category"),
+            check_method=field("check_method") or "manual",
+            expected_board_name=field("expected_board_name") or None,
+            careers_page=field("careers_page"),
+            board_url=field("board_url"),
+            notes=field("notes"),
+        )
+
+        path = self._companies_path()
+        try:
+            existing = config.load_companies(path) if path.exists() else []
+        except Exception as exc:  # noqa: BLE001 — a broken file is not this form's fault
+            return {"ok": False, "error": f"companies.yaml did not load: {exc}"}
+
+        errors = curation.validate_new(company, existing)
+        if errors:
+            # Validation has no "add anyway". It is about whether the entry is coherent;
+            # only verification — whether the world agrees — gets an escape hatch.
+            return {"ok": False, "error": errors[0], "errors": errors}
+
+        force = bool(payload.get("force"))
+        verification = None
+        skipped = ""
+        if force:
+            skipped = "you chose to add it without verifying"
+        elif company.check_method != "api":
+            # Never fetch a manual entry. That rule predates this page: a bespoke portal
+            # or a Workday tenant has no keyless board, and surfacing it for a human to
+            # check is correct where pretending to have checked it is not.
+            skipped = f"{company.check_method} entries are never fetched"
+        else:
+            verified, err = self._verify_board(company)
+            if err:
+                return {"ok": False, "error": err}
+            verification = verified
+            if not verification.accepted:
+                return {
+                    "ok": True, "saved": False,
+                    "verification": _verification_json(verification),
+                }
+            company = replace(
+                company,
+                expected_board_name=verification.board_name or None,
+            )
+
+        if skipped:
+            # An unverified entry stores no board name. Writing the typed one would make
+            # the first nightly run either alert on a name nobody checked or — because
+            # identity_matches returns True when either side is empty — quietly "verify"
+            # it. Null is the honest state, and `repair` picks it up from there.
+            company = replace(company, expected_board_name=None)
+
+        # Re-read AFTER the fetch, not before. Verification can take seconds, and a
+        # `repair --write` or a hand edit landing in that window would otherwise be
+        # clobbered by a splice computed against stale text — on curated data, with .bak
+        # as the only recourse.
+        before = path.read_text() if path.exists() else _HEADER
+        after = curation.insert_entry(before, company)
+        try:
+            safewrite.write_text(path, after, config.load_companies)
+        except safewrite.RefusedWrite as exc:
+            return {"ok": False, "error": f"refused invalid companies.yaml: {exc}"}
+
+        log.info("added %s (%s/%s) to %s", company.name, company.ats, company.slug, path)
+        return {
+            "ok": True, "saved": True,
+            "diff": curation.diff(str(path), before, after),
+            "backup": str(path) + ".bak",
+            "verification": _verification_json(verification) if verification else None,
+            "skipped_because": skipped,
+        }
+
+    def _verify_board(self, company):
+        """Fetch the candidate board and hold it to `repair`'s rule. Returns
+        (Verification, error) — the error is for "could not even try"."""
+        from .fetch import Fetcher
+        from .repair import judge_board
+
+        if not _VERIFY_LOCK.acquire(blocking=False):
+            return None, "a verification is already running — try again in a moment"
+        # Bounded on purpose: one worker, an 8s timeout and a single attempt, against the
+        # nightly Fetcher's 3 attempts on a 20s timeout. `min_interval` is left alone —
+        # the per-host pacing costs 0.34s across two requests and is a politeness property
+        # this project does not get to skip because a page is waiting.
+        fetcher = Fetcher(max_workers=1, timeout=8, max_retries=1)
+        try:
+            result = fetcher.fetch_company(company)
+        finally:
+            fetcher.close()
+            _VERIFY_LOCK.release()
+        return judge_board(
+            company.expected_board_name or company.name,
+            company.ats,
+            company.slug,
+            result,
+            # NOT "provenance". Nothing served this slug — it was typed — so there is no
+            # careers page backing it and no provenance to claim. See judge_board.
+            weak_evidence="reachable",
+        ), ""
+
     def _api_apply_to(self, payload: dict) -> dict:
         """Open one application in a browser, filled in. Returns before it finishes.
 
@@ -1933,6 +2264,20 @@ def _today() -> str:
     return date.today().isoformat()
 
 
+
+def _verification_json(v) -> dict:
+    """A Verification as the page needs it. `evidence_kind` travels verbatim so the page
+    can say `reachable` rather than implying identity was checked when it was not."""
+    return {
+        "accepted": v.accepted,
+        "reason": v.reason,
+        "evidence_kind": v.evidence_kind,
+        "job_count": v.job_count,
+        "board_name": v.board_name,
+        "sample_titles": list(v.sample_titles),
+    }
+
+
 def _optional_text(payload: dict, key: str) -> Optional[str]:
     """None when the field is absent, the stripped string when it is present.
 
@@ -1958,7 +2303,8 @@ def _optional_day(payload: dict, key: str) -> tuple[Optional[str], Optional[str]
 
 _NAV = (
     '<nav class=nav><a href="/">Dashboard</a> · <a href="/applications">Applications</a>'
-    ' · <a href="/tuning">Tuning</a> · <a href="/settings">Settings</a></nav>'
+    ' · <a href="/companies">Companies</a> · <a href="/tuning">Tuning</a>'
+    ' · <a href="/settings">Settings</a></nav>'
 )
 
 _SETTINGS_CSS = """
@@ -2294,6 +2640,51 @@ document.addEventListener('click', async (e) => {
                                            value: box ? box.value : ''});
     if (!res.ok) { alert(res.error); return; }
     location.reload();
+    return;
+  }
+  const cosave = e.target.closest('button.co-save, button.co-force');
+  if (cosave) {
+    const body = {force: cosave.classList.contains('co-force')};
+    document.querySelectorAll('.newco').forEach(el => { body[el.dataset.key] = el.value; });
+    const out = document.getElementById('coout');
+    const force = document.querySelector('button.co-force');
+    cosave.disabled = true;
+    out.hidden = false;
+    out.className = 'coresult';
+    out.textContent = body.force ? 'Adding…' : 'Verifying the board…';
+    let res;
+    try { res = await post('/api/company', body); }
+    finally { cosave.disabled = false; }
+    if (!res.ok) { out.className = 'coresult bad'; out.textContent = res.error; return; }
+    if (!res.saved) {
+      // A refused board, not a refused request: show what came back and reveal the
+      // escape hatch. The button already exists in the markup; this only unhides it.
+      const v = res.verification || {};
+      out.className = 'coresult bad';
+      out.textContent = 'Not added — ' + v.reason +
+        (v.board_name ? '\nboard name: ' + v.board_name : '') +
+        (v.job_count ? '\njobs: ' + v.job_count : '') +
+        ((v.sample_titles || []).length ? '\ntitles: ' + v.sample_titles.join(' · ') : '');
+      if (force) force.hidden = false;
+      return;
+    }
+    out.className = 'coresult';
+    const v = res.verification;
+    // textContent, never innerHTML: the diff carries a company name somebody typed.
+    out.textContent = 'Added. Backup at ' + res.backup +
+      (res.skipped_because ? '\nNot verified — ' + res.skipped_because +
+                             '; expected_board_name written as null.' : '') +
+      (v ? '\nVerified: ' + v.evidence_kind + ' · ' + v.job_count + ' jobs · board "' +
+           v.board_name + '"' +
+           (v.evidence_kind === 'reachable'
+             ? '\nThis ATS publishes no board name, so that is NOT an identity check — ' +
+               'it only proves the board answered and is not empty. Read the titles: ' +
+               (v.sample_titles || []).join(' · ')
+             : '') : '');
+    const pre = document.createElement('pre');
+    pre.textContent = res.diff;
+    out.appendChild(pre);
+    if (force) force.hidden = true;
     return;
   }
   const ident = e.target.closest('button.save-identity');

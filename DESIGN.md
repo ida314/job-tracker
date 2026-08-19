@@ -165,6 +165,14 @@ jobtracker/
 No `status`. No `last_checked`. Nothing in this file changes as a result of a run, so its
 git history is a clean record of curation decisions only.
 
+It has five writers — `migrate` (once), `add-company`, `verify-slugs --write`,
+`repair --write`, and the add form on `/companies` under `serve`. The last one is a click,
+which looks like a departure and is not: the invariant §2.3 protects is that no
+**scheduled** run writes curated data, and a form on a server you started is as much a
+foreground action as a command you typed. It appends, and it shows you the diff it applied.
+Rewriting an existing entry from the UI is still refused — that is `repair --write`, where
+the diff comes before the write. See `docs/companies.md`.
+
 ### 5.2 `state.db` — observation
 
 ```sql
@@ -487,7 +495,7 @@ Planned expansion, in descending value-per-hour:
 | Curated target data (89 companies, 56 slugs hand-verified) | **Complete** — carries over unchanged |
 | Unattended operation (exit codes + container contract) | **Complete** — `docs/deployment.md`; no orchestrator in-repo |
 | Tuning loop (decisions, `eval`, suggestions, overrides) | **Complete** — `docs/tuning.md` |
-| Tuning UI (`jobtracker serve`) | **Complete** — stdlib only, localhost, writes back |
+| Tuning UI (`jobtracker serve`) | **Complete** — stdlib only, localhost, writes back. Five pages; `/companies` is the one that appends to curated data |
 | Ambiguity pass (§6) — local, provider-pluggable | **Complete** — `docs/llm.md`; vLLM first |
 | Slug-repair agent (§8) | **Complete** — `docs/repair.md`; regex-first, model as fallback |
 | Inbox reading (§8.5) | **Complete** — `docs/mail.md`; local Maildir, read-only, proposes only |
