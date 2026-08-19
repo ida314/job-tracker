@@ -518,6 +518,18 @@ keywords_bonus: [Go, Golang, Rust, Java, Kotlin, distributed systems, Kafka, gRP
 - last_posting_seen:
 - notes: 2026-07-22 — added. Runs Comeet; greenhouse/lever/ashby `coralogix` all 404. Comeet's careers-api needs a company uid plus a page-embedded token, so there is no keyless JSON board — manual by rule. Israeli HQ; US roles are Boston-area and remote, so check locations by hand.
 
+### OpenRouter
+- ats: ashby
+- slug: openrouter
+- board_url: https://api.ashbyhq.com/posting-api/job-board/openrouter
+- careers_page: https://openrouter.ai/careers
+- category: ai-infra
+- check_method: api
+- status: not-open
+- last_checked:
+- last_posting_seen:
+- notes: 2026-08-19 — added. Slug verified by provenance, not identity: Ashby's posting-api derives jobUrl from the slug, so it only restates it. openrouter.ai/careers renders Open Positions in JS and its static HTML names no ATS — the slug is in the page's own chunk, which calls api.ashbyhq.com/posting-api/job-board/openrouter and links jobs.ashbyhq.com/openrouter as the "alternate careers page". greenhouse/lever `openrouter` both 404. 23 open reqs, all "Remote (US)", go-to-market heavy; the engineering ones are Software Engineer Platform/Product, Applied AI and Forward Deployed. Tier 2 on the work — an LLM routing layer is provider failover, latency and traffic routing, so backend is the product. Caveat, and why it is not tier 1: small team, no new-grad program, every req reads senior-shaped, so expect long empty stretches rather than a broken board.
+
 ---
 
 ## Tier 3 — Regulated industry (fintech / healthcare / insurance)  *(underrated: correctness + scale, less competition)*

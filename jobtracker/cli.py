@@ -46,16 +46,27 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-import yaml
 from opentelemetry import metrics
 
-from . import applications as apps_mod, build_version, config, health as health_mod, report as report_mod, store, telemetry, tuning
+from . import applications as apps_mod, build_version, config, health as health_mod, report as report_mod, safewrite, store, telemetry, tuning
 from .criteria import load_criteria
+# companies.yaml has one writer module now — `serve`'s add form needs the same appender
+# `add-company` does, and two implementations of "append a curated entry" is how they
+# would drift. Only the three names this file actually calls are imported; re-exporting
+# the rest to keep old test imports working would be an unused import, and CI gates on
+# F401.
+from . import curation
+from .curation import (
+    companies_diff as _companies_diff,
+    has_inline_comments as _has_inline_comments,
+    rewrite_companies as _rewrite_companies,
+)
 from .tuning import apply_override
 from .fetch import Fetcher
 from .health import evaluate, is_degraded
 from .match import match
-from .migrate import migrate as run_migrate
+from .migrate import _HEADER, migrate as run_migrate
+from .models import Company
 from .sources import get_source
 
 
@@ -464,103 +475,6 @@ def _write_expected_board_names(path: str | Path, observed: dict[str, str]) -> N
     )
 
 
-def _rendered_companies(path: str | Path, updates: dict[str, dict]) -> str:
-    """companies.yaml with `updates` applied, as text. Does not touch the file.
-
-    Edits the lines it changes rather than round-tripping the document through
-    `safe_load`/`safe_dump`, and that is the whole point rather than a nicety. PyYAML
-    re-folds every long string to its own width, so a round-trip to change one `slug:`
-    also re-wraps the hand-written `notes:` prose on a dozen unrelated entries. Measured
-    on the real file: a one-line repair produced a diff touching ten other companies.
-
-    That noise is fatal specifically here. The deliverable of `repair` is a diff a human
-    reads before believing it, and a diff you have to search for the change in is one
-    nobody reads. So the editor is line-oriented: find the entry, replace the scalar,
-    leave every other byte — including comments — exactly where it was.
-
-    Only single-line scalar fields are supported, which is all a repair changes
-    (`ats`, `slug`, `expected_board_name`). Rendering and writing are split so the diff
-    a human reviews and the bytes that land come from the same function.
-    """
-    text = Path(path).read_text()
-    for name, fields in updates.items():
-        text = _edit_entry(text, name, fields)
-    return text
-
-
-def _edit_entry(text: str, name: str, fields: dict) -> str:
-    """Replace scalar fields on one `- name: X` block, in place."""
-    lines = text.splitlines(keepends=True)
-    start = next(
-        (
-            i
-            for i, line in enumerate(lines)
-            # Parse the scalar rather than string-comparing it: a name needing quotes
-            # in YAML would otherwise never match itself.
-            if line.startswith("- name:")
-            and yaml.safe_load(line.split(":", 1)[1].strip()) == name
-        ),
-        None,
-    )
-    if start is None:
-        raise KeyError(f"{name!r} not found in companies.yaml")
-    end = next(
-        (j for j in range(start + 1, len(lines)) if lines[j].startswith("- ")), len(lines)
-    )
-
-    for key, value in fields.items():
-        rendered = "  " + yaml.safe_dump(
-            {key: value}, default_flow_style=False, allow_unicode=True, width=10**6
-        ).rstrip("\n") + "\n"
-        at = next(
-            (j for j in range(start, end) if lines[j].startswith(f"  {key}:")), None
-        )
-        if at is None:
-            lines.insert(start + 1, rendered)
-            end += 1
-            continue
-        # A scalar can still be folded across continuation lines; they are indented
-        # deeper than the key and belong to it, so they go with it.
-        stop = at + 1
-        while stop < end and lines[stop].startswith("    "):
-            stop += 1
-        lines[at:stop] = [rendered]
-        end -= stop - at - 1
-
-    return "".join(lines)
-
-
-def _rewrite_companies(path: str | Path, updates: dict[str, dict]) -> None:
-    """Apply field updates to companies.yaml in place.
-
-    The one writer the foreground commands share (`verify-slugs --write`, `repair
-    --write`). No *scheduled* run may call this: companies.yaml is curated data, and
-    keeping machine state out of it is DESIGN.md §2.3.
-    """
-    Path(path).write_text(_rendered_companies(path, updates))
-
-
-def _has_inline_comments(path: str | Path) -> bool:
-    """Does this file carry `#` comments below its header block?
-
-    `migrate` and `add-company` still round-trip the document through PyYAML, which
-    preserves values and discards comments. Today that is harmless — companies.yaml
-    carries only its header, and the per-entry prose lives in `notes:`, which is a value
-    — so this is the guard that keeps it harmless if someone later writes a `#` note
-    next to an entry.
-
-    Skips the *leading comment block* rather than matching `_HEADER` verbatim. Matching
-    the constant would mean any future edit to the header text turns the real file's own
-    header into "inline comments" and blocks every write, which is a trap disguised as a
-    safety check.
-    """
-    lines = Path(path).read_text().splitlines()
-    i = 0
-    while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith("#")):
-        i += 1
-    return any(line.lstrip().startswith("#") for line in lines[i:])
-
-
 # -- repair ------------------------------------------------------------------------
 def cmd_repair(args: argparse.Namespace) -> int:
     """Find and verify new slugs for boards that have been broken long enough.
@@ -710,17 +624,6 @@ def cmd_repair(args: argparse.Namespace) -> int:
     # Boards that are still broken with no verified fix are exactly what a human needs
     # to look at, so the exit status says so rather than reporting a clean run.
     return EXIT_DEGRADED if outcomes else EXIT_OK
-
-
-def _companies_diff(path: Path, updates: dict[str, dict]) -> str:
-    """A unified diff of the proposed change, from the same renderer that writes it."""
-    import difflib
-
-    before = path.read_text().splitlines(keepends=True)
-    after = _rendered_companies(path, updates).splitlines(keepends=True)
-    return "".join(
-        difflib.unified_diff(before, after, fromfile=str(path), tofile=str(path), n=3)
-    )
 
 
 # -- rematch -----------------------------------------------------------------------
@@ -1770,27 +1673,52 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 # -- add-company -------------------------------------------------------------------
 def cmd_add_company(args: argparse.Namespace) -> int:
-    path = Path(args.companies or config.COMPANIES_YAML)
-    data = yaml.safe_load(path.read_text()) if path.exists() else []
-    if any(e.get("name") == args.name for e in data):
-        print(f"error: {args.name!r} already present", file=sys.stderr)
-        return 1
-    entry = {"name": args.name, "ats": args.ats}
-    if args.slug:
-        entry["slug"] = args.slug
-    if args.tier is not None:
-        entry["tier"] = args.tier
-    if args.category:
-        entry["category"] = args.category
-    entry["check_method"] = args.check_method
-    if args.notes:
-        entry["notes"] = args.notes
-    entry["expected_board_name"] = None
-    data.append(entry)
-    from .migrate import _HEADER
+    """Append a curated entry to companies.yaml.
 
-    path.write_text(_HEADER + yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=100))
-    print(f"added {args.name} to {path}")
+    Shares `curation.insert_entry` and `curation.validate_new` with the add form on
+    `/companies`, so the button and the terminal write the same file the same way — the
+    rule `apply-to` already follows. Before that they disagreed: this command
+    round-tripped the whole document through PyYAML, which re-folds every `notes:` block
+    to its own width, so adding one company produced a diff touching entries nobody had
+    edited. That is also why `_has_inline_comments` is not called here any more: the
+    guard exists for a round-trip that discards comments, and there is no longer one.
+
+    It does not verify the slug — `/companies` does, and so does `verify-slugs`. Here the
+    guarantee stops at "this is coherent and the name is not already taken".
+    """
+    path = Path(args.companies or config.COMPANIES_YAML)
+    company = Company(
+        name=(args.name or "").strip(),
+        ats=(args.ats or "").strip(),
+        slug=(args.slug or "").strip(),
+        tier=args.tier,
+        category=(args.category or "").strip(),
+        check_method=args.check_method,
+        expected_board_name=(args.expected_board_name or "").strip() or None,
+        careers_page=(args.careers_page or "").strip(),
+        board_url=(args.board_url or "").strip(),
+        notes=(args.notes or "").strip(),
+    )
+
+    existing = config.load_companies(path) if path.exists() else []
+    errors = curation.validate_new(company, existing)
+    if errors:
+        for message in errors:
+            print(f"error: {message}", file=sys.stderr)
+        return 1
+
+    # A file that does not exist yet, or holds only its header, still has to produce a
+    # valid one-entry document. The old round-trip raised TypeError on the header-only
+    # case — `yaml.safe_load` returns None and `any(... for e in None)` blows up.
+    text = path.read_text() if path.exists() else _HEADER
+    after = curation.insert_entry(text, company)
+    try:
+        safewrite.write_text(path, after, config.load_companies)
+    except safewrite.RefusedWrite as exc:
+        print(f"error: refused invalid companies.yaml: {exc}", file=sys.stderr)
+        return 1
+    print(curation.diff(str(path), text, after), end="")
+    print(f"added {company.name} to {path}")
     return 0
 
 
@@ -2055,6 +1983,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--tier", type=int, default=None)
     a.add_argument("--category", default="")
     a.add_argument("--check-method", dest="check_method", default="manual")
+    a.add_argument("--careers-page", dest="careers_page", default="",
+                   help="human-facing careers URL; the fallback when the API breaks, "
+                        "and the page `repair` reads to find a moved slug")
+    a.add_argument("--board-url", dest="board_url", default="",
+                   help="raw feed URL, for check_method: aggregator")
+    a.add_argument("--expected-board-name", dest="expected_board_name", default="",
+                   help="asserted on every run to catch identity drift. Leave unset and "
+                        "`verify-slugs --write` seeds it from the board itself")
     a.add_argument("--notes", default="")
     a.set_defaults(func=cmd_add_company)
 

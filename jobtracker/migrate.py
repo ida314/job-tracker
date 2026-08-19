@@ -76,9 +76,11 @@ def to_yaml_entries(parsed: list[dict]) -> list[dict]:
 
 _HEADER = (
     "# Curated target list. Human-authored and git-tracked. NO SCHEDULED RUN WRITES\n"
-    "# THIS FILE — every writer is a foreground command you typed, leaving a diff you\n"
-    "# read: `migrate` (once), `add-company`, `verify-slugs --write`, `repair --write`.\n"
-    "# No status / last_checked here — run state lives in state.db (DESIGN.md §5).\n\n"
+    "# THIS FILE — every writer is something you did in the foreground, leaving a diff\n"
+    "# you read: `migrate` (once), `add-company`, `verify-slugs --write`,\n"
+    "# `repair --write`, and the add form on /companies under `serve`, which shows you\n"
+    "# the diff it applied. No status / last_checked here — run state lives in state.db\n"
+    "# (DESIGN.md §5).\n\n"
 )
 
 

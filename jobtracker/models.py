@@ -38,8 +38,9 @@ class HealthStatus(str, Enum):
 class Company:
     """A curated target. Mirrors one entry in companies.yaml.
 
-    That file is only ever written by a foreground command someone typed — never by a
-    scheduled run — which is what keeps curation and run state apart (DESIGN.md §2.3).
+    That file is only ever written by something you did in the foreground — a command
+    you typed, or the add form on /companies — and never by a scheduled run, which is
+    what keeps curation and run state apart (DESIGN.md §2.3).
     """
 
     name: str

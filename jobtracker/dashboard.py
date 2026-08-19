@@ -1545,10 +1545,13 @@ def _boards(parts, unhealthy, by_name, proposals=None) -> None:
 def _proposal_cell(proposal) -> str:
     """A verified repair, shown but never actionable from here.
 
-    Deliberately no apply button, even under `serve`. Applying rewrites companies.yaml,
-    which is curated, git-tracked data — that belongs behind a command whose diff you
-    read, not behind a click. Every value is escaped: the board name comes from a
-    third-party ATS.
+    Deliberately no apply button, even under `serve`, and that survived /companies
+    growing one. The difference is what the click does: adding a company appends an entry
+    that did not exist, from values you typed, and shows you the diff it applied —
+    append-only, with `.bak` one `mv` away. Applying a repair REWRITES a hand-verified
+    slug on the machine's say-so, and that is the case where the diff has to come before
+    the write, not after. `repair --write` is where you read it. Every value is escaped:
+    the board name comes from a third-party ATS.
     """
     if proposal is None:
         return "—"

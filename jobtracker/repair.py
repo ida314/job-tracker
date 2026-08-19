@@ -79,7 +79,9 @@ class Verification:
 
     accepted: bool
     reason: str  # ok | unchanged | unreachable | zero_jobs | no_identity | wrong_company
-    evidence_kind: str = ""  # identity | provenance — see judge_candidate
+    # identity | provenance | reachable — see judge_board, which explains why the weakest
+    # of the three is a caller's word rather than this module's.
+    evidence_kind: str = ""
     job_count: int = 0
     board_name: str = ""
     sample_titles: tuple[str, ...] = ()
@@ -294,20 +296,57 @@ def judge_candidate(
       wrong_company THE ashby/cedar RULE, using the same `identity_matches` the nightly
                     loop uses so the two cannot drift apart about what identity means.
 
+    Everything after `unchanged` lives in `judge_board`, which this delegates to — the
+    add-a-company form on `/companies` holds a typed slug to the same rule in the same
+    order, and one body with two entry points is the only way those cannot drift.
+
     On the evidence_kind split — this is the trap in this file. Only Greenhouse has an
     `identity_url`: a *different endpoint* from the one the slug was used on, returning
     a board name. Agreement there is real evidence. Ashby and Lever derive identity by
     reading the org slug back out of the first job URL, which for a candidate slug just
     restates the candidate — `ashby/cedar` sails through that comparison. So for those
-    two the evidence is provenance: the link was read out of HTML served by the
-    company's own curated careers page, never constructed from its name. That is a
-    genuine claim and a weaker one, so it is labelled rather than dressed up, and the
+    two the evidence a *repair* has is provenance: the link was read out of HTML served
+    by the company's own curated careers page, never constructed from its name. That is
+    a genuine claim and a weaker one, so it is labelled rather than dressed up, and the
     proposal carries sample titles for the human to do what DESIGN.md §7.2 asks — read
-    a few job titles.
+    a few job titles. A slug that arrived some other way gets a different label; see
+    `judge_board`.
     """
     if candidate.ats == company.ats and candidate.slug == company.slug:
         return Verification(False, "unchanged")
 
+    return judge_board(
+        company.expected_board_name or company.name,
+        candidate.ats,
+        candidate.slug,
+        result,
+        weak_evidence="provenance",
+    )
+
+
+def judge_board(
+    expected_name: str,
+    ats: str,
+    slug: str,
+    result: FetchResult,
+    *,
+    weak_evidence: str,
+) -> Verification:
+    """The ordered rule above, minus `unchanged`. Pure, over an already-fetched board.
+
+    Split out so a board that is not a *repair* candidate can be held to the same rule in
+    the same order — `serve`'s add-a-company form verifies a slug somebody typed. Copying
+    the ordering into a second caller is exactly the drift this file warns about, so
+    there is one body and two entry points.
+
+    `weak_evidence` is the label for the no-identity-endpoint case, and it is a parameter
+    because the two callers are making genuinely different claims. A repair candidate was
+    read out of HTML served by the company's own careers page, so the claim is
+    `provenance`. A slug typed into a form came off a keyboard — no page served it, there
+    is no provenance to claim, and the honest label is `reachable`: the board answered and
+    it is not empty, which is all that was proved. Stamping that one `provenance` would be
+    a claim nobody made, about the one thing DESIGN.md §7.2 asks a human to check by hand.
+    """
     if not result.ok or result.error:
         return Verification(False, "unreachable")
 
@@ -316,16 +355,15 @@ def judge_candidate(
 
     titles = tuple(p.title for p in result.postings[:3] if p.title)
     observed = result.observed_board_name or ""
-    source = get_source(candidate.ats)
+    source = get_source(ats)
     has_identity_endpoint = (
-        source is not None and source.identity_url(candidate.slug) is not None
+        source is not None and source.identity_url(slug) is not None
     )
 
     if has_identity_endpoint:
         if not observed:
             return Verification(False, "no_identity", job_count=len(result.postings))
-        expected = company.expected_board_name or company.name
-        if not identity_matches(expected, observed):
+        if not identity_matches(expected_name, observed):
             return Verification(
                 False,
                 "wrong_company",
@@ -335,7 +373,7 @@ def judge_candidate(
             )
         kind = "identity"
     else:
-        kind = "provenance"
+        kind = weak_evidence
 
     return Verification(
         True,

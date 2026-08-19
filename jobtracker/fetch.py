@@ -116,9 +116,17 @@ class Fetcher:
         max_workers: int = MAX_WORKERS,
         min_interval: float = PER_HOST_MIN_INTERVAL,
         timeout: int = TIMEOUT,
+        max_retries: int = MAX_RETRIES,
     ) -> None:
         self._max_workers = max_workers
         self._timeout = timeout
+        # A parameter, defaulting to the nightly constant, so a caller that must answer a
+        # human *now* can buy a smaller retry budget. `serve`'s add-a-company form is the
+        # one such caller: the nightly budget is 3 attempts × a 20s timeout, which is a
+        # fine trade for a batch job at 01:00 and a two-minute freeze for a single-threaded
+        # web server. Nothing else passes it, so `health.py`'s "fetch.py already burned
+        # MAX_RETRIES inside the run" still describes every scheduled path.
+        self._max_retries = max_retries
         self._limiter = _HostRateLimiter(min_interval)
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": USER_AGENT})
@@ -159,14 +167,14 @@ class Fetcher:
             span.set_attribute("url.full", url)
             span.set_attribute("server.address", host)
 
-            for attempt in range(MAX_RETRIES):
+            for attempt in range(self._max_retries):
                 paced = self._limiter.wait(host)
                 # Events are timestamped notes inside a span — cheaper than a child span
                 # and perfect for "something notable happened here".
                 if paced:
                     span.add_event("rate_limited", {"sleep.seconds": paced})
                     rate_limited_seconds.add(paced, {"server.address": host})
-                log.debug("%s %s (attempt %d/%d)", method, url, attempt + 1, MAX_RETRIES)
+                log.debug("%s %s (attempt %d/%d)", method, url, attempt + 1, self._max_retries)
                 try:
                     resp = self._session.request(method, url, timeout=self._timeout)
                     status = resp.status_code
@@ -179,7 +187,7 @@ class Fetcher:
                     if status != 200:
                         return self._fail(span, status, f"HTTP {status}", attempt)
                     if attempt:
-                        log.info("%s recovered on attempt %d/%d", url, attempt + 1, MAX_RETRIES)
+                        log.info("%s recovered on attempt %d/%d", url, attempt + 1, self._max_retries)
                     if want == "text":
                         payload = resp.text
                     else:
@@ -197,7 +205,7 @@ class Fetcher:
                     span.add_event("retry", {"attempt": attempt + 1, "reason": last_error})
                     self._retry_after(attempt, url, last_error)
 
-            return self._fail(span, status, last_error, MAX_RETRIES - 1)
+            return self._fail(span, status, last_error, self._max_retries - 1)
 
     @staticmethod
     def _fail(span, status: int | None, error: str, attempt: int):
@@ -211,7 +219,7 @@ class Fetcher:
     def _retry_after(self, attempt: int, url: str, reason: str) -> None:
         """Log and sleep between attempts. Silent retries hide creeping breakage."""
         backoff = BACKOFF_BASE * (2**attempt)
-        if attempt + 1 < MAX_RETRIES:
+        if attempt + 1 < self._max_retries:
             self._count_retry()
             # Low-cardinality attributes only: host, not url. A per-URL counter would mint
             # a fresh time series per company and blow up the backend's index.
@@ -222,12 +230,12 @@ class Fetcher:
                 reason,
                 backoff,
                 attempt + 2,
-                MAX_RETRIES,
+                self._max_retries,
             )
             time.sleep(backoff)
         else:
             # No sleep on the final attempt — there is nothing left to wait for.
-            log.warning("%s -> %s; giving up after %d attempts", url, reason, MAX_RETRIES)
+            log.warning("%s -> %s; giving up after %d attempts", url, reason, self._max_retries)
 
     def fetch_page(self, url: str) -> tuple[str | None, str | None]:
         """One HTML page — a company's careers page — as `(text, error)`.

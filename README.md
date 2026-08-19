@@ -33,6 +33,7 @@ docs/            reference notes — see the table below
 | [`docs/tasks.md`](docs/tasks.md) | The task queue: what the model works on next, and why that order |
 | [`docs/prefill.md`](docs/prefill.md) | Opening an application with your answers already in it |
 | [`docs/applications.md`](docs/applications.md) | The outer loop: stages, reminders, and what became of what you sent |
+| [`docs/companies.md`](docs/companies.md) | Adding a target: what is validated, what is verified against the live board, and what is written |
 | [`docs/mail.md`](docs/mail.md) | Reading your job-search mailbox for replies, and proposing what they mean |
 | [`docs/ranking.md`](docs/ranking.md) | Picking the three to apply to tomorrow, and tuning it without a GPU |
 | [`docs/observability.md`](docs/observability.md) | Traces, metrics, and the query idioms that are not obvious |
@@ -50,7 +51,8 @@ python -m jobtracker.cli check           # the daily run: fetch -> health -> sto
 python -m jobtracker.cli rematch         # re-apply criteria to stored postings (no network)
 python -m jobtracker.cli report          # re-render the latest state (no network)
 python -m jobtracker.cli dashboard       # render state.db to data/dashboard.html (no network)
-python -m jobtracker.cli add-company --name X --ats greenhouse --slug x --tier 2
+python -m jobtracker.cli add-company --name X --ats greenhouse --slug x --tier 2 \
+    --careers-page https://x.example/careers   # see docs/companies.md
 
 # slug repair — see docs/repair.md
 python -m jobtracker.cli repair          # broken boards -> careers page -> verified proposal
@@ -125,8 +127,9 @@ They answer different questions and are independent — each works without the o
 
 `serve` does not replace `dashboard`. The static file is a snapshot you can mail to
 yourself and open offline years from now; that property is worth keeping, so `serve` is
-a second surface for the one thing a static file cannot do — write back. It has four
+a second surface for the one thing a static file cannot do — write back. It has five
 pages: the dashboard, `/applications` (add a job by hand, move a stage, set a reminder),
+`/companies` (the tracked list, and a form that verifies a board before adding it),
 `/tuning`, and `/settings`.
 
 ```bash
