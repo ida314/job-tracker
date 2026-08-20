@@ -1357,8 +1357,8 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
 
     script = page[page.rindex("<script>"):]
     ids = set(re.findall(r'id="([a-z]+)"', page))
-    assert {"pause", "reread", "reload", "preview", "closewin", "zoom"} <= ids
-    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom"):
+    assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone"} <= ids
+    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone"):
         assert f"getElementById('{element}')" in script, element
     for hook in ("lf-file", "tobank", "bankkey", ".lv"):
         assert hook in script, hook
@@ -1383,6 +1383,60 @@ def test_the_apply_page_carries_no_control_that_can_submit(tmp_path):
     from jobtracker import live
 
     assert live.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+
+
+def test_the_apply_page_lands_the_closed_state_rather_than_looking_alive(tmp_path):
+    """A page that still looks live over a browser that has gone is the same defect the
+    phase exists to prevent — one layer up.
+
+    Observed 2026-08-19: Done closed the window (the log says so, the browser was gone,
+    the lock was released) and the page never said. The button sat on "closing…", the
+    fields still took typing, and every push queued into a closed session — which reads
+    as the feature hanging, not as the window having closed.
+    """
+    from jobtracker import live as live_mod
+
+    conn = store.connect(tmp_path / "state.db")
+    session = _live_session()
+    session.set_phase(live_mod.CLOSED)
+    page = server.render_apply(conn, session, "")
+    conn.close()
+
+    # From <body>, so the stylesheet's own `button[disabled]` rule is not read as markup.
+    body = page[page.index("<body"):page.rindex("<script>")]
+    script = page[page.rindex("<script>"):]
+
+    # The banner is out of hiding as rendered, so a reload is honest with no script.
+    assert '<p class="banner bad" id="gone">' in body
+    # And nothing on it takes input any more.
+    assert body.count("disabled") == 2                    # one control per mirrored field
+    assert '<input class="lv" type="text" value="Dylan" disabled>' in body
+    # The script lands the same state from the poll, and stops polling once it has.
+    assert "s.phase === 'closed'" in script
+    assert "if (!stopped) setTimeout(tick, POLL_MS)" in script
+
+
+def test_an_open_session_leaves_the_form_usable(tmp_path):
+    """The other half of the assertion above: `disabled` must not leak into a live page."""
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session(), "")
+    conn.close()
+    body = page[page.index("<body"):page.rindex("<script>")]
+    assert "disabled" not in body
+    assert 'id="gone" hidden>' in body
+
+
+def test_closing_the_window_is_confirmed_first(tmp_path):
+    """It discards the fill. No ATS keeps a draft for an anonymous candidate — that is
+    the same fact that makes this a browser rather than a link — so the window is the
+    only place the work exists and one misclick is all of it."""
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session(), "")
+    conn.close()
+    script = page[page.rindex("<script>"):]
+    close_handler = script[script.index("closewin.addEventListener"):]
+    assert "confirm(" in close_handler[:600]
+    assert close_handler.index("confirm(") < close_handler.index("/api/session/close")
 
 
 def test_a_hostile_label_cannot_break_out_of_the_mirrored_form(tmp_path):

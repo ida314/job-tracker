@@ -997,9 +997,18 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   drain shoots only inside it. That is also the Pause button and the closed-tab case, for
   free — a JPEG every two seconds forever on the box that also runs the nightly pipeline
   is pure waste.
-- **The window closing must set `CLOSED`.** Otherwise the page polls a form nobody holds
-  and every edit queues into nothing — a mirror that looks live over a browser that is
-  gone. Failure-is-absence, in the UI again.
+- **The window closing must set `CLOSED`, and the page must land it.** Otherwise the page
+  polls a form nobody holds and every edit queues into nothing — a mirror that looks live
+  over a browser that is gone. Failure-is-absence, in the UI again. Setting the phase was
+  only half: on 2026-08-19 Done closed the window, released the lock and logged it, while
+  the page left the button on *"closing…"* and the fields still taking input, which reads
+  as a hang. `CLOSED` (or a session that has gone entirely) now unhides a server-rendered
+  banner, disables every control, and **stops the poll** — there is nothing left to ask,
+  and asking anyway is what made it look alive. `render_apply` emits that state directly
+  too, so a reload is honest with no script.
+- **Closing discards the fill, so the button confirms first.** No ATS keeps a draft for an
+  anonymous candidate — the same fact that makes this a browser rather than a link — so
+  the window is the only place the work exists.
 - **`/api/session/file` is in `_UPLOAD_ROUTES`.** It has to be: the browser's file picker
   shows the *server's* disk, so this upload is the file transfer, and a file route left
   out of that set reads its body as `{}` and reports "no file". Validation, naming and the

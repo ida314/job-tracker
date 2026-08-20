@@ -459,7 +459,18 @@ until `serve` itself is restarted. Observed 2026-08-19.
 
 `POST /api/session/close` sets `Session.closing`; `_hold_until_closed` reads it in the
 tick it was already doing, breaks, and `fill_application` closes the context on the way
-out, which releases the lock. Two things about its shape:
+out, which releases the lock.
+
+**The page has to land that, and at first it did not** (fixed the same day). The window
+closed, the lock freed and the log said so, while the page sat on *"closing…"* with every
+field still accepting input — indistinguishable from a hang. A closed phase, or a session
+that has gone entirely, now unhides the `#gone` banner, disables every control and **stops
+the poll**; `render_apply` emits the same state server-side so a reload with no script is
+just as honest. **And the button confirms first**, because closing discards the fill: no
+ATS keeps a draft for an anonymous candidate, which is the same fact that makes this a
+browser rather than a link.
+
+Two things about the endpoint's shape:
 
 - **It is not a `live.Command`.** The vocabulary is what a web request may do to the
   *form*, and closing the window does nothing to the form. Keeping it out leaves that

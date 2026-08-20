@@ -627,6 +627,24 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
         'nothing you already pushed is lost. <button id="reload">Reload</button></p>'
     )
 
+    # The window is gone. Said here rather than only in the phase pill, because the
+    # difference between "the browser is holding your form" and "there is no browser"
+    # is the difference between a page that works and a page that quietly does nothing:
+    # every field would still accept typing, every push would queue into a closed
+    # session, and the button that closed it would sit on "closing…" forever. That is
+    # the mirror-over-a-dead-browser state this whole phase exists to make visible.
+    #
+    # Rendered from the server when the session is already closed, so a reload is honest
+    # too; the script only ever unhides it.
+    gone = "" if snap["phase"] == live.CLOSED else " hidden"
+    p.append(
+        f'<p class="banner bad" id="gone"{gone}>The window is closed, and nothing on '
+        "this page can reach a browser now. An application you did not submit is not "
+        "saved anywhere — no ATS keeps a draft for an anonymous candidate — so this is "
+        "a record of what was filled in, not something to carry on with. "
+        '<a href="/">Back to the dashboard</a> to open it again.</p>'
+    )
+
     p.append('<div class="split">')
 
     # -- the preview ------------------------------------------------------------------
@@ -699,7 +717,7 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
             "Open the window and look.</p>"
         )
     for row in snap["fields"]:
-        p.extend(_live_field(row, snap["epoch"]))
+        p.extend(_live_field(row, snap["epoch"], dead=snap["phase"] == live.CLOSED))
     p.append(
         f'<p class=note id="counts">{html.escape(live.summary(snap))}</p>'
     )
@@ -718,7 +736,7 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
     return "\n".join(p)
 
 
-def _live_field(row: dict, epoch: int) -> list:
+def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
     """One mirrored form field.
 
     Everything here is third-party text off an ATS page — labels, option values, the
@@ -732,6 +750,10 @@ def _live_field(row: dict, epoch: int) -> list:
     handle = html.escape(row["handle"], quote=True)
     label = html.escape(row["label"] or row["key"] or row["handle"])
     status = row["status"]
+    # `dead` is the window being gone. A control that still takes typing over a browser
+    # that closed is the same lie as a live-looking preview of it: every push would be
+    # refused one field at a time, which reads as "this field would not take it".
+    off = " disabled" if dead else ""
     out = [
         f'<div class="lf" data-handle="{handle}" '
         f'data-epoch="{html.escape(str(epoch), quote=True)}" '
@@ -746,7 +768,7 @@ def _live_field(row: dict, epoch: int) -> list:
 
     value = html.escape(row["value"] or "")
     if row["type"] in ("select", "multiselect"):
-        out.append('<select class="lv">')
+        out.append(f'<select class="lv"{off}>')
         # A blank first option, always. Without one, opening the page would look like
         # every dropdown already holds its first value — and a dropdown we could not
         # answer is a gap, which is a thing to see rather than a thing to hide.
@@ -757,17 +779,17 @@ def _live_field(row: dict, epoch: int) -> list:
             out.append(f'<option value="{o}"{sel}>{html.escape(option)}</option>')
         out.append("</select>")
     elif row["type"] == "file":
-        out.append('<input class="lf-file" type="file">')
+        out.append(f'<input class="lf-file" type="file"{off}>')
         if row["value"]:
             out.append(f'<p class=note>attached: <code>{value}</code></p>')
     elif row["type"] == "checkbox":
         checked = " checked" if row["status"] == live.FILLED else ""
-        out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}> yes'
-                   "</label>")
+        out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}'
+                   f"{off}> yes</label>")
     elif row["type"] == "textarea":
-        out.append(f'<textarea class="lv" rows="4">{value}</textarea>')
+        out.append(f'<textarea class="lv" rows="4"{off}>{value}</textarea>')
     else:
-        out.append(f'<input class="lv" type="text" value="{value}">')
+        out.append(f'<input class="lv" type="text" value="{value}"{off}>')
 
     # Answering it here can also answer it everywhere. Offered only where there is
     # something to learn — a field the fill could not answer — and it goes through
@@ -2723,9 +2745,16 @@ _APPLY_JS = """
   var closewin = document.getElementById('closewin');
   var donemsg = document.getElementById('donemsg');
   closewin.addEventListener('click', function () {
+    // Closing discards the fill. No ATS keeps a draft for an anonymous candidate, which
+    // is the same fact that makes this whole feature a browser rather than a link — so
+    // the window is the only place the work exists, and one misclick is all of it.
+    if (!confirm('Close the window? An application you have not submitted is not saved '
+                 + 'anywhere, so the fill is discarded.')) return;
     closewin.disabled = true;
     donemsg.textContent = 'closing…';
     post('/api/session/close', {}).then(function (res) {
+      // Deliberately not "closed": the request only asked. The browser thread reads the
+      // flag on its next poll, and `gone()` says so when it has actually happened.
       donemsg.textContent = res.ok ? (res.detail || 'closing…')
                                    : (res.error || 'could not close it');
       if (!res.ok) closewin.disabled = false;
@@ -2740,13 +2769,29 @@ _APPLY_JS = """
   // thing that makes it take screenshots. Stop polling and the work stops.
   var ago = document.getElementById('ago');
 
+  // The window is gone. Everything here is about not looking alive: the banner the
+  // server already rendered comes out of hiding, every control stops taking input, and
+  // the poll stops — there is nothing left to ask about, and asking anyway is what kept
+  // the button sitting on "closing…" over a browser that had already closed.
+  var stopped = false;
+  function gone() {
+    if (stopped) return;
+    stopped = true;
+    document.getElementById('phase').textContent = 'closed';
+    document.getElementById('gone').hidden = false;
+    document.querySelectorAll('.lf .lv, .lf .lf-file').forEach(function (el) {
+      el.disabled = true;
+    });
+    closewin.disabled = true;
+    donemsg.textContent = 'the window is closed';
+    ago.textContent = 'the window is closed';
+  }
+
   function tick() {
     fetch('/api/session').then(function (r) { return r.json(); }).then(function (res) {
-      if (!res.ok) {
-        document.getElementById('phase').textContent = 'closed';
-        return;
-      }
+      if (!res.ok) { gone(); return; }
       var s = res.session;
+      if (s.phase === 'closed') { gone(); return; }
       document.getElementById('phase').textContent = s.phase;
       var line = s.discovered
         ? s.filled + '/' + s.discovered + ' fields filled' +
@@ -2773,7 +2818,9 @@ _APPLY_JS = """
       } else if (paused) {
         ago.textContent = 'paused';
       }
-    }).catch(function () {}).then(function () { setTimeout(tick, POLL_MS); });
+    }).catch(function () {}).then(function () {
+      if (!stopped) setTimeout(tick, POLL_MS);
+    });
   }
 
   // Statuses only, and only for fields you are not in the middle of typing into. The
