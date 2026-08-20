@@ -88,6 +88,55 @@ jobs:
           print(v)
           sys.exit(0 if "+" in v else 1)'
 
+  # The dashboard image, built from Dockerfile.serve. A second image on purpose: it
+  # carries Playwright's browsers (~1.9GB against the app image's 177MB) because `serve`
+  # drives a real Chromium at a real ATS form, and the nightly pipeline never opens one.
+  # Its base differs too — the app image is Debian trixie, which
+  # `playwright install --with-deps` does not support.
+  #
+  # Buildx with a gha cache here, unlike the `docker` job above: the base pull and the
+  # pip layer are minutes rather than seconds, and they change only when a pin does.
+  docker-serve:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build serve image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.serve
+          load: true
+          tags: jobtracker-serve:ci
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            SIR_CLIENT=git+https://github.com/ida314/stupid-inference-router.git#subdirectory=clients/python
+          cache-from: type=gha,scope=serve
+          cache-to: type=gha,mode=max,scope=serve
+
+      # The first three are the app-image assertions. The fourth is this image's whole
+      # reason for existing, and it is the one that could rot silently: `serve` reports a
+      # missing browser as a message on a card and carries on, so an image that lost
+      # Playwright would look exactly like a working deployment until someone clicked
+      # Open prefilled. Absence that announces itself as normal is the failure this repo
+      # keeps having; assert the capability, not just the import.
+      - name: Check the image does what it claims
+        run: |
+          docker run --rm --entrypoint python jobtracker-serve:ci -c 'import sir_client'
+          docker run --rm jobtracker-serve:ci --help > /dev/null
+          docker run --rm --entrypoint python jobtracker-serve:ci -c '
+          import jobtracker, sys
+          v = jobtracker.build_version()
+          print(v)
+          sys.exit(0 if "+" in v else 1)'
+          docker run --rm --entrypoint python jobtracker-serve:ci -c '
+          from jobtracker import browser
+          import sys
+          r = browser.unavailable_reason()
+          print("browser:", r or "usable")
+          sys.exit(1 if r else 0)'
+
   # Continuous deployment, the publishing half.
   publish:
     needs: [test, docker]
@@ -155,3 +204,60 @@ jobs:
           v = jobtracker.build_version()
           print(v)
           sys.exit(0 if "+" in v else 1)'
+
+  # The dashboard image's publishing half. Separate from `publish` so a failure says
+  # which image did not ship, and so the nightly pipeline's image is never held back by
+  # a break in the browser layer — they are deployed independently and one is on the
+  # critical path every night while the other is a page you open.
+  publish-serve:
+    needs: [test, docker-serve]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.serve
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/job-tracker-serve:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/job-tracker-serve:latest
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            SIR_CLIENT=git+https://github.com/ida314/stupid-inference-router.git#subdirectory=clients/python
+          cache-from: type=gha,scope=serve
+          cache-to: type=gha,mode=max,scope=serve
+
+      # Repeated against what was actually pushed, for the same reason `publish` does it:
+      # the build succeeding says nothing about the artifact in the registry being the
+      # one you think it is.
+      - name: Verify the published image
+        run: |
+          IMG=ghcr.io/${{ github.repository_owner }}/job-tracker-serve:sha-${{ github.sha }}
+          docker run --rm --entrypoint python "$IMG" -c 'import sir_client'
+          docker run --rm "$IMG" --help > /dev/null
+          docker run --rm --entrypoint python "$IMG" -c '
+          import jobtracker, sys
+          v = jobtracker.build_version()
+          print(v)
+          sys.exit(0 if "+" in v else 1)'
+          docker run --rm --entrypoint python "$IMG" -c '
+          from jobtracker import browser
+          import sys
+          r = browser.unavailable_reason()
+          print("browser:", r or "usable")
+          sys.exit(1 if r else 0)'

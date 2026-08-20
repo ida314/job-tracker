@@ -1182,6 +1182,31 @@ pushes `ghcr.io/ida314/job-tracker:{sha-<sha>,latest}` from the `publish` job, b
 The host **pulls**; nothing in CI holds credentials to a machine. That keeps the rule
 above intact: publishing an artifact names no orchestrator.
 
+**There are two images, and the split is not cosmetic (added 2026-08-20).**
+`Dockerfile.serve` builds `ghcr.io/ida314/job-tracker-serve` from
+`mcr.microsoft.com/playwright/python:v1.62.0-noble`; `publish-serve` ships it beside the
+batch image. `serve` drives a real Chromium at a real ATS form and the browsers are
+~1.9GB against the batch image's 177MB — folding them together would multiply the nightly
+pull by ten to carry something `check`, `work` and `prepare` never open. The bases differ
+for a concrete reason too: the app image is Debian trixie, which
+`playwright install --with-deps` does not support.
+
+Three things about that image that break silently if changed:
+
+- **The base tag and the pinned `playwright` version are one unit.** `v1.62.0-noble`
+  ships `chromium-1234`, which is the revision `playwright==1.62.0`'s driver launches.
+  Bump one without the other and the driver looks for a browser that is not there.
+- **`ENV JOBTRACKER_BROWSER_PROFILE` and `JOBTRACKER_RESUMES` must point into `/data`.**
+  `config.py` resolves both relative to the package root, which is `/app` in a container —
+  so the persistent Chromium profile (and any candidate-account login in it) and every
+  uploaded resume would be written into a layer that is deleted with the container. The
+  batch image needs neither, which is why this is the serve image's problem alone.
+- **CI asserts `browser.unavailable_reason() is None` on the published image**, not just
+  `import playwright`. `serve` reports a missing browser as a message on a card and
+  carries on, so an image that lost Playwright would look exactly like a working
+  deployment until someone clicked Open prefilled — capability-absent-but-green, the
+  failure shape this file exists to name.
+
 - **`sir-client` is baked in, and CI asserts `import sir_client` on the published
   image.** Without it `work` is a silent nightly no-op that still exits 0 — the same
   failure-is-absence shape as the `response_format` regression. An unverified image

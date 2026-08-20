@@ -1,0 +1,88 @@
+# The dashboard, with a browser it can actually drive.
+#
+# A SECOND image on purpose. The main Dockerfile is 177MB of app on python:*-slim and has
+# no browser in it, which is right for the nightly pipeline: `check`, `work`, `prepare`
+# and `dashboard` never open one. `serve` does — "Open prefilled" drives a real Chromium
+# at a real ATS form — and Playwright's browsers are ~1.9GB. Folding them into the batch
+# image would multiply the nightly pull by ten to carry something the nightly never runs.
+#
+# The bases differ for a concrete reason, not preference: the app image is Debian trixie,
+# which `playwright install --with-deps` does not support. This starts from Microsoft's
+# own image, which already carries the browsers and every shared library they need.
+#
+#   docker build -f Dockerfile.serve -t jobtracker-serve:local .
+#
+# The tag pins the Playwright version, and it MUST match the `playwright` Python package
+# installed below — the driver and the browser revision are one unit. v1.62.0-noble ships
+# chromium-1234, which is what the pinned package expects. Move them together or the
+# driver launches a revision that is not there.
+FROM mcr.microsoft.com/playwright/python:v1.62.0-noble
+
+WORKDIR /app
+
+# Dependencies first for layer caching.
+#
+# Unlike the batch image there is no install-git-then-purge-it dance here: this base
+# already carries git, so a `git+https://` spec for the SDK just works.
+#
+# sir-client is baked in even though the dashboard makes no model calls today. The two
+# images should not differ in what the application can do — a `serve` that silently
+# lacked the SDK would be a new instance of the failure this project keeps having, where
+# a capability is absent rather than broken and nothing says so. The same optional
+# BuildKit secret is accepted for the day the router repo goes private; a build arg would
+# be readable with `docker history` on the published image.
+ARG SIR_CLIENT=""
+COPY requirements.txt .
+RUN --mount=type=secret,id=sir_token \
+    pip install --no-cache-dir -r requirements.txt \
+    # Pinned to the base image tag above. `>=1.40` in pyproject's `browser` extra is the
+    # floor for the feature; this is the exact version whose driver matches the browsers
+    # baked into this image.
+ && pip install --no-cache-dir playwright==1.62.0 \
+ && if [ -n "$SIR_CLIENT" ]; then \
+      if [ -s /run/secrets/sir_token ]; then \
+        git config --global \
+          url."https://x-access-token:$(cat /run/secrets/sir_token)@github.com/".insteadOf \
+          "https://github.com/"; \
+      fi; \
+      pip install --no-cache-dir "$SIR_CLIENT"; \
+      status=$?; \
+      rm -f /root/.gitconfig; \
+      [ $status -eq 0 ]; \
+    fi
+
+COPY jobtracker/ ./jobtracker/
+COPY companies.yaml criteria.yaml profile.yaml ./
+
+# Everything the app resolves relative to the package root has to be redirected to the
+# mounted volume, and this is the part that fails silently if forgotten. config.py
+# computes ROOT as the parent of the package — /app in here — so the browser profile
+# would land at /app/data/browser inside a container that gets deleted, taking any
+# candidate-account login with it, and uploaded resumes would go the same way. The batch
+# image never needed these because it never opens a browser and never takes an upload.
+ENV JOBTRACKER_DB=/data/state.db \
+    JOBTRACKER_ANSWERS=/data/answers.yaml \
+    JOBTRACKER_BROWSER_PROFILE=/data/browser \
+    JOBTRACKER_RESUMES=/data/resumes
+
+# Where Chromium draws. There is no screen in here; the X server is a sibling container
+# sharing /tmp/.X11-unix. Playwright's headful launch fails on the worker thread without
+# it — which the page reports rather than hanging on "Opening…", but reporting it is not
+# the same as it working.
+ENV DISPLAY=:100
+
+ARG GIT_SHA=""
+ENV JOBTRACKER_REVISION=$GIT_SHA
+LABEL org.opencontainers.image.title="jobtracker-serve" \
+      org.opencontainers.image.source="https://github.com/ida314/job-tracker" \
+      org.opencontainers.image.revision="$GIT_SHA"
+
+VOLUME ["/data"]
+EXPOSE 8765
+
+# --host 0.0.0.0 because the only way into this container is the published port, and the
+# host publishes it on 127.0.0.1. The warning that flag carries — no auth, and it can
+# edit criteria.yaml — is answered by the bind address on the host side and by the
+# tailnet, exactly as it was when this ran on the machine directly.
+ENTRYPOINT ["python", "-m", "jobtracker.cli"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8765"]
