@@ -1874,3 +1874,109 @@ def test_the_page_warns_that_a_reachable_board_was_not_identity_checked(tmp_path
     script = page[page.rindex("<script>"):]
     assert "reachable" in script
     assert "NOT an identity check" in script
+
+
+# ---------------------------------------------------------------------------
+# The rules editor on /tuning. `role_type_exclude` is the point of it: it is the
+# only list checked *before* the level gate, so it is the only one that can clear a
+# non-engineering title out of UNCERTAIN — a title naming no level can never be
+# rejected by `exclude_titles`, however many tokens that list grows.
+
+
+def _suggestible_db():
+    """A corpus with a rejected title, so `suggest_rules` has something to propose and
+    the suggestion controls actually render."""
+    conn = _db_with()
+    store.record_decision(conn, "Stripe", "R1", "Deployment Strategist, Public Sector",
+                          "reject", "2026-07-23")
+    store.record_decision(conn, "Stripe", "R2", "Deployment Strategist, Commercial",
+                          "reject", "2026-07-23")
+    store.record_decision(conn, "Stripe", "R3", "Deployment Strategist, Intel",
+                          "reject", "2026-07-23")
+    conn.commit()
+    return conn
+
+
+def test_every_gating_list_is_reachable_from_the_tuning_page(criteria):
+    page = server.render_tuning(_db_with(), criteria)
+    for key, _kind, _why in server._GATING_LISTS:
+        assert f"<code>{key}</code>" in page, f"{key} is not on the page"
+        assert f'data-list="{key}"' in page, f"{key} has no add control"
+
+
+def test_the_rules_editor_offers_no_location_list(criteria):
+    """Location lists rank, they never gate. Heading them 'rules' next to the gating
+    lists would advertise a filter the user explicitly ruled out in 2026-07-22."""
+    page = server.render_tuning(_db_with(), criteria)
+    for key in ("locations_nyc", "locations_us", "locations_non_us"):
+        assert f"<code>{key}</code>" not in page
+
+
+def test_current_tokens_are_shown_not_just_an_empty_box(criteria):
+    """An add box over an invisible list is how you add a token that is already there,
+    or miss that the one you need is absent. The section is a reading first."""
+    page = server.render_tuning(_db_with(), criteria)
+    for token in criteria.role_type_exclude[:5]:
+        assert f"<span class=chip>{token}</span>" in page
+
+
+def test_a_suggestion_may_only_target_a_reject_list(criteria):
+    """Suggestions are phrases mined from titles you REJECTED. Letting one land in
+    `engineering_terms` or `role_type_include` would widen matching on exactly the
+    titles the suggestion exists to remove — one click, evidence inverted."""
+    assert set(server._SUGGEST_TARGETS) <= {"exclude_titles", "role_type_exclude"}
+    picker = server._list_picker("role_type_exclude")
+    assert '<option value="role_type_exclude" selected>' in picker
+    for key in ("level_include", "role_type_include", "engineering_terms"):
+        assert key not in picker
+
+
+def test_rule_controls_have_handlers_in_the_file_that_renders_them(criteria):
+    """The 'Open prefilled' rule: markup in one file and its handler in another is how
+    a control ships dead and silent. Both rule controls are emitted by render_tuning,
+    so both handlers belong in server._JS."""
+    page = server.render_tuning(_suggestible_db(), criteria)
+    for cls in ("add-token", "add-rule"):
+        assert f"class={cls}" in page, f"{cls} is not rendered"
+        assert f"button.{cls}" in server._JS, f"{cls} has markup but no handler"
+
+
+def test_the_add_rule_button_no_longer_hardcodes_a_list():
+    """It used to post `list: 'exclude_titles'` regardless of what the picker said.
+    The picker is only real if the handler reads it."""
+    add_branch = server._JS.split("button.add-rule")[1].split("button.add-token")[0]
+    assert "select.sugg-list" in add_branch
+    # The picked value is what travels; `exclude_titles` survives only as the fallback
+    # for a suggestion rendered without a picker.
+    assert "sel.value" in add_branch.split("addRule(")[1]
+
+
+def test_the_rules_editor_has_no_delete_control(criteria):
+    """Removing a token silently re-admits every posting it was rejecting. That needs
+    an edit plus `jobtracker eval`, not a button that skips the regression replay this
+    whole page exists to run."""
+    page = server.render_tuning(_db_with(), criteria)
+    section = page.split("<h2>Rules</h2>")[1]
+    assert "del-token" not in section
+    assert "remove" not in section.lower()
+
+
+def test_adding_a_token_to_role_type_exclude_writes_it(tmp_path, criteria):
+    """End to end through the endpoint the buttons post to."""
+    path = tmp_path / "criteria.yaml"
+    path.write_text(config.CRITERIA_YAML.read_text())
+    h = _handler_for(store.connect(":memory:") and (tmp_path / "s.db"), path)
+    store.connect(tmp_path / "s.db").close()
+    res = h._api_rule({"phrase": "counsel", "list": "role_type_exclude"})
+    assert res["ok"] is True and res["list"] == "role_type_exclude"
+    assert "counsel" in load_criteria(path).role_type_exclude
+    assert "counsel" not in load_criteria(path).exclude_titles
+
+
+def test_an_unknown_list_is_refused(tmp_path):
+    path = tmp_path / "criteria.yaml"
+    path.write_text(config.CRITERIA_YAML.read_text())
+    store.connect(tmp_path / "s.db").close()
+    h = _handler_for(tmp_path / "s.db", path)
+    res = h._api_rule({"phrase": "x", "list": "role_type_exclud"})
+    assert res["ok"] is False and "unknown criteria list" in res["error"]

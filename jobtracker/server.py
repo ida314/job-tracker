@@ -98,7 +98,88 @@ _APPLY_LOCK = threading.Lock()
 # handles one request at a time, which is the shape this whole file avoids.
 _VERIFY_LOCK = threading.Lock()
 
+
 # -- rendering (pure reads, testable without a server) ------------------------------
+# The lists `match()` actually gates on, in the order it consults them. Location lists
+# are deliberately absent: they RANK, they never gate (see match.location_rank), so
+# putting them in an editor headed "rules" would misdescribe what they do.
+#
+# `role_type_exclude` is the one most worth reaching, and the reason this section
+# exists: it is checked at step 2, *before* the level gate, so it applies to every
+# title whether or not the title names a level. That makes it the only list that can
+# clear a non-engineering role out of the UNCERTAIN queue — a title with no level
+# token can never be rejected by `exclude_titles` alone.
+_GATING_LISTS = (
+    ("exclude_titles", "reject", "Seniority and shape disqualifiers. Step 1."),
+    (
+        "role_type_exclude",
+        "reject",
+        "Off-target role families. Step 2 — before the level gate, so it applies to "
+        "every title. This is what empties non-engineering roles out of Uncertain.",
+    ),
+    (
+        "level_include",
+        "gate",
+        "The entry-level signal. No hit here leaves the title UNCERTAIN, never rejected.",
+    ),
+    ("role_type_include", "accept", "Backend-specific signal. Labels a match role:<token>."),
+    (
+        "engineering_terms",
+        "accept",
+        "Any engineering signal. Required alongside a level hit — it is what keeps "
+        "'Finance Associate' from matching a backend tracker.",
+    ),
+)
+
+# A suggestion is a phrase drawn from titles you REJECTED, so the only sane targets are
+# the two reject lists. Offering the include lists here would let one click invert the
+# meaning of the evidence — adding a reject phrase to `engineering_terms` would widen
+# matching on exactly the titles you were trying to remove.
+_SUGGEST_TARGETS = ("exclude_titles", "role_type_exclude")
+
+
+def _list_picker(selected: str) -> str:
+    """The target-list dropdown beside a suggestion."""
+    opts = "".join(
+        f'<option value="{k}"{" selected" if k == selected else ""}>{k}</option>'
+        for k in _SUGGEST_TARGETS
+    )
+    return f"<select class=sugg-list>{opts}</select>"
+
+
+def _rules_section(criteria) -> list[str]:
+    """The current criteria lists, each with an add box.
+
+    Read-and-add only. There is no delete control, deliberately: removing a token can
+    silently re-admit thousands of postings already judged against it, and the safe
+    path for that is an edit plus `jobtracker eval`, not a button that skips the
+    regression replay this page exists to run.
+    """
+    out = ["<h2>Rules</h2>", "<p class=note>The lists <code>match()</code> gates on, in "
+           "the order it consults them. Adding a token rematches every stored posting "
+           "immediately — the counts in the alert are the blast radius.</p>"]
+    for key, kind, why in _GATING_LISTS:
+        tokens = list(getattr(criteria, key, []) or [])
+        out.append(f'<div class="rules {kind}">')
+        out.append(
+            f"<h3><code>{key}</code> <small>{len(tokens)}</small></h3>"
+            f"<p class=note>{html.escape(why)}</p>"
+        )
+        out.append("<div class=chips>")
+        out.extend(f"<span class=chip>{html.escape(t)}</span>" for t in tokens)
+        if not tokens:
+            out.append("<span class=note>empty</span>")
+        out.append("</div>")
+        out.append(
+            f'<div class=addbox><input class=token data-list="{key}" '
+            f'placeholder="add a token to {key}" '
+            f'aria-label="add a token to {key}">'
+            f'<button class=add-token data-list="{key}">add</button></div>'
+        )
+        out.append("</div>")
+    return out
+
+
 def render_tuning(conn: sqlite3.Connection, criteria) -> str:
     """The tuning page as a string. Pure read — never writes to `conn`."""
     matches = store.open_postings_by_verdict(conn, "match")
@@ -145,9 +226,12 @@ def render_tuning(conn: sqlite3.Connection, criteria) -> str:
             p.append(
                 f"<div class=sugg><code>{html.escape(s.phrase)}</code> "
                 f"<small>{s.rejected} rejects · e.g. {eg}</small> "
+                f"{_list_picker(s.target_list)} "
                 f"<button data-phrase=\"{html.escape(s.phrase, quote=True)}\" "
-                'class=add-rule>add to exclude_titles</button></div>'
+                "class=add-rule>add</button></div>"
             )
+
+    p.extend(_rules_section(criteria))
 
     p.append(f"<h2>Open matches ({len(matches)})</h2>")
     p.append(
@@ -2457,6 +2541,20 @@ _EXTRA_CSS = """
 .banner.bad{background:#58151c;color:#f8d7da}
 .regression{padding:.4rem .8rem;border-left:3px solid #dc3545;margin:.3rem 0}
 .sugg{padding:.4rem 0;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
+.rules{margin:.9rem 0;padding:.1rem 0 .6rem;border-top:1px solid var(--rule)}
+.rules h3{margin:.6rem 0 .2rem;font-size:1rem;font-weight:600}
+.rules h3 small{opacity:.6;font-weight:400}
+.rules .note{margin:.2rem 0 .5rem}
+.chips{display:flex;gap:.3rem;flex-wrap:wrap;margin:.3rem 0 .5rem}
+.chip{padding:.1rem .45rem;border:1px solid var(--rule);border-radius:10px;
+font-size:.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.rules.reject .chip{border-color:#dc3545}
+.rules.accept .chip{border-color:#0f5132}
+.addbox{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap}
+.addbox input{padding:.25rem .5rem;border-radius:5px;border:1px solid var(--rule);
+background:transparent;color:inherit;font:inherit;min-width:16rem}
+select{padding:.2rem .4rem;border-radius:5px;border:1px solid currentColor;
+background:transparent;color:inherit;font:inherit}
 .note{opacity:.75;font-size:.9rem}
 button{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
 background:transparent;color:inherit;font:inherit}
@@ -2705,6 +2803,19 @@ async function post(url, body) {
                              body: JSON.stringify(body||{})});
   return r.json();
 }
+// Both rule controls land here. The rematch is not cosmetic: a token is only safe to
+// keep once you have seen what it did to the corpus, so the count delta is reported
+// before the page reloads and the old numbers are gone.
+async function addRule(phrase, list) {
+  const res = await post('/api/rule', {phrase, list});
+  if (!res.ok) { alert(res.error); return; }
+  const rm = await post('/api/rematch', {});
+  alert('Added "' + phrase + '" to ' + list +
+        '\\nmatch: ' + (rm.before.match||0) + ' -> ' + (rm.after.match||0) +
+        '\\nuncertain: ' + (rm.before.uncertain||0) + ' -> ' + (rm.after.uncertain||0) +
+        '\\nreject: ' + (rm.before.reject||0) + ' -> ' + (rm.after.reject||0));
+  location.reload();
+}
 document.addEventListener('click', async (e) => {
   const rej = e.target.closest('button.reject');
   if (rej) {
@@ -2718,12 +2829,16 @@ document.addEventListener('click', async (e) => {
   const add = e.target.closest('button.add-rule');
   if (add) {
     const phrase = add.dataset.phrase;
-    const res = await post('/api/rule', {phrase, list: 'exclude_titles'});
-    if (!res.ok) { alert(res.error); return; }
-    const rm = await post('/api/rematch', {});
-    alert('Added "' + phrase + '"\\nmatch: ' + (rm.before.match||0) +
-          ' -> ' + (rm.after.match||0));
-    location.reload();
+    const sel = add.closest('.sugg').querySelector('select.sugg-list');
+    await addRule(phrase, sel ? sel.value : 'exclude_titles');
+    return;
+  }
+  const tok = e.target.closest('button.add-token');
+  if (tok) {
+    const box = document.querySelector('input.token[data-list="' + tok.dataset.list + '"]');
+    const phrase = box ? box.value.trim() : '';
+    if (!phrase) { alert('nothing to add'); return; }
+    await addRule(phrase, tok.dataset.list);
     return;
   }
   const save = e.target.closest('button.save');

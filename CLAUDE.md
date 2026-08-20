@@ -618,6 +618,40 @@ in `docs/tuning.md`; the rules that matter here:
 - **Overrides outrank rules** and survive rematch, carrying `decided_by='human'`. They
   are applied in the caller path (`cmd_check`, `cmd_rematch`, `serve`), never inside
   `match()` — that function's purity is load-bearing for the tests.
+- **`/tuning` shows the five gating lists and can add to any of them** (2026-08-19).
+  Before this, the only rule control on the page was one button hardwired to
+  `exclude_titles`, and no list was ever displayed — so the one list that can clear a
+  non-engineering title out of UNCERTAIN was unreachable from the UI. That is
+  `role_type_exclude`, and the asymmetry is the reason the section exists: it is checked
+  at **step 2, before the level gate**, so it applies to every title, while
+  `exclude_titles` can only reject a title that already carries a level token. 55% of
+  the 1,537 open uncertains had no engineering word in the title when this was built.
+  - **Location lists are deliberately absent from it.** They rank, they never gate;
+    heading them "rules" beside the gating lists would advertise the geography filter
+    removed on 2026-07-22. There is a test.
+  - **A suggestion may only target a *reject* list.** Suggestions are phrases mined from
+    titles you rejected, so offering `engineering_terms` or `role_type_include` in that
+    dropdown would let one click widen matching on exactly the titles the suggestion
+    exists to remove. `_SUGGEST_TARGETS`, with a test.
+  - **There is no delete control, and adding one is not a small feature.** Removing a
+    token silently re-admits every posting it was rejecting; that path is an edit plus
+    `jobtracker eval`, not a button that skips the regression replay the page exists to
+    run. The section is a *reading* first — tokens render as chips, because an add box
+    over an invisible list is how you re-add a token that is already there.
+  - Both controls post to `/api/rule`, which already validated `list` against
+    `_LIST_KEYS`; only the UI was hardcoded. Handlers live in `server._JS` beside the
+    markup, per the Open-prefilled rule, and there is a parity test.
+- **Rejects are kept, and the disk-space argument for dropping them is not real.**
+  Measured 2026-08-19: 7,522 rejects are ~1.06 MB of a 3.4 MB `state.db`, ~140 bytes
+  each, and `_cache_descriptions` already excludes them from the only expensive path.
+  Do not replace them with a hash set of "seen and rejected" postings: `cmd_check`
+  re-derives `match()` over every posting in the fetch, which is what makes a
+  `criteria.yaml` edit reclassify all of history with no backfill, and `eval` replays
+  the rules against that same corpus. A hash cache pins today's rules including today's
+  mistakes. The supported "never show me this again" is `overrides`, which pins per
+  posting and survives rematch. Note also that the fetch unit is the **board**, not the
+  posting — one bulk call returns all N reqs, so filtering at ingest saves no network
+  either.
 - `decisions.title` is denormalized on purpose. Joining to `postings` would shrink the
   corpus every time a req closed, which is exactly when the evidence matters most.
 
