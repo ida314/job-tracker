@@ -176,12 +176,11 @@ Without it, `apply-to` and `serve`'s "Open prefilled" button say so; everything 
 works unchanged, and the `browser`-marked tests skip. The window opens **on the machine
 running the command**, so a headless host needs a display (`Xvfb :100`).
 
-Under `serve` you do not type in that window. "Open prefilled" opens it and sends you to
+Under `serve` you never touch that window. "Open prefilled" opens it and sends you to
 **`/apply`**, which mirrors every field of the real form onto a page with no latency
-between you and the keyboard, plus a screenshot of what the browser actually sees. The
-window is still where you read the application over and submit it — nothing on `/apply`
-can — so a headless host still wants a viewer named by `JOBTRACKER_BROWSER_VIEW_URL` for
-that step and for captchas. See `docs/prefill.md`.
+between you and the keyboard, plus a still of the whole page as the browser sees it.
+Typing there fills the real form and deleting there empties it. The window draws on a
+display because Chromium has to; nothing links you to it. See `docs/prefill.md`.
 
 ## Container
 

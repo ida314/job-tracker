@@ -339,20 +339,18 @@ drives a browser on the server's own display. That is also why holding the windo
 has to wait *inside* a Playwright call: the sync API dispatches events only while one is
 in flight, so a plain sleep loop never learns that the window closed.
 
-On a headless host that leaves a window nobody can see. Two ways out, and the app
-supports the first with one variable:
+On a headless host that leaves a window nobody can see, and **that is now the intended
+state**. It still needs a display — point `$DISPLAY` at an X server not attached to a
+monitor (`Xvfb :100`), because Chromium will not launch headful without one — but nothing
+carries that display anywhere and nothing in the app links to it.
 
-- **Give the host a display and watch it.** Point `$DISPLAY` at an X server that is not
-  attached to a monitor (`Xvfb :100`), carry it to a viewer (VNC → noVNC, xpra's HTML5
-  client, whatever you like), and set **`JOBTRACKER_BROWSER_VIEW_URL`** to that viewer.
-  The Today card then shows a "View window" link beside the button. It is only a link:
-  the app never starts the viewer, never checks it, and does not care what is on the
-  other end — a dashboard that believed it managed a remote desktop would be a second
-  thing to debug at 2am. Keep the viewer on loopback and put the authentication in front
-  of it (`tailscale serve`, an SSH tunnel, a reverse proxy); noVNC on 0.0.0.0 is a
-  keyboard on your machine for anyone who finds the port.
-- **Run `serve` where the screen is.** Then none of the above exists, which is the
-  better answer whenever it is available.
+**The viewer is gone** (2026-08-22). `JOBTRACKER_BROWSER_VIEW_URL`, the "View window" link
+on the Today card, and the one on this page were all deleted. They existed because the
+window was where you did the two things the mirror could not do: read the application over,
+and submit it. The first is what the full-page preview is for. The second is now `/apply`'s
+Submit button. What is left — a remote X server shipping video frames for fifteen text
+fields — was only ever the slow path, and keeping a link to it advertised an interface that
+does not work well enough to use.
 
 The static dashboard shows the prefill counts — `prefill 13/16 fields · 3 need you` —
 and **no button**. The counts are useful offline; a button that cannot drive a browser is
@@ -455,8 +453,9 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 
 ### What it cannot do
 
-- **Captchas, and the submit itself.** Both stay in the window, which is why
-  `JOBTRACKER_BROWSER_VIEW_URL` is still there and still only a link.
+- **Captchas.** They happen in the window, and nothing links you to the window any more.
+  A form that raises one is a form this cannot finish; the preview shows you that it did,
+  and the fallback is a display you reach at the deployment layer, not through this app.
 - **Fields the DOM pass cannot see.** `_DISCOVER_JS` skips anything with no `offsetParent`
   — a collapsed section — and anything that is not a real input, such as a rich-text
   editor or a drag-and-drop dropzone. The page prints what it read and says so; it must
@@ -497,8 +496,9 @@ Two things about the endpoint's shape:
   holding the lock. `submit()` refuses commands once the phase is `CLOSED`; this must
   not.
 
-None of this removes the need for `DISPLAY`, `Xvfb` or the viewer. Chromium still draws
-somewhere, and the escape hatch has to show something. What changed is what you type into.
+None of this removes the need for `DISPLAY` or `Xvfb`: Chromium still has to draw
+somewhere, and it will not launch headful without a display. What it removes is any reason
+to look at what it draws.
 
 ## `prepare`: is tomorrow morning actually useful?
 

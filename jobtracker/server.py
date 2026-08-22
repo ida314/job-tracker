@@ -575,21 +575,19 @@ def _tracked_companies(conn: sqlite3.Connection, companies) -> list:
         p.append("</tbody></table>")
     return p
 
-def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
+def render_apply(conn: sqlite3.Connection, session) -> str:
     """The live application form, mirrored into fields you can actually type in.
 
     Pure read — it never writes to `conn`, and it never touches the browser. Everything
     it renders comes from the `live.Session` the worker thread publishes into.
 
-    Why this page exists at all: the window is on the machine running `serve`, which on a
-    headless host means watching it through VNC. Every keystroke was a round trip to a
-    remote X server rendered as video, for a task that is fifteen text fields. Here the
-    typing is local and instant and only the finished value crosses the wire.
-
-    What it deliberately does not do is submit. There is no control on this page that
-    can, for the same reason `browser.py` has no click path: an application is
-    irreversible and goes out under your name. The window is still where you read it over
-    and send it, which is why the viewer link is kept and pointed at exactly that job.
+    **This page is the whole job.** The window is on the machine running `serve`, and
+    there is no longer anything anywhere that links you to it: reaching it meant a remote
+    X server shipping video frames for a task that is fifteen text fields, and the lag was
+    structural rather than a tuning problem. So the window is an implementation detail —
+    it still draws on a display, because Chromium has to, and nobody looks at it. What you
+    read instead is the preview: a still of the whole form, a few seconds behind, over
+    fields that are local and instant.
     """
     p = [
         "<!doctype html><meta charset=utf-8><title>Fill in</title>",
@@ -673,24 +671,6 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
         '<p class=note>The whole page, a few seconds behind. The fields are not behind. '
         'Click it (or <b>100%</b>) to read it at full size.</p>'
     )
-    if view_url:
-        # Kept, and pointed at the two things a mirrored form genuinely cannot do:
-        # solve a captcha, and let you read the whole application before you send it.
-        # Still only a link — this app does not start, probe or manage the viewer.
-        p.append(
-            "<h3>Review &amp; submit</h3>"
-            "<p class=note>When it is right, open the window and send it yourself. "
-            "Nothing on this page can submit an application.</p>"
-            f'<p><a class="viewwin" href="{dashboard_mod._safe_url(view_url)}" '
-            'target="_blank" rel="noopener">View window ↗</a></p>'
-        )
-    else:
-        p.append(
-            "<h3>Review &amp; submit</h3>"
-            "<p class=note>Nothing on this page can submit an application — that is "
-            "deliberate. Set <code>JOBTRACKER_BROWSER_VIEW_URL</code> to get a link to "
-            "the window from here, or use the screen the browser is drawing on.</p>"
-        )
     # The way out of a session, and on a headless host the only one there is. The window
     # is on the machine running `serve`; if you cannot reach that machine's screen you
     # cannot close it, and until it closes the one-window lock stays held and every later
@@ -1252,7 +1232,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/apply":
                 conn = self._conn()
                 try:
-                    page = render_apply(conn, live.current(), config.BROWSER_VIEW_URL)
+                    page = render_apply(conn, live.current())
                 finally:
                     conn.close()
                 self._send(page)
@@ -1369,7 +1349,6 @@ class Handler(BaseHTTPRequestHandler):
             # because only here is there something for them to POST to.
             page = dashboard_mod.build_dashboard(
                 conn, companies, _today(), criteria, interactive=True,
-                view_url=config.BROWSER_VIEW_URL,
             )
         finally:
             conn.close()
@@ -2583,7 +2562,7 @@ padding:.05rem .4rem;border-radius:99px}
 .st-refused{color:#dc3545;background:rgba(220,53,69,.14)}
 .st-pending{opacity:.6;background:rgba(127,127,127,.14)}
 .lf.busy{opacity:.6}
-.viewwin{font-weight:600}
+
 """
 
 _EXTRA_CSS = """

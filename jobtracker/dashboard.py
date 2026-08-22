@@ -254,10 +254,6 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
                      line-height: 1.4; white-space: nowrap; }
 .pick .act a.apply { background: var(--accent); color: #fcfcfb; text-decoration: none;
                      padding-inline: 14px; font-size: 13px; font-weight: 600; }
-/* Reads as one of the buttons, not as a second Apply — it goes to a screen, not a job. */
-.pick .act a.viewwin { color: var(--ink-2); border-color: var(--rule); font-size: 12.5px;
-                       text-decoration: none; }
-.pick .act a.viewwin:hover { color: var(--ink); border-color: var(--ink-2); }
 .pick .act button { appearance: none; background: var(--page); color: var(--ink-2);
                     border-color: var(--rule); font: inherit;
                     font-size: 12.5px; line-height: 1.4; cursor: pointer; }
@@ -695,7 +691,6 @@ def build_dashboard(
     today: str,
     criteria: Criteria | None = None,
     interactive: bool = False,
-    view_url: str = "",
 ) -> str:
     """Return a complete HTML document. Pure read — never writes to `conn`.
 
@@ -708,9 +703,6 @@ def build_dashboard(
     by `jobtracker dashboard` must stay a self-contained, offline, read-only artifact,
     and dead buttons in it would be worse than no buttons.
 
-    `view_url` points at wherever the browser this host opens can be watched — set when
-    `serve` runs somewhere with no screen. It is only a link, and only alongside the
-    button, so the static file never carries it.
     """
     by_name = {c.name: c for c in companies}
     matches = _by_location(store.open_postings_by_verdict(conn, "match"), criteria)
@@ -751,7 +743,7 @@ def build_dashboard(
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
-           view_url, rest, overrides)
+           rest, overrides)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -813,7 +805,7 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy) -> None:
 
 
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
-           plans=None, view_url="", rest=(), overrides=None) -> None:
+           plans=None, rest=(), overrides=None) -> None:
     """The three to apply to today.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -830,7 +822,7 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         parts.append('<div class="picks">')
         for i, row in enumerate(picks, 1):
             _pick(parts, i, row, by_name, today, interactive, criteria, plans,
-                  view_url, overrides)
+                  overrides)
         parts.append("</div>")
 
     if unranked:
@@ -907,7 +899,7 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None) -> 
 
 
 def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
-          view_url="", overrides=None) -> None:
+          overrides=None) -> None:
     tier = _tier_of(row["company"], by_name)
     var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
@@ -962,16 +954,6 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
             f'<button class="pick-rebuild" data-company="{c}" data-job="{j}">'
             "Rebuild prefill</button>"
         )
-        if view_url:
-            # `serve` is running where you cannot see its screen, so the window it opens
-            # needs somewhere to be watched. Deliberately a plain link to a viewer this
-            # app does not run, start, or check: a dead link is legible, whereas a
-            # dashboard that thinks it manages a remote desktop is a second thing to
-            # debug at 2am. _safe_url keeps a javascript: scheme out of the href.
-            parts.append(
-                f'<a class="viewwin" href="{_safe_url(view_url)}" target="_blank" '
-                'rel="noopener">View window</a>'
-            )
         for action, label in (
             ("applied", "I applied"), ("skipped", "Skip"), ("snoozed", "Snooze 7d"),
         ):

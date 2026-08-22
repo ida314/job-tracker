@@ -1312,7 +1312,7 @@ def test_the_apply_page_is_a_pure_read(tmp_path):
     conn = store.connect(db)
     session = _live_session()
     before = session.snapshot()
-    server.render_apply(conn, session, "")
+    server.render_apply(conn, session)
     assert session.snapshot() == before
     # And nothing was written: a fresh DB has no tables' worth of rows to lose, so
     # assert on the one thing rendering could plausibly have touched.
@@ -1323,7 +1323,7 @@ def test_the_apply_page_is_a_pure_read(tmp_path):
 def test_the_apply_page_says_so_when_no_window_is_open(tmp_path):
     """Never a 500, and never a blank form implying there is one."""
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, None, "")
+    page = server.render_apply(conn, None)
     assert "No window is open" in page
     assert 'class="lf"' not in page
     conn.close()
@@ -1335,7 +1335,7 @@ def test_zero_fields_renders_as_no_form_found(tmp_path):
 
     conn = store.connect(tmp_path / "state.db")
     session = live.start("Acme", "1", "SWE", "https://x/apply")
-    page = server.render_apply(conn, session, "")
+    page = server.render_apply(conn, session)
     # The body, not the script: the script carries both branches of that sentence and
     # picks between them at runtime, exactly as this function does.
     body = page[:page.rindex("<script>")]
@@ -1352,7 +1352,7 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     every click did nothing at all with nothing logged.
     """
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, _live_session(), "https://viewer.example/vnc")
+    page = server.render_apply(conn, _live_session())
     conn.close()
 
     script = page[page.rindex("<script>"):]
@@ -1375,7 +1375,7 @@ def test_the_apply_page_carries_no_control_that_can_submit(tmp_path):
     make typing fast, not to make sending it one click away.
     """
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, _live_session(), "https://viewer.example/vnc")
+    page = server.render_apply(conn, _live_session())
     conn.close()
     assert "<form" not in page
     assert 'type="submit"' not in page
@@ -1400,7 +1400,7 @@ def test_the_apply_page_lands_the_closed_state_rather_than_looking_alive(tmp_pat
     conn = store.connect(tmp_path / "state.db")
     session = _live_session()
     session.set_phase(live_mod.CLOSED)
-    page = server.render_apply(conn, session, "")
+    page = server.render_apply(conn, session)
     conn.close()
 
     # From <body>, so the stylesheet's own `button[disabled]` rule is not read as markup.
@@ -1420,7 +1420,7 @@ def test_the_apply_page_lands_the_closed_state_rather_than_looking_alive(tmp_pat
 def test_an_open_session_leaves_the_form_usable(tmp_path):
     """The other half of the assertion above: `disabled` must not leak into a live page."""
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, _live_session(), "")
+    page = server.render_apply(conn, _live_session())
     conn.close()
     body = page[page.index("<body"):page.rindex("<script>")]
     assert "disabled" not in body
@@ -1432,7 +1432,7 @@ def test_closing_the_window_is_confirmed_first(tmp_path):
     the same fact that makes this a browser rather than a link — so the window is the
     only place the work exists and one misclick is all of it."""
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, _live_session(), "")
+    page = server.render_apply(conn, _live_session())
     conn.close()
     script = page[page.rindex("<script>"):]
     close_handler = script[script.index("closewin.addEventListener"):]
@@ -1514,7 +1514,7 @@ def test_a_hostile_label_cannot_break_out_of_the_mirrored_form(tmp_path):
         [FormField(key="k", label='"><script>alert(1)</script>', type="select",
                    options=('"><img onerror=alert(1)>',))],
     ))
-    page = server.render_apply(conn, s, "")
+    page = server.render_apply(conn, s)
     conn.close()
     # Parsed, not grepped. A substring assertion would fail on the *escaped* form,
     # which is the outcome we want — what matters is whether the browser ends up with

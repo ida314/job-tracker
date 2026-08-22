@@ -297,40 +297,21 @@ def test_the_open_prefilled_button_exists_only_under_serve():
     assert "prefill 13/16 fields" in static and "prefill 13/16 fields" in served
 
 
-def test_the_view_window_link_appears_only_with_a_viewer_configured():
-    """`serve` on a headless host opens a window nobody can see; this is where to see it.
+def test_a_hostile_posting_url_cannot_smuggle_a_scheme():
+    """Every href on this page goes through `_safe_url`, and the URLs come from ATS APIs.
 
-    A link, not a managed thing: the app never starts the viewer and never checks it, so
-    the only states are "configured" and "not configured".
+    This used to be asserted against the viewer link, which is gone — the window is not
+    something you are pointed at any more. The rule it was guarding is not: an Apply
+    button whose href is `javascript:` executes on click.
     """
-    conn, companies = _setup(
-        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    hostile = Posting("Acme", "1", "Backend Engineer, New Grad",
+                      "javascript:alert(1)", "New York, NY")
+    conn, companies = _setup([("Acme", hostile, Decision.MATCH)],
+                             [_company("Acme", 1)])
     _ranked(conn, "Acme", "1", 88.5)
     conn.commit()
 
-    plain = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
-    with_view = dashboard.build_dashboard(
-        conn, companies, "2026-07-22", interactive=True,
-        view_url="https://gx10.example.ts.net/vnc.html")
-    static = dashboard.build_dashboard(
-        conn, companies, "2026-07-22", view_url="https://gx10.example.ts.net/vnc.html")
-
-    # The element, not the word — the stylesheet names the class either way.
-    assert 'class="viewwin"' not in plain
-    assert 'class="viewwin"' in with_view
-    assert "https://gx10.example.ts.net/vnc.html" in with_view
-    # The mailable file has no button, so a link to a screen it cannot drive is noise.
-    assert 'class="viewwin"' not in static
-
-
-def test_a_hostile_viewer_url_cannot_smuggle_a_scheme():
-    conn, companies = _setup(
-        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
-    _ranked(conn, "Acme", "1", 88.5)
-    conn.commit()
-
-    doc = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True,
-                                    view_url="javascript:alert(1)")
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=True)
     assert "javascript:alert" not in doc
 
 
