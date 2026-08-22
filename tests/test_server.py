@@ -1360,10 +1360,11 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone"} <= ids
     for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone"):
         assert f"getElementById('{element}')" in script, element
-    for hook in ("lf-file", "tobank", "bankkey", ".lv"):
+    for hook in ("lf-file", "lf-detach", "tobank", "bankkey", ".lv"):
         assert hook in script, hook
-    for endpoint in ("/api/session", "/api/session/set", "/api/session/rediscover",
-                     "/api/session/file", "/api/session/close", "/api/answer"):
+    for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
+                     "/api/session/rediscover", "/api/session/file",
+                     "/api/session/close", "/api/answer"):
         assert endpoint in script, endpoint
 
 
@@ -1382,7 +1383,7 @@ def test_the_apply_page_carries_no_control_that_can_submit(tmp_path):
     # The vocabulary the page can reach is the four in live.py, and none of them clicks.
     from jobtracker import live
 
-    assert live.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+    assert live.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
 
 
 def test_the_apply_page_lands_the_closed_state_rather_than_looking_alive(tmp_path):
@@ -1437,6 +1438,68 @@ def test_closing_the_window_is_confirmed_first(tmp_path):
     close_handler = script[script.index("closewin.addEventListener"):]
     assert "confirm(" in close_handler[:600]
     assert close_handler.index("confirm(") < close_handler.index("/api/session/close")
+
+
+def test_the_page_and_its_script_call_a_status_the_same_thing(tmp_path):
+    """Two copies of one table: `_STATUS_WORD` renders it, `paint` repaints it on a poll.
+
+    Nothing bound them, so a status added to one showed the word on first load and the
+    raw enum after the first poll — or the reverse. Both are the kind of drift that reads
+    as a bug in the browser rather than in a lookup table.
+    """
+    script = server._APPLY_JS
+    for status, word in server._STATUS_WORD.items():
+        assert f"{status}: '{word}'" in script, f"{status} is not painted the same way"
+
+    # And every status `live` defines has a word at all — an unlisted one falls through
+    # to the raw enum on the page, which is legible to nobody.
+    from jobtracker import live as live_mod
+    for status in (live_mod.FILLED, live_mod.GAP, live_mod.REFUSED,
+                   live_mod.PENDING, live_mod.CLEARED):
+        assert status in server._STATUS_WORD
+
+
+def test_deleting_a_value_is_sent_as_a_clear_rather_than_an_empty_set(tmp_path):
+    """The endpoint refuses an empty `set`, so the page has to know the difference.
+
+    If it did not, emptying a text box would come back "refused" over a field that is in
+    fact still holding the old answer — the mirror disagreeing with the form.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    script = page[page.rindex("<script>"):]
+
+    assert "var url = '/api/session/clear';" in script
+    assert "if (value) { url = '/api/session/set'; body.value = value; }" in script
+
+
+def test_an_empty_set_is_refused_and_names_the_endpoint_that_does_it(tmp_path):
+    """Refusing rather than guessing, because for a file row the value is a path on this
+    machine — so "" means no file there and no text everywhere else."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    refused = h._api_session_set({"handle": "jt0", "value": "",
+                                  "epoch": session.epoch})
+    assert refused["ok"] is False
+    assert "clear" in refused["error"]
+    assert session.commands.empty()
+
+    assert h._api_session_clear({"handle": "jt0", "epoch": session.epoch})["ok"] is True
+    command = session.commands.get_nowait()
+    assert (command.kind, command.handle, command.value) == (
+        live_mod.CLEAR, "jt0", "")
+
+
+def test_a_clear_with_an_unreadable_epoch_is_refused_rather_than_guessed(tmp_path):
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    assert h._api_session_clear({"handle": "jt0", "epoch": "soon"})["ok"] is False
+    assert h._api_session_clear({"epoch": session.epoch})["ok"] is False
+    assert session.commands.empty()
 
 
 def test_a_hostile_label_cannot_break_out_of_the_mirrored_form(tmp_path):
@@ -1525,7 +1588,7 @@ def test_the_window_can_be_closed_from_the_page(tmp_path):
     assert h._api_session_close()["ok"] is True
     assert session.close_requested() is True
     assert session.commands.empty()
-    assert live_mod.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
 
 
 def test_closing_works_from_any_phase(tmp_path):

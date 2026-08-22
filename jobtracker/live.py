@@ -64,19 +64,35 @@ CLOSED = "closed"
 # a browser do on a page holding your name, address and work history — so it is a closed
 # list with a test on it, not an open protocol.
 SET = "set"                # put a value in one field, by handle
+CLEAR = "clear"            # empty one field, by handle
 REDISCOVER = "rediscover"  # read the form again; its shape may have changed
 SHOOT = "shoot"            # take a preview screenshot
 HIGHLIGHT = "highlight"    # outline one field, so the preview follows what you edit
 
-VOCABULARY = frozenset({SET, REDISCOVER, SHOOT, HIGHLIGHT})
+VOCABULARY = frozenset({SET, CLEAR, REDISCOVER, SHOOT, HIGHLIGHT})
+
+# `CLEAR` is its own name rather than `SET` with an empty value, for two reasons that both
+# bite. A `file` row's value is a path on this machine, so `""` there is not "no text" but
+# "no file", and the one place the two readings differ is the one holding your resume. And
+# a write that means "undo the write" should not be spelled the same as the write — the
+# outcome is a different status, and overloading the name is how it ends up sharing one.
+#
+# It stays inside the vocabulary because it still cannot activate anything: emptying a
+# field is the exact inverse of filling one. Submitting is not, which is why it is a
+# session flag and not a sixth name here — see `Session.request_submit`.
 
 # Row statuses. `refused` is a real outcome and not an error: a dropdown that does not
 # offer the answer we hold is a question we cannot answer, and saying so beats picking
 # the nearest option and putting words in your mouth.
+#
+# `cleared` is a fifth: you emptied it on purpose. It is not `filled` (there is nothing in
+# it), and it is not `gap` (a gap is a question nobody ever had an answer for). Keeping it
+# distinct is what lets the page say "cleared" rather than implying the fill missed it.
 FILLED = "filled"
 GAP = "gap"
 REFUSED = "refused"
 PENDING = "pending"
+CLEARED = "cleared"
 
 
 @dataclass

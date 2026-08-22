@@ -781,7 +781,11 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
     elif row["type"] == "file":
         out.append(f'<input class="lf-file" type="file"{off}>')
         if row["value"]:
-            out.append(f'<p class=note>attached: <code>{value}</code></p>')
+            # A file input is the one control a browser gives you no way to empty — you
+            # can pick a different file, never no file. Without this button the resume
+            # is the single field on the form that cannot be taken back off.
+            out.append(f'<p class=note>attached: <code>{value}</code> '
+                       f'<button class="lf-detach"{off}>detach</button></p>')
     elif row["type"] == "checkbox":
         checked = " checked" if row["status"] == live.FILLED else ""
         out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}'
@@ -804,11 +808,15 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
     return out
 
 
+# What each status is called on the page. Duplicated in `_APPLY_JS.paint`, because one
+# renders on the server and the other repaints on a poll; `test_the_page_and_its_script
+# _call_a_status_the_same_thing` is what keeps the two in step.
 _STATUS_WORD = {
     live.FILLED: "filled",
     live.GAP: "needs you",
     live.REFUSED: "would not take it",
     live.PENDING: "…",
+    live.CLEARED: "cleared",
 }
 
 
@@ -1288,6 +1296,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_apply_to(payload))
             elif path == "/api/session/set":
                 self._send_json(self._api_session_set(payload))
+            elif path == "/api/session/clear":
+                self._send_json(self._api_session_clear(payload))
             elif path == "/api/session/rediscover":
                 self._send_json(self._api_session_command(live.REDISCOVER))
             elif path == "/api/session/close":
@@ -2350,9 +2360,29 @@ class Handler(BaseHTTPRequestHandler):
             epoch = int(payload.get("epoch", -1))
         except (TypeError, ValueError):
             return {"ok": False, "error": "bad epoch"}
-        return self._api_session_command(
-            live.SET, handle, str(payload.get("value") or ""), epoch
-        )
+        value = str(payload.get("value") or "")
+        if not value:
+            # `clear` is a different act with a different outcome, and the page knows
+            # which one it means. Guessing here would make an empty text box and a
+            # deliberate erasure arrive as the same request.
+            return {"ok": False, "error": "an empty value is a clear, not a set"}
+        return self._api_session_command(live.SET, handle, value, epoch)
+
+    def _api_session_clear(self, payload: dict) -> dict:
+        """Empty one field of the live form.
+
+        Same shape as `_api_session_set` with no value to carry, and the same epoch rule:
+        clearing the wrong field is exactly as bad as filling it, so the check stays on
+        the browser thread where it cannot be bypassed.
+        """
+        handle = str(payload.get("handle") or "")
+        if not handle:
+            return {"ok": False, "error": "no field"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        return self._api_session_command(live.CLEAR, handle, "", epoch)
 
     def _api_session_file(self, payload: dict) -> dict:
         """Attach a file to a file field of the live form.
@@ -2612,13 +2642,19 @@ _APPLY_JS = """
   // The value goes with the epoch it was typed against. The browser thread drops it if
   // the form has been read again since, because the handle would by then name a
   // different input — see live.py. So a refusal here is a correct refusal.
+  //
+  // An empty value is a clear, not a set, and it goes to its own endpoint. Sending it as
+  // a set would land on the real page as a field holding nothing while the row read
+  // "filled" — done, and out of the "need you" count, which is the one number on this
+  // page that has to stay honest.
   function push(card, value) {
     var st = card.querySelector('.st');
     setStatus(st, 'pending', '…');
     card.classList.add('busy');
-    return post('/api/session/set', {
-      handle: card.dataset.handle, value: value, epoch: epoch
-    }).then(function (res) {
+    var body = {handle: card.dataset.handle, epoch: epoch};
+    var url = '/api/session/clear';
+    if (value) { url = '/api/session/set'; body.value = value; }
+    return post(url, body).then(function (res) {
       card.classList.remove('busy');
       if (!res.ok) setStatus(st, 'refused', res.error || 'refused');
       return res;
@@ -2683,8 +2719,11 @@ _APPLY_JS = """
         push(card, e.target.checked ? 'yes' : '');
       } else if (card.dataset.type === 'select' ||
                  card.dataset.type === 'multiselect') {
+        // Including the blank "— choose —" option, which is how you take a dropdown
+        // answer back. Ignoring it left the one control on this page you could not
+        // change your mind about.
         var v = e.target.value;
-        if (v) push(card, v).then(function () { bank(card, v); });
+        push(card, v).then(function () { bank(card, v); });
       }
       return;
     }
@@ -2706,6 +2745,18 @@ _APPLY_JS = """
       };
       reader.readAsDataURL(file);
     }
+  });
+
+  // Detaching. A file input offers no way to hold nothing once it holds something, so
+  // this is the only way the resume comes back off — and the picker is reset too, or it
+  // would keep reporting the file that is no longer on the form.
+  document.addEventListener('click', function (e) {
+    if (!e.target.classList.contains('lf-detach')) return;
+    var card = e.target.closest('.lf');
+    if (!card) return;
+    var picker = card.querySelector('.lf-file');
+    if (picker) picker.value = '';
+    push(card, '');
   });
 
   // -- the two buttons ---------------------------------------------------------------
@@ -2831,7 +2882,8 @@ _APPLY_JS = """
       if (!card || card.contains(document.activeElement)) return;
       if (card.classList.contains('busy')) return;
       var word = {filled: 'filled', gap: 'needs you',
-                  refused: 'would not take it', pending: '…'}[f.status] || f.status;
+                  refused: 'would not take it', pending: '…',
+                  cleared: 'cleared'}[f.status] || f.status;
       setStatus(card.querySelector('.st'), f.status, word);
     });
   }

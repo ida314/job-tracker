@@ -627,7 +627,7 @@ def _obey(session, page, command) -> None:
     if command.kind == live.REDISCOVER:
         _reread(session, page)
         return
-    if command.kind not in (live.SET, live.HIGHLIGHT):
+    if command.kind not in (live.SET, live.CLEAR, live.HIGHLIGHT):
         return  # not in the vocabulary; `Session.submit` refused it too
 
     if command.epoch != session.epoch:
@@ -651,8 +651,24 @@ def _obey(session, page, command) -> None:
     # which it reads exactly two keys — so the mirror row stands in for it directly and
     # no second write path exists to keep in step with the first.
     raw = {"handle": row["handle"], "type": row["type"], "label": row["label"]}
-    if _write(page, raw, command.value):
-        session.mark(command.handle, live.FILLED, command.value)
+
+    if command.kind == live.CLEAR:
+        done, status = _clear(page, raw), live.CLEARED
+    else:
+        # An empty `set` is refused rather than written. Playwright's `fill` would take it
+        # happily and `_write` would return True, and the row would then read `filled`
+        # holding nothing — counted as done, counted out of "need you", and indistinguish-
+        # able from a question nobody ever answered. That is the reading `answers.py`
+        # refuses for the same reason ("an empty answer is indistinguishable from a
+        # missing one"). Emptying a field on purpose has its own name and its own status.
+        if not command.value:
+            log.debug("empty set for %s — clear it if that is what you meant",
+                      command.handle)
+            return
+        done, status = _write(page, raw, command.value), live.FILLED
+
+    if done:
+        session.mark(command.handle, status, command.value)
         # A form that reveals a question once you answer another one is the ordinary
         # case, not an exotic one. Reading it again here is what stops the mirror going
         # stale exactly when you are making progress.
@@ -719,6 +735,42 @@ def _write(page, raw: dict, value: str) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001 — an unfillable field is a gap, not a crash
         log.debug("could not fill %s (%s): %s", raw.get("label"), kind, exc)
+        return False
+
+
+def _clear(page, raw: dict) -> bool:
+    """Empty one field. False if the field would not give the value up.
+
+    The exact inverse of `_write`, one branch per branch, and it exists as its own
+    function for the same reason `_write` is the only writer: there is one place that
+    knows how each kind of control is operated, and clearing is an operation on the same
+    four kinds.
+
+    Every call here is Playwright's own primitive for "this field now holds nothing", and
+    each fires the DOM's `input`/`change` events on the way — which is what a React or
+    Ashby-style controlled component needs in order to believe it. Setting `.value = ''`
+    from injected script would leave the framework's own state holding the old answer,
+    and the field would repopulate itself the moment anything else on the form changed.
+
+    `uncheck` is the mirror of the `check` `_write` already does. Neither can reach a
+    submit control: `_DISCOVER_JS` never mints a handle for one.
+    """
+    selector = f'[data-jt-id="{raw["handle"]}"]'
+    kind = raw["type"]
+    try:
+        if kind == "file":
+            page.set_input_files(selector, [])
+            return True
+        if kind in ("select", "multiselect"):
+            page.select_option(selector, [])
+            return True
+        if kind == "checkbox":
+            page.uncheck(selector)
+            return True
+        page.fill(selector, "")
+        return True
+    except Exception as exc:  # noqa: BLE001 — a field that will not empty is not a crash
+        log.debug("could not clear %s (%s): %s", raw.get("label"), kind, exc)
         return False
 
 

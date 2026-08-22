@@ -340,6 +340,9 @@ class _Recorder:
     def __init__(self, found=None):
         self.found = found or []
         self.filled = {}
+        self.selected = {}
+        self.checked = {}
+        self.files = {}
         self.shots = 0
         self.evaluated = []
 
@@ -349,6 +352,18 @@ class _Recorder:
 
     def fill(self, selector, value):
         self.filled[selector] = value
+
+    def select_option(self, selector, value=None, label=None):
+        self.selected[selector] = label if label is not None else value
+
+    def check(self, selector):
+        self.checked[selector] = True
+
+    def uncheck(self, selector):
+        self.checked[selector] = False
+
+    def set_input_files(self, selector, files):
+        self.files[selector] = files
 
     def screenshot(self, **kwargs):
         self.shots += 1
@@ -448,6 +463,118 @@ def test_a_field_that_would_not_take_the_value_says_so_rather_than_going_quiet()
     assert session.snapshot()["fields"][0]["status"] == live.REFUSED
 
 
+# -- deleting ---------------------------------------------------------------------------
+# Typing into the mirror was always carried to the real form. Deleting was not: an empty
+# `set` reached `page.fill(selector, "")`, which succeeds, and the row was then recorded
+# `filled` holding nothing — counted as done and counted out of "need you". Three of the
+# four control kinds could not be emptied at all.
+
+
+def test_clearing_a_field_is_not_the_same_as_filling_it_with_nothing():
+    """The field empties on the real page, and the count says so.
+
+    Both halves are the test. Landing the clear and then calling the result `filled` is
+    the failure that shipped: the form is right and the page reporting on it is wrong,
+    which is worse than either alone.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="Dylan",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+    assert session.snapshot()["need"] == 0
+
+    session.submit(live.Command(kind=live.CLEAR, handle="jt0", epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert page.filled == {'[data-jt-id="jt0"]': ""}, "the real field still holds it"
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.CLEARED
+    assert row["value"] == ""
+    assert session.snapshot()["need"] == 1
+
+
+def test_an_empty_set_is_refused_rather_than_written_as_an_answer():
+    """`set` with nothing in it is not a way to clear a field — `clear` is.
+
+    Silently treating it as one would work for a text box and be wrong for a file input,
+    where the value is a path on this machine and "" means no file rather than no text.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+    session.mark("jt0", live.FILLED, "Dylan")
+
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert page.filled == {}
+    assert session.snapshot()["fields"][0]["status"] == live.FILLED
+
+
+def test_every_kind_of_control_can_be_emptied():
+    """Text was the only one that worked. A tickbox reported "would not take it" and did
+    nothing; a dropdown and a file input had no path at all."""
+    session, found = _mirror(("agree", "I agree", "checkbox"),
+                             ("country", "Country", "select"),
+                             ("resume", "Resume", "file"),
+                             ("why", "Why us", "textarea"))
+    page = _Recorder(found)
+    for handle in ("jt0", "jt1", "jt2", "jt3"):
+        session.submit(live.Command(kind=live.CLEAR, handle=handle,
+                                    epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert page.checked == {'[data-jt-id="jt0"]': False}, "the tickbox is untouched"
+    assert page.selected == {'[data-jt-id="jt1"]': []}
+    assert page.files == {'[data-jt-id="jt2"]': []}
+    assert page.filled == {'[data-jt-id="jt3"]': ""}
+    assert [r["status"] for r in session.snapshot()["fields"]] == [live.CLEARED] * 4
+
+
+def test_a_clear_from_before_the_form_moved_is_never_written():
+    """The epoch rule is about handles, not about which way the value is going.
+
+    Emptying the wrong field is exactly as bad as filling it, and on a form you are about
+    to submit it is arguably worse — a blank looks like a question nobody asked.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"),
+                             ("email", "Email", "text"))
+    page = _Recorder(found)
+    stale = session.epoch
+
+    grew = [_raw("jt0", "first_name", "First Name", "text"),
+            _raw("jt1", "sponsorship", "Sponsorship?", "select"),
+            _raw("jt2", "email", "Email", "text")]
+    session.absorb(live.rows_from(
+        grew,
+        [FormField(key="first_name", label="First Name", type="text"),
+         FormField(key="sponsorship", label="Sponsorship?", type="select"),
+         FormField(key="email", label="Email", type="text")],
+        session.carried(),
+    ))
+    assert session.epoch != stale
+
+    session.submit(live.Command(kind=live.CLEAR, handle="jt1", epoch=stale))
+    browser._drain(session, page)
+
+    assert page.filled == {} and page.selected == {}
+
+
+def test_a_control_that_will_not_empty_says_so_rather_than_going_quiet():
+    """A radio button is the real case: Playwright can check one and cannot uncheck it."""
+    session, found = _mirror(("contact", "Contact me", "checkbox"))
+    page = _Recorder(found)
+
+    def refuse(selector):
+        raise RuntimeError("only checkboxes can be unchecked")
+
+    page.uncheck = refuse
+    session.submit(live.Command(kind=live.CLEAR, handle="jt0", epoch=session.epoch))
+    browser._drain(session, page)
+    assert session.snapshot()["fields"][0]["status"] == live.REFUSED
+
+
 def test_no_screenshots_are_taken_for_a_page_nobody_is_looking_at():
     session, found = _mirror(("first_name", "First Name", "text"))
     page = _Recorder(found)
@@ -525,6 +652,79 @@ def test_the_mirror_writes_to_the_real_form(tmp_path, answers):
         finally:
             context.close()
     conn.close()
+
+
+# A fixture of its own rather than a checkbox added to FORM_HTML: that one's gap list is
+# asserted exactly, and every kind of control needs to be emptied here.
+CLEARABLE_HTML = """
+<!doctype html><meta charset=utf-8><title>Apply</title>
+<form>
+  <label for="fn">First Name</label>
+  <input id="fn" name="first_name" value="Dylan">
+
+  <label for="ctry">Country</label>
+  <select id="ctry" name="country">
+    <option value="">Select…</option>
+    <option selected>United States</option>
+  </select>
+
+  <label for="cv">Resume/CV</label>
+  <input id="cv" type="file" name="resume">
+
+  <label class="cbx" for="agree">I agree</label>
+  <input id="agree" name="agree" type="checkbox" checked>
+</form>
+"""
+
+
+@needs_browser
+def test_deleting_on_the_page_empties_the_real_form(tmp_path):
+    """The other half of the mirror, end to end: take it back off.
+
+    Read against a real browser because three of the four are Playwright semantics, not
+    ours — `select_option([])` deselecting, `set_input_files([])` detaching, and `uncheck`
+    firing the `change` a controlled component listens for. A unit test with a fake page
+    asserts we called them; only this asserts they do what we think.
+    """
+    page_file = tmp_path / "form.html"
+    page_file.write_text(CLEARABLE_HTML)
+    (tmp_path / "resume.pdf").write_bytes(b"%PDF-1.4 fake")
+    session = live.start("Stripe", "1", "Backend Engineer", page_file.as_uri())
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        context = browser._launch(pw, tmp_path / "profile", headless=True)
+        try:
+            page = context.new_page()
+            page.goto(page_file.as_uri())
+            page.set_input_files("#cv", str(tmp_path / "resume.pdf"))
+
+            found = page.evaluate(browser._DISCOVER_JS)
+            fields = browser._fields_from_dom(found)
+            session.absorb(live.rows_from(found, fields))
+            session.set_phase(live.READY)
+
+            assert page.input_value("#fn") == "Dylan"
+            assert page.input_value("#ctry") == "United States"
+            assert page.is_checked("#agree")
+            assert page.evaluate("document.getElementById('cv').files.length") == 1
+
+            by_key = {r["key"]: r["handle"] for r in session.snapshot()["fields"]}
+            for key in ("first_name", "country", "resume", "agree"):
+                session.submit(live.Command(kind=live.CLEAR, handle=by_key[key],
+                                            epoch=session.epoch))
+            browser._drain(session, page)
+
+            assert page.input_value("#fn") == ""
+            assert page.input_value("#ctry") == ""
+            assert not page.is_checked("#agree")
+            assert page.evaluate("document.getElementById('cv').files.length") == 0
+
+            statuses = {r["key"]: r["status"] for r in session.snapshot()["fields"]}
+            assert set(statuses.values()) == {live.CLEARED}
+        finally:
+            context.close()
 
 
 # -- where the form actually is ---------------------------------------------------------

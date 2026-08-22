@@ -28,13 +28,19 @@ def _session(*specs, handles=None):
 
 # -- the invariant that matters most ---------------------------------------------------
 def test_the_command_vocabulary_cannot_activate_anything():
-    """A web request may make the browser do exactly four things, none of them a click.
+    """A web request may make the browser do exactly five things, none of them a click.
 
     This is `browser.py`'s no-submit rule carried across the new channel. That rule is
     enforced against the module's own source, which says nothing about commands arriving
     from outside it — so the bound has to be restated here, on the vocabulary itself.
+
+    `clear` is in and `submit` is not, and the line between them is what this asserts:
+    emptying a field is the inverse of filling one and reaches nothing a fill does not,
+    whereas submitting activates a control and is therefore a session-level act with its
+    own gate, not a name a queued request can reach.
     """
-    assert live.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+    assert live.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert "submit" not in live.VOCABULARY
 
     # And a command carries a handle and a value — never a selector, never an
     # expression, never anything the browser thread would evaluate.
@@ -167,6 +173,24 @@ def test_the_summary_counts_only_what_still_needs_you():
     session.mark("jt2", live.REFUSED, "")
     snap = session.snapshot()
     assert live.summary(snap) == "1/3 fields filled · 2 need you"
+
+
+def test_a_field_you_emptied_is_counted_as_needing_you():
+    """Clearing is not filling with nothing, and the count is where the difference shows.
+
+    An empty value written as `filled` reads as done and drops out of "need you" — the
+    reading `answers.py` refuses for the identical reason ("an empty answer is
+    indistinguishable from a missing one"), here on a form about to be submitted.
+    """
+    session = _session(("a", "A", "text"), ("b", "B", "text"))
+    session.mark("jt0", live.FILLED, "x")
+    session.mark("jt1", live.FILLED, "y")
+    assert live.summary(session.snapshot()) == "2/2 fields filled · nothing left to type"
+
+    session.mark("jt1", live.CLEARED, "")
+    snap = session.snapshot()
+    assert snap["need"] == 1
+    assert live.summary(snap) == "1/2 fields filled · 1 need you"
 
 
 def test_a_snapshot_carries_no_bytes_and_no_locks():

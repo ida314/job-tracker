@@ -958,12 +958,26 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   that made them** — an HTTP handler calling into one is the bug this shape prevents. So a
   write is queued and answered immediately and the outcome arrives on the next poll, the
   same shape `_api_apply_to` already had and for the same reason.
-- **A command points, it does not write.** The vocabulary is exactly four names — `set`,
-  `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*, never a
-  selector and never anything the browser thread evaluates. That is `browser.py`'s
+- **A command points, it does not write.** The vocabulary is exactly five names — `set`,
+  `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
+  never a selector and never anything the browser thread evaluates. That is `browser.py`'s
   no-click-path rule carried across the new channel, and it needs its own test because the
   existing one only scans that module's source. **Nothing on the page can submit**, and
   there is a test asserting the page has no form, no submit control and no such endpoint.
+- **`clear` is a name of its own, and an empty `set` is refused** (2026-08-22). Deleting
+  a value used to reach `page.fill(el, "")`, which succeeds — so the row was recorded
+  `filled` holding nothing, counted as done and counted *out* of "need you". That is the
+  reading `answers.py:327` refuses in the answer bank ("an empty answer is
+  indistinguishable from a missing one"), arriving instead on a form about to be sent.
+  `cleared` is its own status and counts as needing you. Overloading `set` was the
+  tempting fix and is wrong for `file` rows, where the value is a path on this box and
+  `""` means *no file*, not *no text*.
+- **All four control kinds empty, and three of them could not.** `_clear` mirrors
+  `_write` branch for branch (`fill("")`, `select_option([])`, `uncheck`,
+  `set_input_files([])`). Before this, unticking a checkbox reported "would not take it"
+  and changed nothing on the page, the select's blank option was dropped by the client's
+  `if (v)` guard, and a file input — which no browser lets you empty — had no path at
+  all, hence the **detach** button on a file row that holds something.
 - **A handle is only valid for the discovery that minted it.** `_DISCOVER_JS` renumbers
   `jt0…jtN` from scratch every pass, so once the form changes shape a handle names its
   neighbour. Commands carry the `epoch` they were written against and are dropped on a

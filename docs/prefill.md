@@ -404,10 +404,27 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 
 ### Rules that are load-bearing
 
-- **A command points, it does not write.** The vocabulary is exactly four names — `set`,
-  `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*, never a
-  selector and never anything the browser thread evaluates. That is `browser.py`'s
+- **A command points, it does not write.** The vocabulary is exactly five names — `set`,
+  `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
+  never a selector and never anything the browser thread evaluates. That is `browser.py`'s
   no-click-path rule carried across the new channel, and it has its own test.
+- **Deleting is `clear`, and it is not `set` with an empty value.** Two reasons, both
+  real. A `file` row's value is a path on this machine, so `""` there means *no file*
+  rather than *no text*, and the one field where the two readings differ is the one
+  holding your resume. And an empty `set` used to succeed — `page.fill(el, "")` is
+  exactly how Playwright clears a field — leaving the row recorded `filled` while holding
+  nothing: counted as done, counted out of "need you", and indistinguishable from a
+  question nobody ever answered. That is the reading `answers.yaml` refuses for the same
+  reason, here on a form that is about to be submitted. So an empty `set` is refused at
+  the endpoint, `clear` has its own status (`cleared`), and that status counts as needing
+  you.
+- **Every kind of control can be emptied, not just text.** `_clear` is the inverse of
+  `_write` branch for branch — `fill("")`, `select_option([])`, `uncheck`,
+  `set_input_files([])` — because three of the four had no path at all: unticking a
+  checkbox was recorded "would not take it" and did nothing to the page, a dropdown's
+  blank option was dropped client-side, and a file input is the one control a browser
+  gives you no way to empty, which is why a file row that holds something renders a
+  **detach** button.
 - **A handle is only valid for the discovery that minted it.** `_DISCOVER_JS` renumbers
   `jt0…jtN` from scratch on every pass, so once the form changes shape the same handle
   names a different input. Every command carries the `epoch` it was written against and is
