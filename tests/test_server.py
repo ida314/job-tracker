@@ -1363,8 +1363,8 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     for hook in ("lf-file", "lf-detach", "tobank", "bankkey", ".lv"):
         assert hook in script, hook
     for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
-                     "/api/session/rediscover", "/api/session/file",
-                     "/api/session/close", "/api/answer"):
+                     "/api/session/highlight", "/api/session/rediscover",
+                     "/api/session/file", "/api/session/close", "/api/answer"):
         assert endpoint in script, endpoint
 
 
@@ -1438,6 +1438,66 @@ def test_closing_the_window_is_confirmed_first(tmp_path):
     close_handler = script[script.index("closewin.addEventListener"):]
     assert "confirm(" in close_handler[:600]
     assert close_handler.index("confirm(") < close_handler.index("/api/session/close")
+
+
+def test_pausing_stops_the_work_rather_than_hiding_it(tmp_path):
+    """Pause suppressed the `<img>` src and nothing else.
+
+    The poll kept refreshing the watch window, so the browser thread kept rendering a
+    full-page JPEG every four seconds for a picture nobody was going to look at — on the
+    box that also runs the nightly pipeline. `watching()` is the only thing that stops
+    the work, so pausing has to withhold the claim, not discard the bytes.
+    """
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    assert not session.watching()
+
+    assert h._api_session()["ok"] is True
+    assert session.watching(), "an ordinary poll is what says somebody is looking"
+
+    session.watch_until = 0.0
+    assert h._api_session(idle=True)["ok"] is True
+    assert not session.watching(), "a paused poll still claimed a watcher"
+
+
+def test_the_paused_poll_carries_the_flag_the_server_reads(tmp_path):
+    """The two halves of Pause are in different files, so assert they agree."""
+    conn = store.connect(tmp_path / "state.db")
+    script = server.render_apply(conn, _live_session())
+    conn.close()
+    script = script[script.rindex("<script>"):]
+    assert "'/api/session' + (paused ? '?idle=1' : '')" in script
+    assert 'idle="idle=1" in self.path' in inspect.getsource(server.Handler.do_GET)
+
+
+def test_the_preview_says_how_old_it_is(tmp_path):
+    """It said "refreshed just now" forever, including when it had stopped refreshing.
+
+    That was survivable while the window was reachable and this was a second opinion. It
+    is the only view of the form now, so how far behind it is has to be on the page.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    script = page[page.rindex("<script>"):]
+    assert "function age(then)" in script
+    assert "ago.textContent = age(s.shot_at)" in script
+    assert "'s ago'" in script and "'m ago'" in script
+
+
+def test_the_poll_puts_back_a_value_the_fill_landed_after_the_page_did(tmp_path):
+    """The fill takes seconds and the page renders immediately, so every prefilled answer
+    arrived on the real form and nowhere on the page mirroring it."""
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    script = page[page.rindex("<script>"):]
+
+    assert "input.value = f.value" in script
+    assert "input.checked = f.status === 'filled'" in script
+    # Still only text, classes and values — the rows are the server's, not the script's.
+    for writer in ("innerHTML", "insertAdjacentHTML", "createElement"):
+        assert writer not in script, writer
 
 
 def test_the_page_and_its_script_call_a_status_the_same_thing(tmp_path):

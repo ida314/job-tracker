@@ -575,6 +575,23 @@ def test_a_control_that_will_not_empty_says_so_rather_than_going_quiet():
     assert session.snapshot()["fields"][0]["status"] == live.REFUSED
 
 
+def test_focusing_a_row_outlines_that_field_on_the_real_page():
+    """`highlight` sat in the vocabulary with no route emitting it until the preview
+    became the only view. A form is several thousand pixels; the outline is what ties the
+    row under your cursor to a place in the picture."""
+    session, found = _mirror(("first_name", "First Name", "text"),
+                             ("why", "Why us", "textarea"))
+    page = _Recorder(found)
+    session.submit(live.Command(kind=live.HIGHLIGHT, handle="jt1",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert ["jt1"] in page.evaluated
+    # It moves no value, so nothing about the row changes.
+    assert page.filled == {}
+    assert session.snapshot()["fields"][1]["status"] == live.PENDING
+
+
 def test_no_screenshots_are_taken_for_a_page_nobody_is_looking_at():
     session, found = _mirror(("first_name", "First Name", "text"))
     page = _Recorder(found)

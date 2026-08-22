@@ -1011,9 +1011,25 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   22 KB / 36 ms, measured). `.fit` is in the server's markup and `#zoom` is hidden until
   the script adds `js-zoom`, so JS-off gets the whole page and no dead control.
 - **No screenshots for a page nobody is looking at.** Each poll refreshes a deadline; the
-  drain shoots only inside it. That is also the Pause button and the closed-tab case, for
-  free — a JPEG every two seconds forever on the box that also runs the nightly pipeline
-  is pure waste.
+  drain shoots only inside it. That is also the closed-tab case, for free — a JPEG every
+  two seconds forever on the box that also runs the nightly pipeline is pure waste.
+  **Pause was not that case until 2026-08-22**, though this file said it was: the button
+  suppressed the `<img>` src on the client and the poll kept refreshing the deadline, so
+  the browser thread went on rendering a full-page JPEG every four seconds for a picture
+  nobody would see. It saved the download and none of the work. A paused poll now sends
+  `?idle=1` and `_api_session` skips `session.watch()` — the claim is withheld, which is
+  the only thing that stops the shooting.
+- **The preview says how old it is, and `paint` writes values as well as statuses**
+  (both 2026-08-22, both consequences of this being the *only* view now). `#ago` said
+  "refreshed just now" unconditionally, which is indistinguishable from a preview that
+  has stopped refreshing. And `paint` moved only the status pill, so the several seconds
+  of fill that land *after* the page renders showed up on the real form and nowhere on
+  the page mirroring it. Neither mattered while the window was reachable.
+- **`highlight` is wired to focus** (2026-08-22). It was in the vocabulary from the start
+  with no route emitting it — dead code — and it is what ties the row under your cursor
+  to a place in a 3352 px picture. Fire-and-forget: it moves no value, and the epoch is
+  still checked, because a second rule about when the epoch matters is one somebody gets
+  wrong later.
 - **The window closing must set `CLOSED`, and the page must land it.** Otherwise the page
   polls a form nobody holds and every edit queues into nothing — a mirror that looks live
   over a browser that is gone. Failure-is-absence, in the UI again. Setting the phase was

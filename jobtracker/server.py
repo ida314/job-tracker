@@ -1237,7 +1237,9 @@ class Handler(BaseHTTPRequestHandler):
                     conn.close()
                 self._send(page)
             elif path == "/api/session":
-                self._send_json(self._api_session())
+                # `idle=1` is the Pause button: keep polling for the phase and the
+                # counts, stop claiming somebody is looking at the picture.
+                self._send_json(self._api_session(idle="idle=1" in self.path))
             elif path == "/api/session/preview.jpg":
                 self._send_preview()
             else:
@@ -1278,6 +1280,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_session_set(payload))
             elif path == "/api/session/clear":
                 self._send_json(self._api_session_clear(payload))
+            elif path == "/api/session/highlight":
+                self._send_json(self._api_session_highlight(payload))
             elif path == "/api/session/rediscover":
                 self._send_json(self._api_session_command(live.REDISCOVER))
             elif path == "/api/session/close":
@@ -2278,12 +2282,20 @@ class Handler(BaseHTTPRequestHandler):
     # browser lives on a daemon thread that owns its Playwright objects exclusively. So
     # a write here queues a command and answers immediately, and the outcome arrives on
     # the next poll — the same shape `_api_apply_to` already has, for the same reason.
-    def _api_session(self) -> dict:
-        """The poll. Also what tells the browser thread somebody is still watching."""
+    def _api_session(self, idle: bool = False) -> dict:
+        """The poll. Also what tells the browser thread somebody is still watching.
+
+        `idle` is Pause, and it belongs here rather than on the client because that is
+        where the cost is. Suppressing the `<img>` src saves the download and nothing
+        else: the browser thread was still rendering a full-page JPEG every four seconds
+        for a picture nobody was going to look at. `watching()` is the only thing that
+        stops the work, so pausing has to be a claim withheld, not a byte discarded.
+        """
         session = live.current()
         if session is None:
             return {"ok": False, "error": "no window is open"}
-        session.watch()
+        if not idle:
+            session.watch()
         return {"ok": True, "session": session.snapshot()}
 
     def _send_preview(self) -> None:
@@ -2362,6 +2374,28 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return {"ok": False, "error": "bad epoch"}
         return self._api_session_command(live.CLEAR, handle, "", epoch)
+
+    def _api_session_highlight(self, payload: dict) -> dict:
+        """Outline one field on the real page, so the preview follows what you are typing.
+
+        The preview is the whole form — several thousand pixels of it — and until this was
+        wired there was nothing tying the row under your cursor to a place in that
+        picture. `highlight` has been in the vocabulary since the mirror was built and no
+        route emitted it; `_HIGHLIGHT_JS` already outlines and scrolls.
+
+        It changes no value, so a stale epoch costs a misplaced outline rather than a
+        wrong answer — but it is checked anyway, in the same place as every other command,
+        because a second rule about when the epoch matters is a rule somebody will get
+        wrong later.
+        """
+        handle = str(payload.get("handle") or "")
+        if not handle:
+            return {"ok": False, "error": "no field"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        return self._api_session_command(live.HIGHLIGHT, handle, "", epoch)
 
     def _api_session_file(self, payload: dict) -> dict:
         """Attach a file to a file field of the live form.
@@ -2531,8 +2565,11 @@ background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
 #preview.fit{width:auto;max-width:100%;max-height:78vh;object-fit:contain;
 cursor:zoom-in}
 #preview.actual{width:100%;height:auto;cursor:zoom-out}
-#zoom{display:none}
-.js-zoom #zoom{display:inline-block}
+/* Both are script-only controls, so neither exists until the script says it does. A
+   visible Pause that does nothing reads as a broken page, not as a page without JS —
+   the same rule `.tabs` and `.cotoggle` follow on the dashboard. */
+#zoom,#pause{display:none}
+.js-zoom #zoom,.js-zoom #pause{display:inline-block}
 .who{margin:.2rem 0 .1rem}
 .phase{margin:.1rem 0 1rem;font-size:.9rem}
 .phase .pill{padding:.1rem .5rem;border-radius:99px;background:rgba(127,127,127,.18);
@@ -2677,6 +2714,15 @@ _APPLY_JS = """
     schedule(card, e.target.value);
   });
 
+  // Entering a field outlines it on the real page, so the next shot shows you where in
+  // several thousand pixels of form you actually are. Fire-and-forget: it moves no value,
+  // and a preview that did not scroll is not worth an error message.
+  document.addEventListener('focusin', function (e) {
+    var card = e.target.closest('.lf');
+    if (!card) return;
+    post('/api/session/highlight', {handle: card.dataset.handle, epoch: epoch});
+  });
+
   // Blur beats the timer: leaving a field is the clearest statement that you are done
   // with it, and waiting out the debounce after that just looks like lag.
   document.addEventListener('focusout', function (e) {
@@ -2817,8 +2863,21 @@ _APPLY_JS = """
     ago.textContent = 'the window is closed';
   }
 
+  function age(then) {
+    if (!then) return '';
+    var secs = Math.max(0, Math.round(Date.now() / 1000 - then));
+    if (secs < 5) return 'refreshed just now';
+    if (secs < 90) return 'refreshed ' + secs + 's ago';
+    return 'refreshed ' + Math.round(secs / 60) + 'm ago';
+  }
+
   function tick() {
-    fetch('/api/session').then(function (r) { return r.json(); }).then(function (res) {
+    // Paused polls still ask — the phase and the counts matter whether or not you are
+    // looking at the picture — but they do not claim anyone is watching, which is what
+    // stops the browser thread taking screenshots.
+    fetch('/api/session' + (paused ? '?idle=1' : '')).then(function (r) {
+      return r.json();
+    }).then(function (res) {
       if (!res.ok) { gone(); return; }
       var s = res.session;
       if (s.phase === 'closed') { gone(); return; }
@@ -2844,17 +2903,27 @@ _APPLY_JS = """
       paint(s);
       if (!paused && s.has_shot) {
         img.src = '/api/session/preview.jpg?t=' + s.shot_at;
-        ago.textContent = 'refreshed just now';
+        // The real age, not the word "now". This picture is the only view of the form
+        // there is, so how far behind it is has to be readable off the page — a shot
+        // that stopped refreshing looked identical to one that just did.
+        ago.textContent = age(s.shot_at);
       } else if (paused) {
-        ago.textContent = 'paused';
+        ago.textContent = 'paused' + (s.shot_at ? ' · ' + age(s.shot_at) : '');
       }
     }).catch(function () {}).then(function () {
       if (!stopped) setTimeout(tick, POLL_MS);
     });
   }
 
-  // Statuses only, and only for fields you are not in the middle of typing into. The
-  // rows themselves were rendered by the server and are not rebuilt here.
+  // Statuses and values, and only for fields you are not in the middle of typing into.
+  // The rows themselves were rendered by the server and are never rebuilt here — this
+  // sets text, classes and `.value`, and writes no markup.
+  //
+  // The value matters because the fill lands several seconds after this page does: the
+  // window is still navigating when you arrive, so every answer the prefill wrote used
+  // to appear on the real form and nowhere on the page mirroring it. Two skips, both
+  // already here: a field you are focused in is yours, and one with a push in flight
+  // would flicker back to the old value before the new one is acknowledged.
   function paint(s) {
     s.fields.forEach(function (f) {
       var card = document.querySelector('.lf[data-handle="' + f.handle + '"]');
@@ -2864,6 +2933,14 @@ _APPLY_JS = """
                   refused: 'would not take it', pending: '…',
                   cleared: 'cleared'}[f.status] || f.status;
       setStatus(card.querySelector('.st'), f.status, word);
+
+      var input = card.querySelector('.lv');
+      if (!input) return;                      // a file row; its picker is the browser's
+      if (card.dataset.type === 'checkbox') {
+        input.checked = f.status === 'filled';
+      } else if (input.value !== f.value) {
+        input.value = f.value;
+      }
     });
   }
 
