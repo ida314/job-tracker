@@ -763,9 +763,22 @@ def _submit_block(snap: dict) -> list:
         out.append(f'<p class="banner {kind}" id="sent">'
                    f'{html.escape(result.get("note", "it was sent"))}</p>')
         if not result.get("changed"):
+            # Nothing was written to `applications`, because "applied" is the status
+            # that stops a job coming back round and it must not be set on a guess. So
+            # it is offered instead — the shape `inbox` uses, where accepting is yours.
             out.append('<p class=note>Read the preview before assuming it went. '
-                       "Nothing on this side can see the employer's answer.</p>")
-        out.append('<p class=note id="recorded"></p>')
+                       "Nothing on this side can see the employer's answer, so this "
+                       "has not been recorded as applied.</p>")
+            out.append(
+                '<p><button id="recordit" '
+                f'data-company="{html.escape(snap["company"], quote=True)}" '
+                f'data-job="{html.escape(snap["ats_job_id"], quote=True)}" '
+                f'data-title="{html.escape(snap["title"], quote=True)}">'
+                "Record it as applied</button> "
+                '<span class="note" id="recordmsg"></span></p>'
+            )
+        else:
+            out.append('<p class=note id="recordmsg">Recorded in Applications.</p>')
         return out
 
     if not snap["discovered"]:
@@ -2317,6 +2330,28 @@ class Handler(BaseHTTPRequestHandler):
         # "no window is open" for the first second of every session.
         session = live.start(company_name, job_id, row["title"], url)
 
+        def _record(result: dict) -> None:
+            """Write the application to the outer loop, if the page said anything.
+
+            Only when something observably changed. A submit whose page did not move is
+            a submit nobody can vouch for, and "applied" written on a guess is worse in
+            the tracker than a blank: it is the one status that stops the job coming
+            back round, so a failed send would go quiet exactly the way a successful one
+            does. The page says so and offers to record it once you have looked — the
+            same shape `inbox` uses, where the model proposes and accepting is yours.
+            """
+            if not result.get("changed"):
+                log.info("submitted %s but the page did not change — not recorded",
+                         row["title"])
+                return
+            store.advance_application(
+                worker_conn, company=company_name, ats_job_id=job_id,
+                title=row["title"], status="applied", now=_today(),
+                note=result.get("note", ""), url=url, source="tracked",
+            )
+            worker_conn.commit()
+            log.info("recorded %s at %s as applied", row["title"], company_name)
+
         def _run() -> None:
             worker_conn = store.connect(self.server.db_path)
             try:
@@ -2340,6 +2375,11 @@ class Handler(BaseHTTPRequestHandler):
                     # through a video stream of this window. `hold` still governs how
                     # long the window lives; this governs what you type into.
                     session=session,
+                    # Called on the browser thread once the submit has been read back.
+                    # It gets `worker_conn`, which is this thread's — `browser.py` must
+                    # not learn about the applications table, and a connection made on
+                    # the request thread must not be written from this one.
+                    on_submitted=_record,
                 )
             except Exception:  # noqa: BLE001 — a browser failure must not kill serve
                 log.exception("apply-to %s/%s failed", company_name, job_id)
@@ -2989,6 +3029,28 @@ _APPLY_JS = """
         sendmsg.textContent = 'the server did not answer';
         armed();
       });
+  });
+
+  // Only rendered when the click landed and the page did not move, so nothing was
+  // written. Recording it is a judgement you make from the preview — the same reason
+  // an inbox proposal is accepted rather than applied.
+  var recordit = document.getElementById('recordit');
+  var recordmsg = document.getElementById('recordmsg');
+  if (recordit) recordit.addEventListener('click', function () {
+    recordit.disabled = true;
+    recordmsg.textContent = 'recording…';
+    post('/api/application', {
+      company: recordit.dataset.company, ats_job_id: recordit.dataset.job,
+      title: recordit.dataset.title, status: 'applied',
+      note: 'submitted from the mirrored form; the page did not visibly change'
+    }).then(function (res) {
+      recordmsg.textContent = res.ok ? 'recorded in Applications'
+                                     : (res.error || 'it was not recorded');
+      if (!res.ok) recordit.disabled = false;
+    }).catch(function () {
+      recordit.disabled = false;
+      recordmsg.textContent = 'the server did not answer';
+    });
   });
 
   // -- the poll ----------------------------------------------------------------------

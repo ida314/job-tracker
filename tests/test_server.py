@@ -1530,6 +1530,43 @@ def test_the_form_is_not_sendable_before_it_has_settled(tmp_path):
             {"epoch": session.epoch, "confirm": "Acme"})["ok"] is False, phase
 
 
+def test_a_submit_nobody_can_vouch_for_is_offered_rather_than_recorded(tmp_path):
+    """"applied" is the status that stops a job coming back round.
+
+    Written on a guess, a failed send goes quiet in exactly the way a successful one
+    does — and this is the one table whose job is to remember. So a page that did not
+    move offers the write instead of making it, the shape `inbox` uses for proposals.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    session = _live_session()
+    session.claim_submit()
+    session.finish_submit({"changed": False, "url_before": "https://x/apply",
+                           "url_after": "https://x/apply", "fields_before": 2,
+                           "fields_after": 2, "note": "nothing changed"})
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "has not been recorded as applied" in page
+    assert 'id="recordit"' in page
+    script = page[page.rindex("<script>"):]
+    assert "getElementById('recordit')" in script
+    assert "/api/application" in script
+
+
+def test_a_submit_that_landed_is_recorded_without_being_asked(tmp_path):
+    conn = store.connect(tmp_path / "state.db")
+    session = _live_session()
+    session.claim_submit()
+    session.finish_submit({"changed": True, "url_before": "https://x/apply",
+                           "url_after": "https://x/thanks", "fields_before": 2,
+                           "fields_after": 0, "note": "the page went to https://x/thanks"})
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "Recorded in Applications." in page
+    assert 'id="recordit"' not in page, "it asked about something it already did"
+
+
 def test_the_submit_controls_have_their_handlers_on_the_page_that_renders_them(tmp_path):
     conn = store.connect(tmp_path / "state.db")
     session = _live_session()

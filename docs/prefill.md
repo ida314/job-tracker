@@ -469,6 +469,12 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 - **What happened after the click is reported, not assumed.** Nothing here can prove an
   employer received anything, so the page says what changed — the URL, the field count —
   and says plainly when nothing did.
+- **The application is recorded only when the page moved.** `browser.py` calls back into
+  `serve`, which does the write on the worker thread's own connection; the browser module
+  never learns about the applications table. A submit whose page did not change is
+  *offered* — "Record it as applied" — because `applied` is the status that stops a job
+  coming back round, and set on a guess it would make a failed send go quiet exactly the
+  way a successful one does.
 
 ### What it cannot do
 

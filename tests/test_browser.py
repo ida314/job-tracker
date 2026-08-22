@@ -239,6 +239,25 @@ def test_serve_holds_the_window_open():
     assert "hold=True" in source
 
 
+def test_serve_records_the_application_on_its_own_connection():
+    """Two separations, and both would fail quietly.
+
+    `browser.py` must not learn about the applications table — the callback is what keeps
+    the submit a reading and the recording somebody else's decision. And the write has to
+    go through the worker thread's own connection, because the submit lands on the browser
+    thread and a SQLite connection made on the request thread does not belong to it.
+    """
+    from jobtracker import server
+
+    source = inspect.getsource(server.Handler._api_apply_to)
+    assert "on_submitted=_record" in source
+    record = source[source.index("def _record"):source.index("def _run")]
+    assert "store.advance_application(" in record
+    assert "worker_conn" in record
+
+    assert "advance_application" not in inspect.getsource(browser)
+
+
 # -- apply URLs ----------------------------------------------------------------------
 @pytest.mark.parametrize("ats, url, expected", [
     ("greenhouse", "https://job-boards.greenhouse.io/stripe/jobs/1",

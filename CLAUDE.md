@@ -1079,6 +1079,14 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
     the URL, the field count — and the page says exactly that. A page that did not change
     reads *"nothing on the page changed — read the preview before assuming it went"*. An
     unverifiable "submitted successfully" is how a failed send stops being re-checked.
+  - **It reaches `applications` only when the page moved**, through an `on_submitted`
+    callback supplied by `server._api_apply_to._run` — so `browser.py` never learns about
+    that table and the write goes through the worker thread's own connection, which is the
+    thread the submit lands on. When nothing changed, nothing is written and the page
+    offers a **Record it as applied** button instead. `applied` is the status that stops a
+    job coming back round, so setting it on a guess would make a failed send go quiet in
+    exactly the way a successful one does — inside the one table whose job is to remember.
+    Proposing rather than guessing is `inbox`'s rule, one loop out.
 - **Closing discards the fill, so the button confirms first.** No ATS keeps a draft for an
   anonymous candidate — the same fact that makes this a browser rather than a link — so
   the window is the only place the work exists.
