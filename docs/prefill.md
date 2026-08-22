@@ -193,9 +193,10 @@ tailored to an infra role need not go to a platform one.
 Upload it from the pick card under `serve`. It travels the way the Settings resume does —
 base64 inside the one JSON POST path this server has — which matters because the browser
 that fills forms runs on the machine running `serve`. On a headless host that machine's
-file picker shows *its* disk, not yours, so this upload **is** the file transfer. (noVNC is
-not an alternative: generic VNC has no file transfer at all, and the rule that the app
-never manages the viewer is not worth breaking for one.)
+file picker shows *its* disk, not yours, so this upload **is** the file transfer — and it
+is the only way a file reaches that box. Reaching around it through a remote desktop was
+never an alternative anyway: generic VNC has no file transfer at all, and the viewer is
+gone entirely as of 2026-08-22.
 
 ```
 data/resumes/

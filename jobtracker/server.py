@@ -717,6 +717,35 @@ def render_apply(conn: sqlite3.Connection, session) -> str:
     return "\n".join(p)
 
 
+def record_submission(conn, company: str, ats_job_id: str, title: str, url: str,
+                      result: dict, today: str) -> bool:
+    """Put a submitted application into the outer loop. Returns whether it wrote.
+
+    Only when the page observably moved. `applied` is the status that stops a job coming
+    back round, so writing it on a guess makes a failed send go quiet in exactly the way
+    a successful one does — inside the one table whose whole job is to remember. When
+    nothing changed, `/apply` offers the write instead of making it, which is `inbox`'s
+    rule one loop out: propose, and let accepting be a human act.
+
+    A module-level function rather than a closure, and that is not tidiness. It began as
+    one nested in the wrong scope, so `worker_conn` was not bound: every recording would
+    have raised `NameError` inside the callback's own `except`, reaching the log and
+    nowhere else — a submit that looked complete and silently never landed. A test that
+    only read the source for the right words passed over it.
+    """
+    if not result.get("changed"):
+        log.info("submitted %s but the page did not change — not recorded", title)
+        return False
+    store.advance_application(
+        conn, company=company, ats_job_id=ats_job_id, title=title,
+        status="applied", now=today, note=result.get("note", ""),
+        url=url, source="tracked",
+    )
+    conn.commit()
+    log.info("recorded %s at %s as applied", title, company)
+    return True
+
+
 def _blocker_line(blockers: list) -> str:
     """What is still in the way of the button, said the same way on both sides.
 
@@ -2330,28 +2359,6 @@ class Handler(BaseHTTPRequestHandler):
         # "no window is open" for the first second of every session.
         session = live.start(company_name, job_id, row["title"], url)
 
-        def _record(result: dict) -> None:
-            """Write the application to the outer loop, if the page said anything.
-
-            Only when something observably changed. A submit whose page did not move is
-            a submit nobody can vouch for, and "applied" written on a guess is worse in
-            the tracker than a blank: it is the one status that stops the job coming
-            back round, so a failed send would go quiet exactly the way a successful one
-            does. The page says so and offers to record it once you have looked — the
-            same shape `inbox` uses, where the model proposes and accepting is yours.
-            """
-            if not result.get("changed"):
-                log.info("submitted %s but the page did not change — not recorded",
-                         row["title"])
-                return
-            store.advance_application(
-                worker_conn, company=company_name, ats_job_id=job_id,
-                title=row["title"], status="applied", now=_today(),
-                note=result.get("note", ""), url=url, source="tracked",
-            )
-            worker_conn.commit()
-            log.info("recorded %s at %s as applied", row["title"], company_name)
-
         def _run() -> None:
             worker_conn = store.connect(self.server.db_path)
             try:
@@ -2375,11 +2382,15 @@ class Handler(BaseHTTPRequestHandler):
                     # through a video stream of this window. `hold` still governs how
                     # long the window lives; this governs what you type into.
                     session=session,
-                    # Called on the browser thread once the submit has been read back.
-                    # It gets `worker_conn`, which is this thread's — `browser.py` must
-                    # not learn about the applications table, and a connection made on
-                    # the request thread must not be written from this one.
-                    on_submitted=_record,
+                    # Called on the browser thread once the submit has been read
+                    # back. It closes over `worker_conn`, which is this thread's:
+                    # `browser.py` must not learn about the applications table, and a
+                    # SQLite connection made on the request thread must not be written
+                    # from this one.
+                    on_submitted=lambda result: record_submission(
+                        worker_conn, company_name, job_id, row["title"], url,
+                        result, _today(),
+                    ),
                 )
             except Exception:  # noqa: BLE001 — a browser failure must not kill serve
                 log.exception("apply-to %s/%s failed", company_name, job_id)

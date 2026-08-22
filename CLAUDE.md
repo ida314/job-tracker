@@ -1082,7 +1082,12 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   - **It reaches `applications` only when the page moved**, through an `on_submitted`
     callback supplied by `server._api_apply_to._run` — so `browser.py` never learns about
     that table and the write goes through the worker thread's own connection, which is the
-    thread the submit lands on. When nothing changed, nothing is written and the page
+    thread the submit lands on. `record_submission` is **module-level and not a closure**,
+    which is not tidiness: it began as one nested in the wrong scope, so `worker_conn` was
+    unbound and every recording would have raised `NameError` inside the callback's own
+    `except` — reaching the log and nowhere else, leaving a submit that looked complete
+    and landed nothing. Ruff's F821 found it; the test did not, because it read the source
+    for the right words instead of calling the function. Test the write, not the text. When nothing changed, nothing is written and the page
     offers a **Record it as applied** button instead. `applied` is the status that stops a
     job coming back round, so setting it on a guess would make a failed send go quiet in
     exactly the way a successful one does — inside the one table whose job is to remember.

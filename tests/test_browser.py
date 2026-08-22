@@ -239,23 +239,51 @@ def test_serve_holds_the_window_open():
     assert "hold=True" in source
 
 
-def test_serve_records_the_application_on_its_own_connection():
-    """Two separations, and both would fail quietly.
+def test_serve_records_a_submit_that_landed(tmp_path):
+    """The callback is what keeps the submit a reading and the recording a separate act.
 
-    `browser.py` must not learn about the applications table — the callback is what keeps
-    the submit a reading and the recording somebody else's decision. And the write has to
-    go through the worker thread's own connection, because the submit lands on the browser
-    thread and a SQLite connection made on the request thread does not belong to it.
+    Exercised rather than read for. This started as a closure nested in the wrong scope,
+    so the connection it named was never bound — every recording would have raised inside
+    the callback's own `except`, reaching the log and nowhere else, and a submit would
+    have looked complete while landing nothing. A test that only grepped the source for
+    the right words passed over exactly that.
     """
     from jobtracker import server
 
-    source = inspect.getsource(server.Handler._api_apply_to)
-    assert "on_submitted=_record" in source
-    record = source[source.index("def _record"):source.index("def _run")]
-    assert "store.advance_application(" in record
-    assert "worker_conn" in record
+    conn = store.connect(tmp_path / "state.db")
+    wrote = server.record_submission(
+        conn, "Acme", "1", "Backend Engineer", "https://x/apply",
+        {"changed": True, "note": "the page went to https://x/thanks"}, TODAY)
+
+    assert wrote is True
+    row = store.all_applications(conn)[0]
+    assert (row["company"], row["status"]) == ("Acme", "applied")
+    assert row["url"] == "https://x/apply"
+    assert "thanks" in row["note"]
+    conn.close()
+
+
+def test_serve_records_nothing_for_a_submit_nobody_can_vouch_for(tmp_path):
+    """`applied` is the status that stops a job coming back round."""
+    from jobtracker import server
+
+    conn = store.connect(tmp_path / "state.db")
+    wrote = server.record_submission(
+        conn, "Acme", "1", "Backend Engineer", "https://x/apply",
+        {"changed": False, "note": "nothing on the page changed"}, TODAY)
+
+    assert wrote is False
+    assert store.all_applications(conn) == []
+    conn.close()
+
+
+def test_the_browser_module_knows_nothing_about_applications():
+    """It reports what it saw; somebody else decides what that means."""
+    from jobtracker import server
 
     assert "advance_application" not in inspect.getsource(browser)
+    assert "on_submitted=lambda result: record_submission(" in inspect.getsource(
+        server.Handler._api_apply_to)
 
 
 # -- apply URLs ----------------------------------------------------------------------
