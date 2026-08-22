@@ -19,12 +19,20 @@ never touch `page`. So a request enqueues a command and returns; the browser thr
 drains the queue inside the poll it was already doing, and the outcome comes back on the
 next snapshot. Nothing here blocks on a browser.
 
-**A command points, it does not write.** The vocabulary is four names, and a command
+**A command points, it does not write.** The vocabulary is five names, and a command
 carries a field *handle* — an opaque token minted by the discovery pass — never a
 selector, never an expression, never anything the browser thread evaluates. That is the
 same bound the prefill model is held to, for the same reason: there must be no path by
 which text from outside becomes code running on somebody's application form. Nothing in
 this vocabulary can activate anything.
+
+**Submitting is therefore not a command.** It activates, which is the one thing the
+sentence above says a command cannot do — so it is a gate on the session rather than a
+name in the queue: armed by a request that passed every check in `request_submit`, and
+claimed exactly once, under the lock, on the browser thread. The shape is `request_close`'s
+and the reasoning is its mirror image. Closing is outside the vocabulary because it does
+nothing to the form; submitting is outside it because it does the only thing to the form
+that cannot be undone.
 
 **A handle is only valid for the discovery that minted it.** `_DISCOVER_JS` renumbers
 `jt0…jtN` from scratch on every pass, so once the form changes shape the same handle
@@ -58,6 +66,7 @@ WATCH_WINDOW_S = 8.0
 OPENING = "opening"
 FILLING = "filling"
 READY = "ready"
+SUBMITTED = "submitted"
 CLOSED = "closed"
 
 # The complete command vocabulary. Adding to it is adding to what a web request can make
@@ -189,6 +198,19 @@ class Session:
     # any more, which is exactly when you most want it.
     closing: bool = False
 
+    # Sending it. Also not a `Command`, and for the opposite reason: the vocabulary's
+    # stated property is that nothing in it can activate anything, and this activates the
+    # one control on the page that matters. Putting it in the queue would make submitting
+    # the same kind of act as filling a text box — one request among the hundreds this
+    # page makes while you type — when it is the single irreversible thing here.
+    #
+    # So it is a gate rather than a name: armed once, by a request that had to pass every
+    # check below, and claimed exactly once on the browser thread.
+    submit_control: Optional[dict] = None   # {"handle", "label"}, or None if there is none
+    submit_armed: bool = False
+    submitted_at: float = 0.0               # non-zero means it has already gone
+    submit_result: Optional[dict] = None
+
     # -- written from the browser thread -------------------------------------------
     def carried(self) -> dict:
         """The current statuses, keyed for `rows_from` to carry into the next reading."""
@@ -290,6 +312,103 @@ class Session:
         with self.lock:
             return self.closing
 
+    # -- sending it ------------------------------------------------------------------
+    def set_submit_control(self, control: Optional[dict]) -> None:
+        """What the browser thread found to click, or None. Written on every re-reading.
+
+        None is a finding, not a blank: a page with no submit control is a page this
+        cannot send, and the gate refuses rather than offering a button that would do
+        nothing. Same rule as zero fields discovered, one control along.
+        """
+        with self.lock:
+            self.submit_control = dict(control) if control else None
+
+    def unfilled_required(self) -> list:
+        """The labels of required fields nothing is in. The checklist, computed once.
+
+        `CLEARED` counts as unfilled, which is the point of it having its own status —
+        deleting a required answer has to put the job back in the way of the button.
+        """
+        with self.lock:
+            return [r["label"] or r["key"] for r in self.fields
+                    if r["required"] and r["status"] != FILLED]
+
+    def request_submit(self, epoch: int, confirm: str) -> tuple:
+        """Arm the submit, or say why not. Returns `(ok, error)`.
+
+        Every check here is also re-taken on the browser thread before the click, because
+        this reading is up to one tick old and the click cannot be taken back. This is not
+        redundancy for its own sake: the form can reveal a required question in the time
+        between reading the page and pressing the button.
+
+        The typed confirmation is the company name. A `confirm()` dialog is one keystroke
+        from a habit, and this is the only control in the project that spends something
+        you cannot get back — an application goes out under your name, once.
+        """
+        with self.lock:
+            if self.phase == CLOSED:
+                return False, "the window is closed"
+            if self.submitted_at:
+                return False, "this application has already been submitted"
+            if self.phase != READY:
+                return False, f"the form is still {self.phase} — wait for it to settle"
+            if not self.fields:
+                return False, "no application form was found on that page"
+            if not self.submit_control:
+                return False, ("no submit button was found on the form — send it in the "
+                               "window, or read the form again")
+            if epoch != self.epoch:
+                return False, ("the form changed shape since this page was loaded — "
+                               "reload it and look again before sending")
+            missing = [r["label"] or r["key"] for r in self.fields
+                       if r["required"] and r["status"] != FILLED]
+            if missing:
+                shown = ", ".join(missing[:4])
+                more = f" and {len(missing) - 4} more" if len(missing) > 4 else ""
+                return False, f"still needed: {shown}{more}"
+            if confirm.strip().casefold() != self.company.strip().casefold():
+                return False, f"type {self.company} to confirm"
+            self.submit_armed = True
+            return True, ""
+
+    def submit_requested(self) -> bool:
+        with self.lock:
+            return self.submit_armed and not self.submitted_at
+
+    def disarm(self) -> None:
+        """Stand down without spending the submit. For a check that fails at the page.
+
+        `submitted_at` is deliberately untouched: nothing was sent, so the button has to
+        come back rather than jamming the session on a state it never reached.
+        """
+        with self.lock:
+            self.submit_armed = False
+
+    def claim_submit(self, now: Optional[float] = None) -> bool:
+        """Take the one submit this session has. False if it is already taken.
+
+        Under the lock and before the click, so that two reads of the flag — a retry, a
+        second hold loop, anything — cannot become two applications.
+        """
+        with self.lock:
+            if self.submitted_at:
+                return False
+            self.submitted_at = time.time() if now is None else now
+            return True
+
+    def finish_submit(self, result: dict) -> None:
+        """Record what was observed after the click. Never whether it "worked".
+
+        Nothing on this side of an HTTP request can prove an employer received an
+        application. What can be said is what changed — the URL, the number of fields
+        still on the page — and the page says exactly that, because an unverifiable
+        success message is how you end up not re-checking a submit that failed.
+        """
+        with self.lock:
+            self.submit_result = dict(result)
+            self.phase = SUBMITTED
+            self.note = result.get("note", "")
+
     def submit(self, command: Command) -> bool:
         """Queue one command. False if it is not one of the four, or the window is gone.
 
@@ -317,6 +436,13 @@ class Session:
             need = sum(1 for r in self.fields if r["status"] != FILLED)
             return {
                 "closing": self.closing,
+                "submit_control": dict(self.submit_control)
+                                  if self.submit_control else None,
+                "blockers": [r["label"] or r["key"] for r in self.fields
+                             if r["required"] and r["status"] != FILLED],
+                "submitted": bool(self.submitted_at),
+                "submit_result": dict(self.submit_result)
+                                 if self.submit_result else None,
                 "company": self.company,
                 "ats_job_id": self.ats_job_id,
                 "title": self.title,

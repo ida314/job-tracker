@@ -965,8 +965,7 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
   never a selector and never anything the browser thread evaluates. That is `browser.py`'s
   no-click-path rule carried across the new channel, and it needs its own test because the
-  existing one only scans that module's source. **Nothing on the page can submit**, and
-  there is a test asserting the page has no form, no submit control and no such endpoint.
+  existing one only scans that module's source.
 - **`clear` is a name of its own, and an empty `set` is refused** (2026-08-22). Deleting
   a value used to reach `page.fill(el, "")`, which succeeds — so the row was recorded
   `filled` holding nothing, counted as done and counted *out* of "need you". That is the
@@ -1039,6 +1038,47 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   banner, disables every control, and **stops the poll** — there is nothing left to ask,
   and asking anyway is what made it look alive. `render_apply` emits that state directly
   too, so a reload is honest with no script.
+- **Sending it is a gate, not a command** (2026-08-22). `/apply` can now submit, and every
+  line of how is the invariant. It is **not** in the vocabulary — that list's stated
+  property is that nothing in it can activate anything, and queuing a submit would make
+  sending an application the same kind of act as typing into a text box, one request among
+  the hundreds this page makes while you work. So it takes `request_close`'s shape for the
+  mirror-image reason: closing is outside the vocabulary because it does nothing to the
+  form, submitting because it does the one thing to the form that cannot be undone.
+  - **Three checks, in three places, and none is redundant.** `Session.request_submit`
+    refuses unless the phase is `READY`, the epoch matches, a submit control was found,
+    every required row is `FILLED`, and the company name has been typed. `_submit` takes
+    the same checks again on the browser thread, because the gate's reading is up to one
+    poll old and a form can reveal a required question in that gap — it stands down with
+    `disarm()`, leaving `submitted_at` untouched so the button returns rather than the
+    session jamming. `claim_submit` spends the one submit under the lock **before** the
+    click, so two reads of the flag cannot become two applications.
+  - **The refusal names the fields.** "Not ready" is not actionable; the required
+    questions it is waiting on are. This is also why `cleared` had to be its own status —
+    deleting a required answer must put the job back in the way of the button.
+  - **`browser.py` has exactly one click, in `_submit`, reached only from the hold loop**,
+    and `requestSubmit` / `form.submit` / `dispatchEvent` / `keyboard.press` are still
+    banned. That is stricter than the old no-click rule for this purpose, not weaker: a
+    real press of the employer's own control runs their validation, their required-field
+    checks and their captcha hooks, all of which a programmatic send skips — which is how
+    you submit an application their own page would have rejected. The test scans the
+    source **with docstrings stripped**, because the prose now names the mechanisms it
+    bans in order to explain them; the old test warned about exactly this and then fell
+    into it.
+  - **`_SUBMIT_JS` is separate from `_DISCOVER_JS`** and mints its own attribute
+    (`data-jt-submit`), because the discovery pass deliberately skips submit and button
+    inputs — a handle minted for one would put a clickable target inside the vocabulary
+    that says it has none. It ranks candidates (explicit `type=submit` beats submit-shaped
+    wording, since "Apply" is also what the button that *opens* a form says) and drops
+    cancel/back/cookie-banner text outright. **Zero candidates is "no submit button
+    found"**, and the page renders no button at all — a control that looks like it would
+    work if you filled one more field, over a page with nothing to press, is
+    absence-read-as-success where it costs most.
+  - **What follows the click is a reading, never a verdict.** Nothing on this side can
+    prove an employer received an application, so `finish_submit` records what changed —
+    the URL, the field count — and the page says exactly that. A page that did not change
+    reads *"nothing on the page changed — read the preview before assuming it went"*. An
+    unverifiable "submitted successfully" is how a failed send stops being re-checked.
 - **Closing discards the fill, so the button confirms first.** No ATS keeps a draft for an
   anonymous candidate — the same fact that makes this a browser rather than a link — so
   the window is the only place the work exists.

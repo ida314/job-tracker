@@ -273,9 +273,12 @@ application, fills what it knows, attaches the resume with `set_input_files()` �
 thing no URL can do — outlines the required fields it could not fill, scrolls to the
 first, and **stops**.
 
-**It never submits.** There is no click path in `browser.py` at all, and a test asserts
-it against the source: no `.click(`, no `.press(`, no `requestSubmit`, no `dispatchEvent`.
-An application is irreversible and goes out under your name, so the last action is yours.
+**It never submits on its own.** `browser.py` holds exactly one click, in `_submit`,
+reachable only from the hold loop and only once you have armed it on `/apply` — and a test
+asserts that against the source: one such call, in that function, with `requestSubmit`,
+`form.submit`, `dispatchEvent` and `keyboard.press` still absent. Nothing in the fill
+itself can reach it. An application is irreversible and goes out under your name, so the
+last action is yours; what changed in 2026-08-22 is where you take it, not whether you do.
 
 It also **discovers**. Every input, select, textarea and contenteditable on the page is
 read, its label resolved through four conventions in order (`aria-label`,
@@ -447,9 +450,25 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 - **`img-src 'self'` is as load-bearing as `connect-src 'self'`.** The CSP is
   `default-src 'none'`, both fall back to it, and both fail the same silent way — the
   preview would be a broken image over a browser working perfectly.
-- **Nothing on the page can submit.** There is no control, no endpoint and no command that
-  could. An application is irreversible and goes out under your name — the same reason
-  `browser.py` has no click path.
+- **The page can submit, and it is a gate rather than a command.** An application is
+  irreversible and goes out under your name, which used to be the reason there was no
+  control at all; it is now the reason there are three checks in three places. `submit` is
+  deliberately **not** in the vocabulary — nothing a queued request carries may activate
+  anything — so it is a session-level flag, armed by `request_submit` (phase `ready`,
+  epoch matching, a submit control found, every required field filled, the company name
+  typed), re-checked in full on the browser thread before the click, and spent exactly
+  once by `claim_submit` under the lock.
+- **The click is a real press of the employer's own button.** `browser.py` has exactly one
+  click, in `_submit`, reachable only from the hold loop; `requestSubmit`, `form.submit`,
+  `dispatchEvent` and `keyboard.press` stay banned. Pressing the control runs the
+  employer's validation, their required-field checks and their captcha hooks. Submitting
+  the form programmatically would skip them, which is how an application their own page
+  would have rejected goes out anyway.
+- **Zero submit controls is "no submit button found".** The same finding as zero fields
+  discovered, one control along, and the page renders no button rather than a disabled one.
+- **What happened after the click is reported, not assumed.** Nothing here can prove an
+  employer received anything, so the page says what changed — the URL, the field count —
+  and says plainly when nothing did.
 
 ### What it cannot do
 

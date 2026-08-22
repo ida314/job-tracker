@@ -11,9 +11,18 @@ this does with Playwright instead of an extension.
 
 Three consequences worth stating plainly:
 
-**It never submits.** There is no click path in this module at all, and a test asserts
-that. It fills what it knows, outlines what it does not, and hands you the window. An
-application is irreversible and goes out under your name.
+**It submits in exactly one place, and only when asked.** `_submit` holds the only
+click in this module, and a test asserts that against the source: one such call, inside
+that function, reached from nowhere but the hold loop — and still no `requestSubmit`, no
+`form.submit`, no `dispatchEvent`, no `keyboard.press`. That shape is the point rather than a leftover of the old rule — a real
+click on the employer's own control runs their validation, their required-field checks and
+their captcha hooks, all of which a synthetic form submission skips.
+
+Everything protecting it is on the other side: `Session.request_submit` refuses unless the
+form is settled, the epoch matches, every required field is filled and the company name
+has been typed; `claim_submit` takes the one submit a session has, under a lock, before
+the click. An application is irreversible and goes out under your name, so nothing here
+happens because a code path arrived at it — only because somebody asked for it by name.
 
 **The DOM is also how forms are discovered.** Greenhouse publishes its questions;
 nobody else does. Reading the rendered form gives every ATS — Ashby, Lever, and a
@@ -167,6 +176,48 @@ _HIGHLIGHT_JS = """
     const first = document.querySelector(`[data-jt-id="${handles[0]}"]`);
     if (first) first.scrollIntoView({ block: 'center' });
   }
+}
+"""
+
+
+# Finding the one control that sends the form. Separate from `_DISCOVER_JS` because that
+# pass deliberately skips submit and button inputs — they are not questions, and a handle
+# minted for one would put a click inside the vocabulary that says it cannot activate
+# anything. This mints a handle of its own, in its own attribute, reachable only from
+# `_submit`.
+#
+# The ranking is deliberate. A real application form has several buttons on it — "Back",
+# "Save draft", a cookie banner's "Accept" — and picking the wrong one is at best a lost
+# fill. So: an explicit submit type beats a bare `<button>`, submit-shaped text beats
+# other text, and anything reading as a cancel or a back is dropped outright rather than
+# ranked last.
+_SUBMIT_JS = """
+() => {
+  const text = (el) => ((el.value || '') + ' ' + (el.innerText || el.textContent || ''))
+    .replace(/\\s+/g, ' ').trim();
+  const nodes = document.querySelectorAll(
+    'button[type="submit"], input[type="submit"], button:not([type]), ' +
+    'button[type="button"], [role="button"]'
+  );
+  let best = null;
+  for (const el of nodes) {
+    if (el.disabled) continue;
+    if (!el.offsetParent) continue;                       // not rendered
+    const label = text(el).slice(0, 120);
+    if (/\\b(cancel|back|previous|close|save draft|reset|accept cookies)\\b/i.test(label))
+      continue;
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const explicit = type === 'submit';
+    const worded = /\\b(submit|apply|send)\\b/i.test(label);
+    // Explicit type is worth more than wording: the wording is the employer's copy and
+    // "Apply" is also what the button that *opens* the form says.
+    const score = (explicit ? 2 : 0) + (worded ? 1 : 0);
+    if (score === 0) continue;
+    if (!best || score > best.score) best = {label, score, el};
+  }
+  if (!best) return null;
+  best.el.setAttribute('data-jt-submit', 'go');
+  return {handle: 'go', label: best.label};
 }
 """
 
@@ -380,6 +431,7 @@ def fill_application(
     wait: bool = True,
     hold: bool = False,
     session=None,
+    on_submitted=None,
 ) -> FillReport:
     """Open the application, fill what we know, record what we do not, and stop.
 
@@ -505,6 +557,7 @@ def fill_application(
                 carried = {f.key: statuses.get(r["handle"], (live.PENDING, ""))
                            for r, f in zip(found, fields)}
                 session.absorb(live.rows_from(found, fields, carried))
+                session.set_submit_control(_find_submit(surface))
                 session.set_phase(live.READY, report.summary())
 
             if wait and not headless:
@@ -516,7 +569,7 @@ def fill_application(
                 except (EOFError, KeyboardInterrupt):
                     pass
             elif (hold or session is not None) and not headless:
-                _hold_until_closed(report, context, session, surface)
+                _hold_until_closed(report, context, session, surface, on_submitted)
         finally:
             context.close()
 
@@ -541,7 +594,7 @@ SHOT_QUALITY = 60
 
 
 def _hold_until_closed(report: FillReport, context, session=None,
-                       surface=None) -> None:
+                       surface=None, on_submitted=None) -> None:
     """Block until the window is gone. For a caller with no terminal to prompt at.
 
     **The wait has to happen inside a Playwright call.** The sync API only dispatches
@@ -583,7 +636,13 @@ def _hold_until_closed(report: FillReport, context, session=None,
                     break
                 # The surface is where the form was read, which is not the page itself
                 # when the employer embeds its ATS in an iframe.
-                _drain(session, surface if surface is not None else pages[0])
+                here = surface if surface is not None else pages[0]
+                # Before the drain, so a queued edit cannot land between the checks the
+                # gate made and the click that acts on them.
+                if session.submit_requested():
+                    _submit(session, here, on_submitted)
+                    continue
+                _drain(session, here)
             pages[0].wait_for_timeout(HOLD_POLL_MS)
         except Exception:  # noqa: BLE001 — the browser is gone, which is the exit
             break
@@ -592,6 +651,88 @@ def _hold_until_closed(report: FillReport, context, session=None,
         # tell that from "still working". Without this it polls a form nobody is holding
         # any more and every edit queues into nothing.
         session.set_phase(live.CLOSED)
+
+
+# How long to wait for the page to settle after the click before reading it. A submit is
+# a navigation on every ATS we have seen; this is the ceiling, not the expectation.
+SUBMIT_SETTLE_MS = 8000
+
+
+def _submit(session, surface, on_submitted=None) -> None:
+    """Send the application. The one irreversible thing in this project.
+
+    Every check `Session.request_submit` made is re-taken here, and not out of caution
+    for its own sake: that reading is up to one poll old, and a form can reveal a required
+    question in the meantime. The gate answers the click; this answers the page.
+
+    The claim comes before the click and is taken under the session lock, so two reads of
+    the flag cannot become two applications.
+
+    What follows the click is a reading, never a verdict. Nothing on this side can prove
+    an employer received anything, so this records what changed — the URL, how many fields
+    are still on the page — and lets the page say that. An unverifiable "submitted
+    successfully" is how a failed send stops being re-checked.
+    """
+    page = _page_of(surface)
+    control = session.snapshot()["submit_control"]
+    blockers = session.unfilled_required()
+    if not control or blockers:
+        # The gate let it through and the page has changed since. Say so and stand down —
+        # `submitted_at` is untouched, so the button comes back rather than jamming.
+        session.set_phase(live.READY, "not sent: " + (
+            f"still needed: {', '.join(blockers[:4])}" if blockers
+            else "the submit button is no longer on the form"))
+        session.disarm()
+        return
+
+    if not session.claim_submit():
+        return  # already gone; the flag was read twice
+
+    before_url = page.url
+    before_fields = session.snapshot()["discovered"]
+    log.info("submitting %s — clicking %r", session.title, control["label"][:60])
+
+    # The one click in this module. A real press of the employer's own control, so their
+    # validation, their required-field checks and their captcha hooks all run — which is
+    # exactly what submitting the form programmatically would skip.
+    surface.click('[data-jt-submit="go"]')
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=SUBMIT_SETTLE_MS)
+    except Exception as exc:  # noqa: BLE001 — a page that never settles is still a page
+        log.debug("the page did not settle after the submit: %s", exc)
+    page.wait_for_timeout(1000)
+
+    try:
+        _reread(session, surface)
+    except Exception as exc:  # noqa: BLE001 — navigated away, which is the good outcome
+        log.debug("could not read the form after the submit: %s", exc)
+    _shoot(session, surface)
+
+    after_url = page.url
+    after_fields = session.snapshot()["discovered"]
+    changed = after_url != before_url or after_fields != before_fields
+    result = {
+        "url_before": before_url,
+        "url_after": after_url,
+        "fields_before": before_fields,
+        "fields_after": after_fields,
+        "changed": changed,
+        "note": (
+            f"clicked {control['label'][:60]!r}; the page went to {after_url}"
+            if after_url != before_url else
+            f"clicked {control['label'][:60]!r}; the form went from {before_fields} "
+            f"fields to {after_fields}" if changed else
+            f"clicked {control['label'][:60]!r} and nothing on the page changed — "
+            "read the preview before assuming it went"
+        ),
+    }
+    session.finish_submit(result)
+    if on_submitted is not None:
+        try:
+            on_submitted(result)
+        except Exception:  # noqa: BLE001 — recording it must not lose the reading
+            log.exception("could not record the application after submitting")
 
 
 def _drain(session, page) -> None:
@@ -685,6 +826,24 @@ def _reread(session, page) -> None:
     if session.absorb(live.rows_from(found, fields, session.carried())):
         log.info("the form changed shape — %d field(s), epoch %d",
                  len(found), session.epoch)
+    # The button is re-found every time, because a form that reveals a question can just
+    # as well reveal the control that sends it — and because a handle minted by an
+    # earlier pass names nothing after the page has moved.
+    session.set_submit_control(_find_submit(page))
+
+
+def _find_submit(page) -> Optional[dict]:
+    """The control that would send this form, or None if there is not one.
+
+    None is a real answer and the caller treats it as one. A page with no submit control
+    is a page this cannot send — the same finding as zero fields discovered, and it must
+    never render as a button that quietly does nothing.
+    """
+    try:
+        return page.evaluate(_SUBMIT_JS)
+    except Exception as exc:  # noqa: BLE001 — no button is a finding, not a crash
+        log.debug("could not look for a submit control: %s", exc)
+        return None
 
 
 def _shoot(session, surface) -> None:

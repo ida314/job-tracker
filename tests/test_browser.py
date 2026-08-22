@@ -9,7 +9,9 @@ no network and no ATS. That is enough to exercise the two things that actually b
 label discovery across the four conventions forms use, and writing into each input type.
 """
 
+import ast
 import inspect
+import re
 
 import pytest
 
@@ -90,19 +92,62 @@ answers:
 
 
 # -- the invariant that matters most -------------------------------------------------
-def test_there_is_no_submit_path_in_this_module():
-    """An application is irreversible and goes out under the user's name.
+def _code_without_prose(module):
+    """The module's source with every docstring removed.
 
-    Asserted against the source rather than by behaviour, because the failure mode is
-    someone adding a convenience `.click()` later and nothing noticing until a form is
-    submitted. `page.fill`, `select_option` and `set_input_files` write into fields;
-    none of them activates anything.
+    Required, and the requirement is itself the old test's warning coming true: that one
+    scanned the whole source and cautioned that "prose in this module says never submits
+    a lot". The prose now names the mechanisms it bans, in order to explain why they are
+    banned, so a scan of the raw text finds `requestSubmit` in a sentence about not using
+    `requestSubmit`. Assert on the code.
     """
-    code = inspect.getsource(browser)
-    # The mechanisms, not the word: prose in this module says "never submits" a lot.
-    for mechanism in (".click(", ".press(", "requestSubmit", "form.submit",
-                      "keyboard.press", "dispatchEvent"):
-        assert mechanism not in code, f"{mechanism} could activate a form"
+    src = inspect.getsource(module)
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                src = src.replace(doc, "")
+    return src
+
+
+def test_the_only_activation_in_this_module_is_the_submit_you_asked_for():
+    """There is exactly one click here, it is in `_submit`, and it is a real one.
+
+    This replaces the older rule that there was no click path at all. That rule carried
+    the reason — an application is irreversible and goes out under the user's name — but
+    the reason is now carried by the gate instead: `request_submit` refuses unless the
+    form is settled, the epoch matches, every required field is filled and the company
+    name has been typed, and `claim_submit` spends the one submit a session has under a
+    lock before the click happens.
+
+    What is asserted here is narrower and, for this purpose, stricter. A **click** on the
+    employer's own control runs their validation, their required-field checks and their
+    captcha hooks. `requestSubmit`, `form.submit` and a synthesized `dispatchEvent` all
+    skip some or all of that and send the form anyway — which is how you submit an
+    application the employer's own page would have rejected. So those stay banned, and
+    the one click stays where it can be read.
+    """
+    code = _code_without_prose(browser)
+    assert code.count(".click(") == 1, "there is more than one click in this module"
+    assert ".click(" in inspect.getsource(browser._submit)
+
+    # The mechanisms that would bypass the page's own checks, not the word: prose in
+    # this module says "submit" a great many times.
+    for mechanism in ("requestSubmit", "form.submit", "keyboard.press", "dispatchEvent"):
+        assert mechanism not in code, f"{mechanism} sends a form without pressing it"
+
+    # And nothing reaches that click except the hold loop, which reaches it only through
+    # the armed flag. A second caller is how a code path arrives at sending somebody's
+    # application without anybody having asked for it.
+    calls = re.compile(r"(?<![\w])_submit\(")
+    callers = sorted(name for name, obj in vars(browser).items()
+                     if callable(obj)
+                     and getattr(obj, "__module__", "") == browser.__name__
+                     and name != "_submit"
+                     and calls.search(inspect.getsource(obj)))
+    assert callers == ["_hold_until_closed"], callers
 
 
 def test_the_module_never_navigates_anywhere_but_the_apply_url():
@@ -127,14 +172,19 @@ class _FakePage:
 class _FakeContext:
     """A context whose window closes after `closes_after` waits."""
 
-    def __init__(self, closes_after=3):
+    def __init__(self, closes_after=3, page=None):
         self.waits = 0
         self.closes_after = closes_after
         self.open = True
+        # A real surface to act on, for the tests that care what reached the page. The
+        # default is the ticking stub the close tests need.
+        self.page = page
 
     @property
     def pages(self):
-        return [_FakePage(self)] if self.open else []
+        if not self.open:
+            return []
+        return [self.page if self.page is not None else _FakePage(self)]
 
 
 def test_the_hold_returns_only_once_the_window_is_gone():
@@ -337,8 +387,14 @@ def test_a_dropdown_that_does_not_offer_our_answer_is_left_alone(tmp_path, answe
 class _Recorder:
     """A page that records what was asked of it. Enough to drive `_drain` with no browser."""
 
-    def __init__(self, found=None):
+    def __init__(self, found=None, submit=None):
         self.found = found or []
+        # What `_SUBMIT_JS` would report. None is the real "this page has no way to send
+        # itself" case, which the gate has to treat as a finding rather than a blank.
+        self.submit = submit if submit is not None else {
+            "handle": "go", "label": "Submit application"}
+        self.clicked = []
+        self.url = "https://x/apply"
         self.filled = {}
         self.selected = {}
         self.checked = {}
@@ -347,8 +403,19 @@ class _Recorder:
         self.evaluated = []
 
     def evaluate(self, script, arg=None):
+        # The three scripts are told apart the way the page tells them apart: by what
+        # they ask for. A recorder that answered them all with the field list made
+        # `_find_submit` report a list of inputs as a button.
+        if "data-jt-submit" in script:
+            return self.submit
         self.evaluated.append(arg)
         return self.found
+
+    def click(self, selector):
+        self.clicked.append(selector)
+
+    def wait_for_load_state(self, state, timeout=None):
+        pass
 
     def fill(self, selector, value):
         self.filled[selector] = value
@@ -671,6 +738,156 @@ def test_the_mirror_writes_to_the_real_form(tmp_path, answers):
     conn.close()
 
 
+# -- sending it -------------------------------------------------------------------------
+
+
+def _armed(*specs):
+    """A session with a submit control, every required field filled, and the gate passed."""
+    session, found = _mirror(*specs)
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    ok, error = session.request_submit(session.epoch, "Acme")
+    assert ok, error
+    return session, found
+
+
+def test_the_click_happens_only_once_however_often_the_flag_is_read():
+    """The hold loop reads the flag every 500ms. Two reads must not be two applications."""
+    session, found = _armed(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+
+    browser._submit(session, page)
+    browser._submit(session, page)
+    browser._submit(session, page)
+
+    assert page.clicked == ['[data-jt-submit="go"]']
+    assert session.snapshot()["phase"] == live.SUBMITTED
+
+
+def test_the_page_is_checked_again_before_the_click_not_just_at_the_gate():
+    """The gate's reading is up to one poll old, and a form can reveal a required
+    question in that time. Standing down leaves the submit unspent, so the button comes
+    back rather than the session jamming on a state it never reached."""
+    session, found = _mirror(("first_name", "First Name", "text"))
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    ok, _ = session.request_submit(session.epoch, "Acme")
+    assert ok
+
+    # Between arming and the tick, the form reveals a required question.
+    grew = [_raw("jt0", "first_name", "First Name", "text"),
+            _raw("jt1", "sponsorship", "Sponsorship?", "select")]
+    session.absorb(live.rows_from(
+        grew,
+        [FormField(key="first_name", label="First Name", type="text"),
+         FormField(key="sponsorship", label="Sponsorship?", type="select",
+                   required=True)],
+        session.carried(),
+    ))
+
+    page = _Recorder(grew)
+    browser._submit(session, page)
+
+    assert page.clicked == [], "it sent an application over an unanswered question"
+    snap = session.snapshot()
+    assert snap["phase"] == live.READY
+    assert snap["submitted"] is False
+    assert "Sponsorship?" in snap["note"]
+
+
+def test_a_form_that_lost_its_button_between_arming_and_the_tick_is_not_sent():
+    session, found = _armed(("first_name", "First Name", "text"))
+    session.set_submit_control(None)
+    page = _Recorder(found)
+
+    browser._submit(session, page)
+
+    assert page.clicked == []
+    assert session.snapshot()["phase"] == live.READY
+    assert "no longer on the form" in session.snapshot()["note"]
+
+
+def test_what_happened_after_the_click_is_recorded_rather_than_assumed():
+    """A page that navigated and a page that did not are two different readings."""
+    session, found = _armed(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+    page.url = "https://x/apply"
+
+    browser._submit(session, page)
+
+    result = session.snapshot()["submit_result"]
+    assert result["changed"] is False, "nothing about that page changed"
+    assert "nothing on the page changed" in result["note"]
+    assert "successful" not in result["note"]
+
+
+def test_a_page_that_navigates_after_the_click_says_where_it_went():
+    session, found = _armed(("first_name", "First Name", "text"))
+
+    class _Navigates(_Recorder):
+        def click(self, selector):
+            self.clicked.append(selector)
+            self.url = "https://x/thanks"
+
+    page = _Navigates(found)
+    browser._submit(session, page)
+
+    result = session.snapshot()["submit_result"]
+    assert result["changed"] is True
+    assert "https://x/thanks" in result["note"]
+
+
+def test_the_hold_loop_sends_it_and_then_goes_back_to_draining():
+    """The one caller. It reads the flag in the tick it was already doing, before the
+    drain, so a queued edit cannot land between the checks and the click."""
+    session, found = _armed(("first_name", "First Name", "text"))
+
+    class _Closing(_Recorder):
+        """A recorder that also ends the hold, the way `_FakePage` does."""
+
+        context = None
+
+        def wait_for_timeout(self, ms):
+            self.context.waits += 1
+            if self.context.waits >= self.context.closes_after:
+                self.context.open = False
+
+    page = _Closing(found)
+    context = _FakeContext(3, page=page)
+    page.context = context
+
+    browser._hold_until_closed(browser.FillReport(url="https://x"), context, session,
+                               page)
+
+    assert page.clicked == ['[data-jt-submit="go"]']
+    assert session.snapshot()["submitted"] is True
+
+
+def test_the_application_is_recorded_only_once_and_carries_what_was_seen():
+    recorded = []
+    session, found = _armed(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+
+    browser._submit(session, page, recorded.append)
+    browser._submit(session, page, recorded.append)
+
+    assert len(recorded) == 1
+    assert recorded[0]["url_after"] == "https://x/apply"
+    assert "changed" in recorded[0]
+
+
+def test_a_failure_to_record_does_not_lose_the_reading():
+    """The submit already happened. Losing what was observed is the one thing that would
+    make it unverifiable."""
+    session, found = _armed(("first_name", "First Name", "text"))
+    page = _Recorder(found)
+
+    def explode(_result):
+        raise RuntimeError("the database is gone")
+
+    browser._submit(session, page, explode)
+    assert session.snapshot()["phase"] == live.SUBMITTED
+    assert session.snapshot()["submit_result"] is not None
+
+
 # A fixture of its own rather than a checkbox added to FORM_HTML: that one's gap list is
 # asserted exactly, and every kind of control needs to be emptied here.
 CLEARABLE_HTML = """
@@ -740,6 +957,86 @@ def test_deleting_on_the_page_empties_the_real_form(tmp_path):
 
             statuses = {r["key"]: r["status"] for r in session.snapshot()["fields"]}
             assert set(statuses.values()) == {live.CLEARED}
+        finally:
+            context.close()
+
+
+# Decoys on purpose. A real application form carries several buttons and picking the
+# wrong one is at best a lost fill — Greenhouse's own pages have "Back", employers add
+# cookie banners, and "Apply" is also what the button that *opens* a form says.
+SUBMITTABLE_HTML = """
+<!doctype html><meta charset=utf-8><title>Apply</title>
+<form onsubmit="document.body.setAttribute('data-sent', '1'); return false;">
+  <label for="fn">First Name</label>
+  <input id="fn" name="first_name" value="Dylan" required>
+  <button type="button">Cancel</button>
+  <button type="button">Back</button>
+  <span role="button">Accept cookies</span>
+  <button type="submit">Submit application</button>
+</form>
+"""
+
+
+@needs_browser
+def test_the_submit_control_is_found_among_the_decoys_and_actually_pressed(tmp_path):
+    """End to end: the right button, and a real press of it.
+
+    A press rather than a programmatic send, because the employer's own validation,
+    required-field checks and captcha hooks hang off the real event — which is what
+    submitting the form directly would skip. Asserted here through the page's own
+    `onsubmit`, which only fires for the genuine article.
+    """
+    page_file = tmp_path / "form.html"
+    page_file.write_text(SUBMITTABLE_HTML)
+    session = live.start("Acme", "1", "Backend Engineer", page_file.as_uri())
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        context = browser._launch(pw, tmp_path / "profile", headless=True)
+        try:
+            page = context.new_page()
+            page.goto(page_file.as_uri())
+            found = page.evaluate(browser._DISCOVER_JS)
+            fields = browser._fields_from_dom(found)
+            session.absorb(live.rows_from(found, fields))
+
+            control = browser._find_submit(page)
+            assert control is not None, "it found nothing to press"
+            assert control["label"] == "Submit application"
+
+            session.set_submit_control(control)
+            session.mark(session.snapshot()["fields"][0]["handle"], live.FILLED, "Dylan")
+            session.set_phase(live.READY)
+            ok, error = session.request_submit(session.epoch, "Acme")
+            assert ok, error
+
+            assert page.get_attribute("body", "data-sent") is None
+            browser._submit(session, page)
+            assert page.get_attribute("body", "data-sent") == "1"
+            assert session.snapshot()["phase"] == live.SUBMITTED
+        finally:
+            context.close()
+
+
+@needs_browser
+def test_a_page_with_nothing_to_press_reports_that_rather_than_guessing(tmp_path):
+    """Zero candidates is a finding. Pressing "Cancel" because it was the only button
+    left is the failure this ranking exists to prevent."""
+    page_file = tmp_path / "form.html"
+    page_file.write_text("""
+<!doctype html><meta charset=utf-8><title>Apply</title>
+<form><input name="first_name"><button type="button">Cancel</button></form>
+""")
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        context = browser._launch(pw, tmp_path / "profile", headless=True)
+        try:
+            page = context.new_page()
+            page.goto(page_file.as_uri())
+            assert browser._find_submit(page) is None
         finally:
             context.close()
 

@@ -671,6 +671,7 @@ def render_apply(conn: sqlite3.Connection, session) -> str:
         '<p class=note>The whole page, a few seconds behind. The fields are not behind. '
         'Click it (or <b>100%</b>) to read it at full size.</p>'
     )
+    p.extend(_submit_block(snap))
     # The way out of a session, and on a headless host the only one there is. The window
     # is on the machine running `serve`; if you cannot reach that machine's screen you
     # cannot close it, and until it closes the one-window lock stays held and every later
@@ -714,6 +715,86 @@ def render_apply(conn: sqlite3.Connection, session) -> str:
     p.append("</div>")
     p.append(f"<script>{_APPLY_JS}</script></div></body></html>")
     return "\n".join(p)
+
+
+def _blocker_line(blockers: list) -> str:
+    """What is still in the way of the button, said the same way on both sides.
+
+    Named rather than counted: "3 fields still needed" is not something you can act on,
+    and this is the sentence standing between you and an application you cannot recall.
+    """
+    if not blockers:
+        return ""
+    shown = ", ".join(blockers[:6])
+    more = f" and {len(blockers) - 6} more" if len(blockers) > 6 else ""
+    return f"still needed: {shown}{more}"
+
+
+def _submit_block(snap: dict) -> list:
+    """Sending it. The only control in this project that spends something irreversible.
+
+    Rendered server-side in every state, including the states where it cannot be used, so
+    the page is honest with no script running: what it would click, what is still in the
+    way, and what happened if it has already gone. The script enables the button and
+    repaints the checklist; it never mints either.
+
+    Three things are load-bearing:
+
+    **Zero candidates is "no submit button found", not a disabled button.** A control that
+    looks like it might work if you filled one more field, over a page that has nothing to
+    press, is the absence-read-as-success shape one row along from `live.summary`'s zero.
+
+    **The blockers are named.** "Not ready" is not actionable; the required fields it is
+    waiting on are.
+
+    **Arming is typing the company name.** A `confirm()` dialog is one keystroke from a
+    habit, and there is no undo behind this one.
+    """
+    control = snap.get("submit_control")
+    blockers = snap.get("blockers") or []
+    result = snap.get("submit_result")
+    out = ["<h3>Send it</h3>"]
+
+    if snap.get("submitted") and result:
+        # Deliberately a reading and not a verdict: nothing here can prove an employer
+        # received an application, and an unverifiable success message is how a failed
+        # send stops being re-checked.
+        kind = "ok" if result.get("changed") else "warn"
+        out.append(f'<p class="banner {kind}" id="sent">'
+                   f'{html.escape(result.get("note", "it was sent"))}</p>')
+        if not result.get("changed"):
+            out.append('<p class=note>Read the preview before assuming it went. '
+                       "Nothing on this side can see the employer's answer.</p>")
+        out.append('<p class=note id="recorded"></p>')
+        return out
+
+    if not snap["discovered"]:
+        out.append("<p class=note>There is no form on that page to send.</p>")
+        return out
+    if not control:
+        out.append('<p class="banner bad" id="nobutton">No submit button was found on '
+                   "this form. Read the form again — and if it is still not there, this "
+                   "application has to go out from the window itself.</p>")
+        return out
+
+    label = html.escape(control.get("label") or "the submit button")
+    out.append(f'<p class=note>Will press <b>{label}</b>.</p>')
+    # One text node, not a list the script rebuilds: the rule everywhere on these pages
+    # is that JS sets text and never writes markup, and this is the element most likely
+    # to be repainted while you work.
+    hidden = "" if blockers else " hidden"
+    out.append(f'<p class="banner warn" id="blockers"{hidden}>'
+               f'{html.escape(_blocker_line(blockers))}</p>')
+
+    company = html.escape(snap["company"], quote=True)
+    out.append(
+        '<p class="arm">Type <b>' + html.escape(snap["company"]) + "</b> to confirm: "
+        f'<input id="armtext" type="text" autocomplete="off" data-company="{company}">'
+        ' <button id="submitbtn" disabled>Submit application</button> '
+        '<span class="note" id="sendmsg"></span></p>'
+    )
+    out.append('<p class=note>There is no undo. It goes out under your name.</p>')
+    return out
 
 
 def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
@@ -1284,6 +1365,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_session_highlight(payload))
             elif path == "/api/session/rediscover":
                 self._send_json(self._api_session_command(live.REDISCOVER))
+            elif path == "/api/session/submit":
+                self._send_json(self._api_session_submit(payload))
             elif path == "/api/session/close":
                 self._send_json(self._api_session_close())
             elif path == "/api/session/file":
@@ -2375,6 +2458,34 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "bad epoch"}
         return self._api_session_command(live.CLEAR, handle, "", epoch)
 
+    def _api_session_submit(self, payload: dict) -> dict:
+        """Arm the one submit this session has, or say exactly why it will not.
+
+        A sibling of `_api_session_close` and deliberately not a `live.Command`: the
+        vocabulary's stated property is that nothing in it can activate anything, and
+        this activates the only control on the page that spends something you cannot get
+        back. Queuing it would make sending an application the same kind of act as typing
+        into a text box — one request among the hundreds this page makes while you work.
+
+        Every check is `Session.request_submit`'s, and every one of them is taken again on
+        the browser thread before the click, because this reading is up to one poll old.
+
+        The refusal is the useful half. "Not ready" is useless; the required fields it is
+        waiting on are what you can act on, so they come back by name.
+        """
+        session = live.current()
+        if session is None:
+            return {"ok": False, "error": "no window is open"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        ok, error = session.request_submit(epoch, str(payload.get("confirm") or ""))
+        if not ok:
+            return {"ok": False, "error": error}
+        log.info("submit armed for %s at %s", session.title, session.company)
+        return {"ok": True, "detail": "sending it…"}
+
     def _api_session_highlight(self, payload: dict) -> dict:
         """Outline one field on the real page, so the preview follows what you are typing.
 
@@ -2840,6 +2951,46 @@ _APPLY_JS = """
     });
   });
 
+  // -- sending it --------------------------------------------------------------------
+  // The button is enabled by typing the company name, and the server checks the same
+  // thing again — this is the affordance, not the gate. The gate is `request_submit`,
+  // and every check in it is taken a third time on the browser thread before the click.
+  var armtext = document.getElementById('armtext');
+  var submitbtn = document.getElementById('submitbtn');
+  var sendmsg = document.getElementById('sendmsg');
+  var blockers = document.getElementById('blockers');
+
+  function armed() {
+    if (!armtext || !submitbtn) return false;
+    var typed = armtext.value.trim().toLowerCase();
+    var want = (armtext.dataset.company || '').trim().toLowerCase();
+    var clear = blockers ? blockers.hidden : true;
+    submitbtn.disabled = !(typed && typed === want && clear);
+    return !submitbtn.disabled;
+  }
+  if (armtext) armtext.addEventListener('input', armed);
+
+  if (submitbtn) submitbtn.addEventListener('click', function () {
+    if (!armed()) return;
+    // The second of three. Typing the name is deliberate rather than habitual; this is
+    // the last chance to notice you meant a different job. There is no undo behind it.
+    if (!confirm('Submit this application to ' + (armtext.dataset.company || 'them')
+                 + '? It goes out under your name and cannot be taken back.')) return;
+    submitbtn.disabled = true;
+    sendmsg.textContent = 'sending…';
+    post('/api/session/submit', {epoch: epoch, confirm: armtext.value})
+      .then(function (res) {
+        // Never "sent": the request only armed it. The browser thread clicks on its next
+        // tick and `s.submitted` is what says it actually happened.
+        sendmsg.textContent = res.ok ? (res.detail || 'sending…')
+                                     : (res.error || 'it was not sent');
+        if (!res.ok) armed();
+      }).catch(function () {
+        sendmsg.textContent = 'the server did not answer';
+        armed();
+      });
+  });
+
   // -- the poll ----------------------------------------------------------------------
   // This is also what tells the browser thread somebody is watching, which is the only
   // thing that makes it take screenshots. Stop polling and the work stops.
@@ -2850,6 +3001,7 @@ _APPLY_JS = """
   // the poll stops — there is nothing left to ask about, and asking anyway is what kept
   // the button sitting on "closing…" over a browser that had already closed.
   var stopped = false;
+  var sent = false;
   function gone() {
     if (stopped) return;
     stopped = true;
@@ -2901,6 +3053,25 @@ _APPLY_JS = """
         return;
       }
       paint(s);
+      if (blockers) {
+        // Text, never markup — the rule every repaint on this page follows. A stale
+        // checklist over a live button is how you arm against yesterday's form.
+        var names = s.blockers || [];
+        var shown = names.slice(0, 6).join(', ');
+        blockers.textContent = names.length
+          ? 'still needed: ' + shown
+            + (names.length > 6 ? ' and ' + (names.length - 6) + ' more' : '')
+          : '';
+        blockers.hidden = names.length === 0;
+        armed();
+      }
+      if (s.submitted && s.submit_result) {
+        // It has gone. Reload once so the server renders the outcome — this page has no
+        // markup for a state it did not start in, and inventing some here would be the
+        // one place the script writes UI it cannot be tested against.
+        if (!sent) { sent = true; location.reload(); }
+        return;
+      }
       if (!paused && s.has_shot) {
         img.src = '/api/session/preview.jpg?t=' + s.shot_at;
         // The real age, not the word "now". This picture is the only view of the form
