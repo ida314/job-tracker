@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 import yaml
 
-_TOP_KEYS = {"identity", "resume", "cover_letter", "answers"}
+_TOP_KEYS = {"identity", "resume", "resume_name", "cover_letter", "answers"}
 
 # The identity fields an application form can ask for under a canonical name. Closed on
 # purpose: a typo'd key here would silently never be filled in, and a form field left
@@ -89,6 +89,12 @@ class Answers:
     cover_letter: Optional[Path] = None
     path: Optional[Path] = None
 
+    # The filename an employer sees, which is not the filename on disk. Disk names are
+    # minted for collision safety (`resumes.stored_name`) and read like it; this is the
+    # one a person opens. Empty means `resume<ext>`. Only the stem is used — the suffix
+    # always comes from the real file, so this cannot mislabel a PDF as a .docx.
+    resume_name: str = ""
+
     # -- lookup ---------------------------------------------------------------------
     def get(self, key: str) -> Optional[str]:
         """The answer for a key, from either block. None if there is not one."""
@@ -126,6 +132,10 @@ class Answers:
         parts = [f"{k}={v}" for k, v in sorted(self.identity.items())]
         parts += [f"{k}={a.value}" for k, a in sorted(self.answers.items())]
         parts.append(f"resume={self.resume.name if self.resume else ''}")
+        # `resume_name` is deliberately absent: it changes which name the *upload*
+        # carries, not which answer goes in any field, so a plan built before it was set
+        # is still a correct plan. Folding it in would re-plan every posting for a
+        # cosmetic rename.
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
@@ -172,6 +182,7 @@ def load_answers(path: str | Path) -> Answers:
         answers=answers,
         resume=_resolve_file(raw.get("resume"), path, "resume"),
         cover_letter=_resolve_file(raw.get("cover_letter"), path, "cover_letter"),
+        resume_name=str(raw.get("resume_name") or "").strip(),
         path=path,
     )
 
@@ -287,29 +298,122 @@ def rewrite_gaps(path: str | Path, gaps) -> None:
 
 
 def insert_answer(text: str, key: str, value: str, aliases=()) -> str:
-    """Return `text` with `key` added to its `answers:` block.
+    """Return `text` with `key` set to `value` in its `answers:` block.
 
     Text surgery rather than a YAML round trip, because a round trip would delete every
     comment in the file — including the gap stubs the user is working through and the
     explanatory header. The result is validated by `safewrite` before it replaces
     anything, so a malformed insertion is refused rather than saved.
-    """
-    entry = [f"  {key}:", f"    value: {_quote(value)}"]
-    if aliases:
-        entry.append(f"    aliases: [{', '.join(_quote(a) for a in aliases)}]")
-    block = "\n".join(entry)
 
+    **An existing key is updated in place, not prepended.** This used to insert
+    unconditionally, which for a key already in the file wrote a second YAML mapping key
+    with the same name. `yaml.safe_load` accepts that and keeps the *last* occurrence —
+    the old one, since the new entry went in at the top — so `load_answers` validated it,
+    `safewrite` accepted it, the page said saved, and the value you typed was silently
+    discarded while the file grew a duplicate. That is the same in-place rule
+    `upsert_identity` already follows, and for the same reason: two lines that disagree
+    is worse than one.
+
+    Aliases are additive. An alias is the exact question text an employer used, and a
+    second employer phrasing it differently is a second alias, not a replacement — so
+    editing an answer from `/apply` never drops the aliases that made it match anywhere.
+    """
     lines = text.split("\n")
-    for i, line in enumerate(lines):
-        if line.rstrip() == "answers:":
-            # Insert at the top of the block: newest answers are the ones you are
-            # actively working on, and the file reads better with them in reach.
-            return "\n".join(lines[: i + 1] + entry + lines[i + 1 :])
+    start, end = _block_bounds(lines, "answers:")
+    if start is not None:
+        at = _find_key_line(lines, start, end, key, commented=False)
+        if at is not None:
+            return "\n".join(_replace_answer(lines, at, end, key, value, aliases))
+        entry = _answer_lines(key, value, aliases)
+        # At the top of the block: newest answers are the ones you are actively working
+        # on, and the file reads better with them in reach.
+        return "\n".join(lines[: start + 1] + entry + lines[start + 1 :])
 
     # No answers block yet — add one above the managed tail.
+    block = "\n".join(_answer_lines(key, value, aliases))
     head, sep, tail = text.partition(GAP_MARKER)
     new_head = f"{head.rstrip()}\n\nanswers:\n{block}\n\n"
     return new_head + sep + tail
+
+
+def _answer_lines(key: str, value: str, aliases=()) -> list:
+    entry = [f"  {key}:", f"    value: {_quote(value)}"]
+    if aliases:
+        entry.append(f"    aliases: [{', '.join(_quote(a) for a in aliases)}]")
+    return entry
+
+
+def _entry_bounds(lines: list, at: int, end: int) -> int:
+    """One past the last line of the entry beginning at `at`.
+
+    An answer is `  key:` followed by its more-indented `value:`/`aliases:` lines. The
+    entry ends at the next line indented no further than the key itself, so the comments
+    a person wrote under their own answer travel with it.
+    """
+    indent = len(lines[at]) - len(lines[at].lstrip())
+    for j in range(at + 1, end):
+        line = lines[j]
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= indent:
+            return j
+    return end
+
+
+def _replace_answer(lines: list, at: int, end: int, key, value, aliases) -> list:
+    """Rewrite one entry's `value:` in place, leaving everything else it holds alone.
+
+    Surgical rather than re-rendered, for the reason the whole module is: an entry may
+    carry a block-style alias list, a trailing comment, or quoting somebody chose, and
+    re-emitting it from parsed values would silently reformat all of that. Only the one
+    line the edit is about moves.
+
+    A scalar entry (`current_employer: "NYU"`) is expanded to the long form, because that
+    is the only shape that can also hold aliases.
+    """
+    stop = _entry_bounds(lines, at, end)
+    body = list(lines[at:stop])
+    head = body[0]
+    indent = " " * (len(head) - len(head.lstrip()))
+    inner = indent + "  "
+
+    if head.strip() != f"{key}:":            # a scalar — expand it
+        body = [f"{indent}{key}:", f"{inner}value: {_quote(value)}"]
+    else:
+        for i, line in enumerate(body):
+            if line.strip().startswith("value:"):
+                body[i] = f"{inner}value: {_quote(value)}"
+                break
+        else:
+            body.insert(1, f"{inner}value: {_quote(value)}")
+
+    # Aliases are additive: an alias is the exact question text one employer used, so a
+    # second phrasing is a second alias, never a replacement. Anything already written
+    # down is left byte-for-byte where it is.
+    fresh = [a for a in aliases if a and _quote(a) not in "\n".join(body)]
+    if fresh:
+        at_aliases = next(
+            (i for i, ln in enumerate(body) if ln.strip().startswith("aliases:")), None
+        )
+        if at_aliases is None:
+            body.append(f"{inner}aliases: [{', '.join(_quote(a) for a in fresh)}]")
+        elif body[at_aliases].split("aliases:", 1)[1].strip():
+            # A flow list on one line — reopen it and add to the end.
+            existing = body[at_aliases].split("aliases:", 1)[1].strip().strip("[]")
+            joined = ", ".join(
+                [existing] + [_quote(a) for a in fresh]
+            ) if existing else ", ".join(_quote(a) for a in fresh)
+            body[at_aliases] = f"{inner}aliases: [{joined}]"
+        else:
+            # A block list — append items in its own style, after the last of them.
+            last = at_aliases
+            for i in range(at_aliases + 1, len(body)):
+                if body[i].strip().startswith("-"):
+                    last = i
+            for offset, alias in enumerate(fresh, start=1):
+                body.insert(last + offset, f"{inner}  - {_quote(alias)}")
+
+    return lines[:at] + body + lines[stop:]
 
 
 def upsert_identity(text: str, fields: dict) -> str:
@@ -394,6 +498,35 @@ def set_resume(text: str, filename: str) -> str:
     anchor = head.find("\nanswers:")
     if anchor != -1:
         return head[:anchor] + f"\n{entry}\n" + head[anchor:] + sep + tail
+    return f"{head.rstrip()}\n\n{entry}\n\n" + sep + tail
+
+
+def set_resume_name(text: str, name: str) -> str:
+    """Return `text` with the top-level `resume_name:` key set, or removed if blank.
+
+    Same three cases and the same reasons as `upsert_identity`: a live line is replaced
+    where it stands, a commented stub is filled in place rather than shadowed by a second
+    entry, and clearing deletes the key instead of writing an empty string — which would
+    load as an answer and send a file called `.pdf`.
+    """
+    entry = f"resume_name: {_quote(name.strip())}"
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("resume_name:") or stripped.startswith("# resume_name:"):
+            if name.strip():
+                lines[i] = entry
+            else:
+                del lines[i]
+            return "\n".join(lines)
+    if not name.strip():
+        return text
+
+    # Beside `resume:`, which is the key it qualifies.
+    for i, line in enumerate(lines):
+        if line.strip().startswith("resume:"):
+            return "\n".join(lines[: i + 1] + [entry] + lines[i + 1 :])
+    head, sep, tail = text.partition(GAP_MARKER)
     return f"{head.rstrip()}\n\n{entry}\n\n" + sep + tail
 
 

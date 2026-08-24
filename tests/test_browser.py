@@ -11,7 +11,9 @@ label discovery across the four conventions forms use, and writing into each inp
 
 import ast
 import inspect
+import pathlib
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -112,26 +114,29 @@ def _code_without_prose(module):
     return src
 
 
-def test_the_only_activation_in_this_module_is_the_submit_you_asked_for():
-    """There is exactly one click here, it is in `_submit`, and it is a real one.
+def test_the_only_activations_in_this_module_are_the_two_named_ones():
+    """Two clicks, in two functions, and each one presses a control that belongs to it.
 
-    This replaces the older rule that there was no click path at all. That rule carried
-    the reason — an application is irreversible and goes out under the user's name — but
-    the reason is now carried by the gate instead: `request_submit` refuses unless the
-    form is settled, the epoch matches, every required field is filled and the company
-    name has been typed, and `claim_submit` spends the one submit a session has under a
-    lock before the click happens.
-
-    What is asserted here is narrower and, for this purpose, stricter. A **click** on the
+    This has narrowed twice, not loosened. The first rule was that there was no click
+    path at all; then `_submit` gained one, behind a gate, because a **click** on the
     employer's own control runs their validation, their required-field checks and their
-    captcha hooks. `requestSubmit`, `form.submit` and a synthesized `dispatchEvent` all
+    captcha hooks, while `requestSubmit`, `form.submit` and a synthesized `dispatchEvent`
     skip some or all of that and send the form anyway — which is how you submit an
-    application the employer's own page would have rejected. So those stay banned, and
-    the one click stays where it can be read.
+    application the employer's own page would have rejected.
+
+    `_press` is here for the same reason one layer in. Greenhouse's current form has no
+    `<select>` on it; every dropdown is a react-select widget holding its value in
+    JavaScript, so `page.fill` typed a *search query* the widget never committed, the row
+    reported `filled`, and the submit gate counted an empty field as answered. The
+    widget's own option is the only thing that teaches it a value. What is asserted here
+    is that this remains two functions, reached from where they say they are reached
+    from — and that `_press` cannot reach a submit control, which is true structurally:
+    `_DISCOVER_JS` mints no handle for one.
     """
     code = _code_without_prose(browser)
-    assert code.count(".click(") == 1, "there is more than one click in this module"
-    assert ".click(" in inspect.getsource(browser._submit)
+    assert code.count(".click(") == 2, "there is an activation here that is not named"
+    assert ".click(" in _code_without_prose_of(browser._submit)
+    assert ".click(" in _code_without_prose_of(browser._press)
 
     # The mechanisms that would bypass the page's own checks, not the word: prose in
     # this module says "submit" a great many times.
@@ -141,13 +146,35 @@ def test_the_only_activation_in_this_module_is_the_submit_you_asked_for():
     # And nothing reaches that click except the hold loop, which reaches it only through
     # the armed flag. A second caller is how a code path arrives at sending somebody's
     # application without anybody having asked for it.
-    calls = re.compile(r"(?<![\w])_submit\(")
-    callers = sorted(name for name, obj in vars(browser).items()
-                     if callable(obj)
-                     and getattr(obj, "__module__", "") == browser.__name__
-                     and name != "_submit"
-                     and calls.search(inspect.getsource(obj)))
-    assert callers == ["_hold_until_closed"], callers
+    assert _callers_of("_submit") == ["_hold_until_closed"], _callers_of("_submit")
+    # `_press` is reached from three places, and all three operate one field's own
+    # widget: choosing a value in it, taking one back out, and opening it to read what it
+    # offers. Anywhere else is a click on something nobody asked to be pressed. `_pick`,
+    # in turn, is only ever a branch of the one writer.
+    assert _callers_of("_press") == ["_clear", "_pick", "_read_vocabulary"], \
+        _callers_of("_press")
+    assert _callers_of("_pick") == ["_write"], _callers_of("_pick")
+    # And reading a vocabulary must never *choose* one. It presses the widget's toggle
+    # twice — open, read, closed again — and the only thing it returns is text.
+    assert ".click(" not in _code_without_prose_of(browser._read_vocabulary)
+    assert _callers_of("_read_vocabulary") == ["_learn_vocabularies"]
+
+
+def _code_without_prose_of(fn) -> str:
+    src = inspect.getsource(fn)
+    doc = inspect.getdoc(fn)
+    return src.replace(doc, "") if doc else src
+
+
+def _callers_of(name: str) -> list:
+    calls = re.compile(r"(?<![\w])" + name + r"\(")
+    return sorted(
+        other for other, obj in vars(browser).items()
+        if callable(obj)
+        and getattr(obj, "__module__", "") == browser.__name__
+        and other != name
+        and calls.search(_code_without_prose_of(obj))
+    )
 
 
 def test_the_module_never_navigates_anywhere_but_the_apply_url():
@@ -1200,3 +1227,171 @@ def test_the_preview_is_the_whole_page_not_the_window():
     assert page.shot_kwargs.get("type") == "jpeg"
     # And the cadence pays for it: the whole page is ~8x the bytes of the viewport.
     assert browser.SHOT_EVERY_S >= 4.0
+
+
+# -- the modern Greenhouse form, as it actually is --------------------------------------
+# `tests/fixtures/greenhouse_react_form.html` is Twilio's real embedded application form,
+# captured 2026-08-23. Everything below asserts against it rather than against a hand-
+# written approximation, because every bug it is here for came from the gap between what
+# a form was assumed to look like and what one looks like. It has **no `<select>` on it
+# at all**: ten dropdowns, each a react-select combobox with a phantom validation input
+# beside it, and one nine-box checkbox set that is a single question.
+REAL_FORM = pathlib.Path(__file__).parent / "fixtures" / "greenhouse_react_form.html"
+
+
+def _read_real_form(tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser_ = pw.chromium.launch(headless=True)
+        page = browser_.new_page()
+        page.goto(REAL_FORM.as_uri(), wait_until="domcontentloaded")
+        found = page.evaluate(browser._DISCOVER_JS)
+        browser_.close()
+    return found, browser._fields_from_dom(found)
+
+
+@needs_browser
+def test_a_dropdown_is_read_as_a_dropdown_and_not_as_a_text_box(tmp_path):
+    """Greenhouse's current form has no `<select>` on it; every menu is a combobox.
+
+    Read as text, `page.fill` typed a search query the widget never committed — so the
+    field reported `filled` while the real form held nothing, and the submit gate counted
+    it as answered. The type is what separates "type anything" from "choose one of these".
+    """
+    _, fields = _read_real_form(tmp_path)
+    by_key = {f.key: f for f in fields}
+
+    assert by_key["country"].type == "combobox"
+    assert by_key["question_65614029"].type == "combobox"   # work authorization
+    assert not any(f.type == "text" and f.key == "country" for f in fields)
+    # And the plain text inputs are still plain text inputs.
+    assert by_key["first_name"].type == "text"
+    assert by_key["resume"].type == "file"
+
+
+@needs_browser
+def test_a_widgets_phantom_validation_input_is_not_a_question(tmp_path):
+    """react-select renders `<input required tabindex="-1" aria-hidden="true">` beside
+    every combobox to drive native validation.
+
+    It has no name and no id, so it keyed on a slug of the same label as the widget it
+    shadows: one dropdown, two identical rows on `/apply`, both marked required. And
+    because `Session.carried()` is keyed by field key, the phantom's stale value was
+    handed back to the real row on the next reading — which is what made typing into
+    Country revert to the prefilled "New York, New York" one poll later.
+    """
+    _, fields = _read_real_form(tmp_path)
+
+    keys = [f.key for f in fields]
+    assert len(keys) == len(set(keys)), "two fields share a key; one will overwrite the other"
+    # The pair this was found through: the combobox `id="country"` and a phantom that
+    # slugified "Country*" to the same string.
+    assert keys.count("country") == 1
+    labels = [f.label for f in fields]
+    assert labels.count("Country*") == 1
+
+
+@needs_browser
+def test_a_checkbox_set_is_one_question_with_nine_answers(tmp_path):
+    """"How did you hear about Twilio?" is one question. It used to be nine.
+
+    Each box carries its own label — "LinkedIn", "Glassdoor", "Careers Website" — and
+    reading those as questions put all nine into the gap list and into `answers.yaml`'s
+    stub block, asking the user to write an answer to the word "Glassdoor".
+    """
+    _, fields = _read_real_form(tmp_path)
+    heard = [f for f in fields if f.group == "How did you hear about Twilio? *"]
+
+    assert len(heard) == 9, [f.label for f in fields if "hear" in f.label.lower()]
+    assert {f.label for f in heard} == {"How did you hear about Twilio? *"}
+    assert "LinkedIn" in {f.option for f in heard}
+    # Every member knows the whole vocabulary, which is what lets `match_option` check an
+    # answer and what lets the page render the set as a menu.
+    assert "Glassdoor" in heard[0].options
+    # And it is one gap, not nine.
+    assert len(browser._one_per_question(heard)) == 1
+
+    # A lone consent checkbox is not a menu. Grouping it would invent a question whose
+    # only option is also its own label.
+    consent = [f for f in fields if f.option == "Acknowledge"]
+    assert consent == [], [f.label for f in consent]
+
+
+@needs_browser
+def test_a_combobox_learns_its_vocabulary_from_what_the_ats_published(tmp_path):
+    """A combobox never carries its own options; Greenhouse's API publishes all of them.
+
+    The keys agree across the two sources — the API calls the question
+    `question_65614029` and the rendered input carries that as its `id` — so a form read
+    once through the API answers what a DOM reading cannot see.
+    """
+    _, fields = _read_real_form(tmp_path)
+    known = {"question_65614029": ["Yes", "No"]}
+
+    lent = {f.key: f for f in browser._with_known_options(fields, known)}
+    assert lent["question_65614029"].options == ("Yes", "No")
+    # And nothing else is touched: a field that had options keeps them, and one nobody
+    # published stays honestly empty rather than borrowing somebody else's.
+    assert lent["country"].options == ()
+    assert lent["first_name"].options == ()
+
+
+# -- what an employer's copy of the resume is called -------------------------------------
+def test_the_resume_goes_out_under_a_name_a_person_would_have_chosen(tmp_path):
+    """Playwright sends the basename on disk, and the disk names here are minted for
+    collision safety: `twilio_7816159_1f4c9a02.pdf`, or one with a field handle in it.
+    That is what a recruiter opens."""
+    cv = tmp_path / "twilio_7816159_1f4c9a02.pdf"
+    cv.write_bytes(b"%PDF-1.4 x")
+
+    assert browser._upload(str(cv)) == str(cv)          # unset: the disk name
+    payload = browser._upload(str(cv), "Dylan Dodds Resume.pdf")
+    assert payload["name"] == "Dylan Dodds Resume.pdf"
+    assert payload["mimeType"] == "application/pdf"
+    assert payload["buffer"] == b"%PDF-1.4 x"
+
+
+def test_the_extension_always_comes_from_the_real_file():
+    """So renaming a PDF to `.docx` in a text box cannot mislabel what is attached."""
+    answers = SimpleNamespace(resume_name="Dylan_Dodds_Resume.docx")
+
+    assert browser._upload_name(answers, "resume", "/x/y.pdf") == "Dylan_Dodds_Resume.pdf"
+    assert browser._upload_name(answers, "cover_letter", "/x/y.pdf") == "cover_letter.pdf"
+    # Nothing else is a file, and nothing else gets renamed.
+    assert browser._upload_name(answers, "first_name", "Dylan") == ""
+    # No setting means `resume<ext>`, not the ugly disk name.
+    assert browser._upload_name(SimpleNamespace(resume_name=""), "resume",
+                                "/x/twilio_1_ab.pdf") == "resume.pdf"
+
+
+# -- one question is one gap, on the report as well as in the database -------------------
+@needs_browser
+def test_the_gap_list_names_a_question_once(tmp_path, answers):
+    """The count on the card and the list `apply-to` prints have to say the same thing as
+    the database, or a nine-box question reads as nine things left to do."""
+    page = tmp_path / "form.html"
+    page.write_text(REAL_FORM.read_text())
+
+    conn = store.connect(":memory:")
+    report = browser.fill_application(
+        conn,
+        company=Company(name="Twilio", ats="", slug="twilio", tier=2),
+        ats_job_id="7816159",
+        url=page.as_uri(),
+        answers=answers,
+        today=TODAY,
+        user_data_dir=tmp_path / "profile",
+        headless=True,
+        wait=False,
+    )
+
+    heard = [g for g in report.gaps if g.label.startswith("How did you hear")]
+    assert len(heard) == 1, [g.label for g in report.gaps]
+    rows = conn.execute(
+        "SELECT question_key FROM prefill_gaps WHERE ask LIKE 'How did you hear%'"
+    ).fetchall()
+    assert [r["question_key"] for r in rows] == ["how_did_you_hear_about_twilio"]
+    # And the phone-number country selector is not filled from an identity location.
+    assert "Country*" not in {f.label for f in report.filled}
+    conn.close()

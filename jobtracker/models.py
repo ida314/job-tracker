@@ -114,18 +114,37 @@ class FormField:
     `key` is the ATS's own field name where there is one (`first_name`, `question_681…`)
     and a slug of the label where there is not. `options` is empty for anything that is
     not a select; a select with no options is a form we failed to read properly, not a
-    select with nothing to choose.
+    select with nothing to choose — with one exception, `combobox`, below.
+
+    `group` and `option` exist because **one question is often several inputs**, and the
+    two halves have to stay distinguishable. A "How did you hear about us?" checkbox set
+    is one question with nine answers, not nine questions: every member carries the
+    question in `label`/`group` and its own choice in `option`, and the whole choice list
+    in `options`. Without this the gap loop asks you to answer "Glassdoor" as though it
+    were a question, which is what it did until 2026-08-23.
+
+    `combobox` is a dropdown whose options are **not** in the DOM — a react-select widget,
+    which is what every Greenhouse dropdown is now. Empty `options` there means "we do not
+    know this field's vocabulary", which is a different statement from a `select` with no
+    options, and it is why the model is not allowed to point at one.
     """
 
     key: str
     label: str
-    type: str  # text | textarea | select | multiselect | file | checkbox
+    type: str  # text | textarea | select | multiselect | combobox | file | checkbox
     required: bool = False
     options: tuple[str, ...] = ()
+    group: str = ""   # the question, when this input is one of several answering it
+    option: str = ""  # this input's own choice within that question
 
     @property
     def is_file(self) -> bool:
         return self.type == "file"
+
+    @property
+    def is_choice(self) -> bool:
+        """Whether a value has to come from a vocabulary rather than being typed."""
+        return self.type in ("select", "multiselect", "combobox")
 
 
 @dataclass

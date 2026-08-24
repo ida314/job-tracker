@@ -44,7 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -89,6 +89,26 @@ def unavailable_reason() -> Optional[str]:
 # found. Runs in the page rather than through locators because the label for an input is
 # a DOM-shaped question — four different conventions, tried in order of reliability —
 # and answering it once in JS beats four round trips per field.
+#
+# Three things here are load-bearing and were each learned from a live form:
+#
+#   * `aria-hidden` is skipped. react-select renders a phantom `<input required
+#     tabindex="-1" aria-hidden="true">` beside every combobox to drive native
+#     validation. It has no name and no id, so it keyed on a slug of the *same* label as
+#     the widget it shadows — one dropdown appearing twice on `/apply`, and, because
+#     `Session.carried()` is keyed by field key, the phantom's stale value silently
+#     overwriting whatever you had just typed into the real one. Observed on Twilio's
+#     Greenhouse form, 2026-08-23.
+#   * A combobox is a dropdown, not a text box. Greenhouse's current form has **no
+#     `<select>` elements at all**; every dropdown is `<input role="combobox">` over a
+#     JS-rendered listbox. Reading it as text meant `page.fill` typed search text that
+#     the widget never committed — so the row said `filled` while the real form held
+#     nothing, and the submit gate counted it as answered.
+#   * A checkbox or radio set is **one question**. Its members are grouped by fieldset,
+#     by Greenhouse's `description` attribute, or by a shared `name`, and each carries
+#     the question in `group` and its own choice in `option`. Ungrouped, "How did you
+#     hear about Twilio?" arrived as nine separate questions called "LinkedIn",
+#     "Glassdoor", "Careers Website" and so on.
 _DISCOVER_JS = """
 () => {
   const skip = new Set(['hidden', 'submit', 'button', 'image', 'reset']);
@@ -118,6 +138,37 @@ _DISCOVER_JS = """
     return (el.getAttribute('placeholder') || el.getAttribute('name') || '').trim();
   };
 
+  // The question a checkbox or radio belongs to, when it is one answer among several.
+  // Order is most-specific first: an explicit fieldset legend, then the `description`
+  // attribute Greenhouse stamps on every member of a set, then nothing.
+  const groupFor = (el) => {
+    const set = el.closest('fieldset');
+    if (set) {
+      const legend = set.querySelector('legend');
+      if (legend && text(legend)) return text(legend);
+    }
+    const described = el.getAttribute('description');
+    if (described && described.trim()) return described.trim();
+    return '';
+  };
+
+  const clean = (s) => (s || '').replace(/\\s+/g, ' ').trim().slice(0, 300);
+
+  const isCombobox = (el) => {
+    if (el.tagName.toLowerCase() !== 'input') return false;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (role === 'combobox') return true;
+    return el.getAttribute('aria-haspopup') === 'true'
+        && (el.getAttribute('aria-autocomplete') || '').toLowerCase() === 'list';
+  };
+
+  // Handles are renumbered from scratch every pass, so a tag left on an element this
+  // pass does not reach would make `jt5` match two things. Clearing first is what keeps
+  // "a handle names one input" true rather than nearly true.
+  for (const attr of ['data-jt-id', 'data-jt-ctl', 'data-jt-opt']) {
+    for (const el of document.querySelectorAll(`[${attr}]`)) el.removeAttribute(attr);
+  }
+
   const out = [];
   let n = 0;
   const nodes = document.querySelectorAll(
@@ -128,20 +179,33 @@ _DISCOVER_JS = """
     const type = (el.getAttribute('type') || '').toLowerCase();
     if (tag === 'input' && skip.has(type)) continue;
     if (el.disabled) continue;
+    // A shadow input a widget keeps for validation, never a question. See the note above.
+    if (el.getAttribute('aria-hidden') === 'true') continue;
     if (!el.offsetParent && el.type !== 'file') continue;   // not rendered
 
     const handle = 'jt' + n++;
     el.setAttribute('data-jt-id', handle);
+    if (isCombobox(el)) {
+      // The widget's control, which — unlike its input — survives being interacted
+      // with. react-select remounts `input.select__input` the moment anything types
+      // into it, so a handle on the input alone names nothing a moment later.
+      const ctl = el.closest('[class*="control"]') || el.parentElement;
+      if (ctl) ctl.setAttribute('data-jt-ctl', handle);
+    }
 
     let kind = 'text';
     if (tag === 'select') kind = el.multiple ? 'multiselect' : 'select';
     else if (tag === 'textarea') kind = 'textarea';
     else if (type === 'file') kind = 'file';
     else if (type === 'checkbox' || type === 'radio') kind = 'checkbox';
+    else if (isCombobox(el)) kind = 'combobox';
 
     const options = tag === 'select'
       ? Array.from(el.options).map((o) => o.label || o.text).filter(Boolean)
       : [];
+
+    const own = clean(labelFor(el));
+    const group = kind === 'checkbox' ? clean(groupFor(el)) : '';
 
     out.push({
       handle,
@@ -152,11 +216,34 @@ _DISCOVER_JS = """
       // to recognize the one field that matters most. Observed on a live board,
       // 2026-08-13.
       elementId: el.getAttribute('id') || '',
-      label: labelFor(el).replace(/\\s+/g, ' ').slice(0, 300),
+      // The question. For a grouped checkbox that is the set's question, not this
+      // box's own text, which is an *answer* and lives in `option`.
+      label: group || own,
+      group,
+      option: group ? own : '',
       type: kind,
       required: el.required === true || el.getAttribute('aria-required') === 'true',
       options,
     });
+  }
+
+  // A set's members each know their own choice; only together do they know the whole
+  // vocabulary. Second pass, because the first cannot see members it has not reached.
+  const byGroup = new Map();
+  for (const f of out) {
+    if (!f.group) continue;
+    const key = (f.name || f.group);
+    if (!byGroup.has(key)) byGroup.set(key, []);
+    byGroup.get(key).push(f);
+  }
+  for (const members of byGroup.values()) {
+    const choices = members.map((m) => m.option).filter(Boolean);
+    // A set of one is a lone consent checkbox, not a menu. Leaving it grouped would
+    // render an "Acknowledge" question whose single option is also "Acknowledge".
+    for (const m of members) {
+      m.options = choices;
+      m.groupSize = members.length;
+    }
   }
   return out;
 }
@@ -329,24 +416,89 @@ def _launch(playwright, user_data_dir: Path, headless: bool):
     )
 
 
-def _fields_from_dom(found: list) -> list[FormField]:
-    """DOM findings into the shared vocabulary.
+def _field_from_dom(f: dict) -> FormField:
+    """One DOM finding in the shared vocabulary.
 
     Key preference is name, then id, then a slug of the label. `name` first because
     that is what the ATS's own API calls the field, so a form learned from the DOM and
     one learned from the API agree; `id` next because Greenhouse's current UI sets no
     names at all; the label slug last, as the thing that always exists.
+
+    A member of a checkbox set gets the set's key with its own choice appended, because
+    the two facts it has to carry pull in opposite directions: every member is a separate
+    input that has to be individually addressable, while the *question* they answer is
+    one. Keying every member on the shared name would collapse nine checkboxes onto one
+    row; keying them on their own labels made nine questions out of one. `question_x[]`
+    plus `::linkedin` is both.
     """
-    return [
-        FormField(
-            key=(f["name"] or f.get("elementId") or slugify(f["label"]) or f["handle"]),
-            label=f["label"] or f["name"] or f.get("elementId") or f["handle"],
-            type=f["type"],
-            required=bool(f["required"]),
-            options=tuple(f["options"]),
-        )
-        for f in found
-    ]
+    group = f.get("group") or ""
+    # A set of one is a consent checkbox, not a menu — see `_DISCOVER_JS`.
+    if group and int(f.get("groupSize") or 1) < 2:
+        group = ""
+    base = f["name"] or f.get("elementId") or slugify(f["label"]) or f["handle"]
+    label = f["label"] or f["name"] or f.get("elementId") or f["handle"]
+    if group:
+        key = f"{f['name'] or slugify(group)}::{slugify(f.get('option') or f['handle'])}"
+    else:
+        key = base
+    return FormField(
+        key=key,
+        label=label,
+        type=f["type"],
+        required=bool(f["required"]),
+        options=tuple(f["options"]),
+        group=group,
+        option=(f.get("option") or "") if group else "",
+    )
+
+
+def _fields_from_dom(found: list) -> list[FormField]:
+    """DOM findings into the shared vocabulary, in the order they were read."""
+    return [_field_from_dom(f) for f in found]
+
+
+def _one_per_question(fields) -> list[FormField]:
+    """One entry per question, keeping the first member of each set.
+
+    The mirror needs every member — each is an input you can tick — but the gap loop and
+    the answer bank need the *question*, once. First-wins keeps the form's own order.
+    """
+    seen: set = set()
+    out = []
+    for field_ in fields:
+        ident = field_.group or field_.key
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(field_)
+    return out
+
+
+def _with_known_options(fields: list[FormField], known: dict) -> list[FormField]:
+    """Lend a field the option list a previous reading of this company's form knew.
+
+    A `combobox` never carries its own options: react-select renders the listbox only
+    once it is opened, so the DOM says nothing about what the field will accept. The ATS
+    usually does — Greenhouse publishes every option of every question at
+    `?questions=true`, keyed by exactly the names the DOM reports (`question_65614029`,
+    `question_65614028[]`) — and `store.upsert_form_field` keeps whatever it learned.
+
+    Without this the page renders a text box where a menu belongs and the model is asked
+    about a vocabulary nobody can check. With it, one prefill run teaches every dropdown
+    on that form what it accepts, permanently.
+    """
+    if not known:
+        return fields
+    out = []
+    for field_ in fields:
+        if field_.options or not field_.is_choice:
+            out.append(field_)
+            continue
+        # A grouped member's key carries its own choice; the ATS knows the question.
+        stem = field_.key.split("::", 1)[0]
+        options = known.get(field_.key) or known.get(stem)
+        out.append(replace(field_, options=tuple(options)) if options else field_)
+    return out
 
 
 def _discover(page) -> tuple:
@@ -473,6 +625,7 @@ def fill_application(
                 # disagree about which URL was opened.
                 session.retarget(target)
                 session.set_phase(live.FILLING)
+                session.upload_name = (getattr(answers, "resume_name", "") or "").strip()
             page.goto(target, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(1500)  # let a SPA render its form
 
@@ -482,7 +635,14 @@ def fill_application(
             # and that discovery happened here.
             found, surface = _discover(page)
             report.discovered = len(found)
-            fields = _fields_from_dom(found)
+            fields = _with_known_options(
+                _fields_from_dom(found), store.known_options(conn, company.name)
+            )
+            # Anything still without a vocabulary is asked for its own. A dropdown whose
+            # options nothing knows is one `match_option` cannot check an answer against
+            # and the page cannot render as a menu — which is how a phone-number country
+            # selector came to be treated as a free-text box and filled with a city.
+            fields = _learn_vocabularies(surface, found, fields)
             log.info("%s: %d field(s) on %s", company.name, len(fields), target)
 
             unfilled_required: list[str] = []
@@ -509,24 +669,30 @@ def fill_application(
 
                 if value is None:
                     report.gaps.append(field_)
-                    statuses[raw["handle"]] = (live.GAP, "")
+                    statuses[raw["handle"]] = (live.GAP, "", None)
                     if field_.required:
                         unfilled_required.append(raw["handle"])
                     _remember(conn, company.name, field_, None, today)
                     continue
 
-                if _write(surface, raw, value):
+                if _write(surface, raw, value, _upload_name(answers, question_key,
+                                                             value)):
                     report.filled.append(Filled(
                         handle=raw["handle"], label=field_.label,
                         type=field_.type, value=value, question_key=question_key,
                     ))
-                    statuses[raw["handle"]] = (live.FILLED, value)
+                    statuses[raw["handle"]] = (live.FILLED, value, question_key)
                     _remember(conn, company.name, field_, question_key, today)
                 else:
                     report.gaps.append(field_)
-                    statuses[raw["handle"]] = (live.REFUSED, "")
+                    statuses[raw["handle"]] = (live.REFUSED, "", question_key)
                     if field_.required:
                         unfilled_required.append(raw["handle"])
+                    # A refused answer must not be remembered as this question's key.
+                    # `known_question_keys` replays whatever is stored here as a
+                    # deterministic alias at *every* company, so one guess the rules
+                    # then rejected becomes permanent, unreviewable, and model-free.
+                    # That is how "Country*" came to mean `location` on three boards.
                     _remember(conn, company.name, field_, None, today)
 
             # One visible question can be several inputs — Greenhouse renders a combobox
@@ -534,7 +700,14 @@ def fill_application(
             # a textarea. Once any of them holds the answer, the question is answered,
             # and listing its siblings would send the user off to answer it again.
             satisfied = {f.label for f in report.filled if f.label}
-            report.gaps = [g for g in report.gaps if g.label not in satisfied]
+            # A checkbox set is one question, so it is one gap. Its members share a label
+            # and differ only in which answer they are, and asking the user to answer
+            # "Glassdoor" as though it were a question is what listing each of them did.
+            # Collapsed on the report itself, not only on the way to the database, so the
+            # count on the card and the list `apply-to` prints say the same thing.
+            report.gaps = _one_per_question(
+                g for g in report.gaps if g.label not in satisfied
+            )
 
             for field_ in report.gaps:
                 if store.record_gap(
@@ -554,7 +727,7 @@ def fill_application(
             if session is not None:
                 # Keyed by field key for the carry-over, because that is what survives a
                 # later reading; `rows_from` does the rest.
-                carried = {f.key: statuses.get(r["handle"], (live.PENDING, ""))
+                carried = {f.key: statuses.get(r["handle"], (live.PENDING, "", None))
                            for r, f in zip(found, fields)}
                 session.absorb(live.rows_from(found, fields, carried))
                 session.set_submit_control(_find_submit(surface))
@@ -791,7 +964,10 @@ def _obey(session, page, command) -> None:
     # `_write` is the only writer, here as in the fill. It takes the raw DOM finding, of
     # which it reads exactly two keys — so the mirror row stands in for it directly and
     # no second write path exists to keep in step with the first.
-    raw = {"handle": row["handle"], "type": row["type"], "label": row["label"]}
+    raw = {"handle": row["handle"], "type": row["type"], "label": row["label"],
+           # A box in a set answers with its own choice, so `_write` has to know which
+           # one this is; without it every tick is compared against "yes" and refused.
+           "option": row.get("option") or ""}
 
     if command.kind == live.CLEAR:
         done, status = _clear(page, raw), live.CLEARED
@@ -806,7 +982,11 @@ def _obey(session, page, command) -> None:
             log.debug("empty set for %s — clear it if that is what you meant",
                       command.handle)
             return
-        done, status = _write(page, raw, command.value), live.FILLED
+        name = ""
+        if row["type"] == "file":
+            stem = Path(session.upload_name).stem if session.upload_name else "resume"
+            name = f"{stem}{Path(command.value).suffix}"
+        done, status = _write(page, raw, command.value, name), live.FILLED
 
     if done:
         session.mark(command.handle, status, command.value)
@@ -866,7 +1046,271 @@ def _shoot(session, surface) -> None:
     )
 
 
-def _write(page, raw: dict, value: str) -> bool:
+# How long a combobox gets to render its menu, and how far down it we will read. The
+# timeout is short because the menu is client-side — nothing is fetched — and a widget
+# that has not opened in a second is not going to.
+_MENU_SETTLE_MS = 350
+# A place lookup fetches per keystroke, so this one waits on a network round trip.
+_SEARCH_SETTLE_MS = 1500
+
+# How many unpublished dropdowns one visit will open to read. Each is two presses and a
+# settle, so ~0.8s; a Greenhouse form has ten or so, and the answer is kept forever.
+MAX_VOCABULARIES = 30
+
+_UPLOAD_TYPES = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ),
+}
+
+
+def _press(locator, why: str) -> None:
+    """Press one control belonging to the field being written. The only widget click here.
+
+    Every activation in this module goes through either this or `_submit`, and keeping
+    them to two makes the rule readable rather than counted: `_submit` presses the
+    *employer's* button, once, behind a gate; this presses a *widget's* own control —
+    an option in its listbox, or its clear indicator — as part of writing or emptying the
+    one field whose handle was passed in.
+
+    Why a press rather than a synthesized event: react-select, which is what every
+    Greenhouse dropdown is now, keeps its value in JavaScript. Setting `.value` or firing
+    a made-up event leaves the widget's own state holding the old answer, so the field
+    repopulates itself and the form goes out with something nobody typed. The control's
+    own handler is the only thing that teaches it. That is the same argument
+    `_clear`'s docstring already makes about Playwright primitives over `.value = ''`,
+    one widget further in.
+
+    It cannot reach a submit control. `_DISCOVER_JS` mints no handle for one, and every
+    locator that arrives here is scoped to a listbox or a clear indicator owned by a
+    discovered field.
+    """
+    log.debug("pressing %s", why)
+    locator.click()
+
+
+def _chose(value: str, option: str) -> bool:
+    """Whether an answer names this member of a checkbox set.
+
+    A set's answer may name several of its choices, so `|` and `,` both separate them —
+    the same separator `record_gap` already renders option lists with. Matching is
+    `normalize_label`'d so "Careers Website" and "careers website" are one answer.
+    """
+    wanted = {normalize_label(part) for part in str(value).replace("|", ",").split(",")}
+    wanted.discard("")
+    return normalize_label(option) in wanted
+
+
+# Finds the option a combobox is being asked for, once its menu is open.
+#
+# Scoped by containment, and asked *now* rather than at discovery, because that is when
+# the question can be answered: react-select mounts its menu in a shell two levels above
+# the control (measured on Twilio's live form, 2026-08-23), and intl-tel-input puts its
+# country list somewhere else again. An unscoped `[role="option"]` is not an option: that
+# same page holds 244 of them belonging to the phone widget, so a global query would pick
+# a country out of a menu nobody opened.
+#
+# Matching is `normalize_label`'s rule, in JS, so a stored answer and a rendered option
+# agree here exactly as they do in `match_option`.
+_OPTION_JS = """
+(args) => {
+  const norm = (s) => {
+    let out = '';
+    for (const ch of (s || '')) out += /[a-z0-9]/i.test(ch) ? ch.toLowerCase() : ' ';
+    return out.split(/\\s+/).filter(Boolean).join(' ');
+  };
+  const ctl = document.querySelector(`[data-jt-ctl="${args.handle}"]`);
+  if (!ctl) return null;
+
+  let options = [];
+  for (let scope = ctl, hops = 0; scope && hops < 6; hops++, scope = scope.parentElement) {
+    options = Array.from(scope.querySelectorAll('[role="option"]'));
+    if (options.length) break;
+  }
+  if (!options.length) return {opened: false, offered: []};
+
+  const wanted = norm(args.value);
+  const offered = options.map((o) => (o.innerText || o.textContent || '').trim());
+  for (let i = 0; i < options.length; i++) {
+    if (norm(offered[i]) === wanted) {
+      options[i].setAttribute('data-jt-opt', args.handle);
+      return {opened: true, chose: offered[i], offered: offered.slice(0, 40)};
+    }
+  }
+  return {opened: true, chose: null, offered: offered.slice(0, 40)};
+}
+"""
+
+
+_VOCABULARY_JS = """
+(handle) => {
+  const ctl = document.querySelector(`[data-jt-ctl="${handle}"]`);
+  if (!ctl) return [];
+  for (let scope = ctl, hops = 0; scope && hops < 6; hops++, scope = scope.parentElement) {
+    const found = Array.from(scope.querySelectorAll('[role="option"]'));
+    if (found.length) {
+      return found.map((o) => (o.innerText || o.textContent || '').trim())
+                  .filter(Boolean).slice(0, 400);
+    }
+  }
+  return [];
+}
+"""
+
+
+def _read_vocabulary(page, handle: str) -> list:
+    """Open one combobox, read what it offers, close it again. Never chooses anything.
+
+    A combobox holds its options in JavaScript and renders them only while its menu is
+    open, so this is the only way to know what one accepts — and knowing is what turns a
+    row on `/apply` from a text box with a warning into a menu you pick from. It is also
+    what lets `match_option` check a stored answer before it is typed into a real
+    application, which is the guard that was missing when identity `location` — "New
+    York, New York" — was written into a phone-number country selector.
+
+    Read once per company and kept: `store.upsert_form_field` no longer lets a later pass
+    erase an option list, so a first visit teaches that employer's form permanently.
+
+    Nothing here moves a value. Both presses are the widget's own toggle, scoped to this
+    field's control, and the menu is left the way it was found.
+    """
+    control = page.locator(f'[data-jt-ctl="{handle}"]')
+    if not control.count():
+        return []
+    try:
+        _press(control.first, f"opening {handle} to read its options")
+        page.wait_for_timeout(_MENU_SETTLE_MS)
+        offered = page.evaluate(_VOCABULARY_JS, handle)
+        _press(control.first, f"closing {handle}")
+        return [str(o) for o in offered]
+    except Exception as exc:  # noqa: BLE001 — an unreadable menu is a gap, not a crash
+        log.debug("could not read the options of %s: %s", handle, exc)
+        return []
+
+
+def _learn_vocabularies(page, found: list, fields: list) -> list:
+    """Give every dropdown whose options nobody published the ones it actually offers.
+
+    Bounded, because this is the one part of a visit that costs a round trip per field:
+    only choice-typed fields that have no options already, and at most
+    `MAX_VOCABULARIES` of them. Anything past the cap keeps an empty option list, which
+    the page renders as a text box and says so — understating what is known, never
+    overstating it.
+    """
+    out, budget = [], MAX_VOCABULARIES
+    for raw, field_ in zip(found, fields):
+        if field_.options or not field_.is_choice or budget <= 0:
+            out.append(field_)
+            continue
+        budget -= 1
+        offered = _read_vocabulary(page, raw["handle"])
+        if offered:
+            log.debug("%s offers %d option(s)", field_.label[:40], len(offered))
+        out.append(replace(field_, options=tuple(offered)) if offered else field_)
+    return out
+
+
+def _pick(page, handle: str, value: str) -> bool:
+    """Choose `value` from a combobox by pressing its own option. False if it is not there.
+
+    This is where the module's second click lives, and it is here because the alternative
+    is worse than a click. Greenhouse's current form has no `<select>` on it; every
+    dropdown is a react-select widget holding its value in JavaScript. `page.fill` sets
+    the search box and the widget throws it away on the next render — measured against
+    the live form, where `aria-expanded` stayed false, the input's value came back empty,
+    and the input element itself had been remounted, taking the handle with it. Nothing
+    was chosen, the form held nothing, and the row nonetheless reported `filled` and
+    passed the submit gate. A form that says it is answered while it is empty is exactly
+    the absence-read-as-success failure this project exists to avoid, reaching the one
+    page where the consequence is an application going out blank.
+
+    So the widget is operated the way a person operates it: open it, read what it offers,
+    press the one that matches. Everything that would bypass its own handlers —
+    `keyboard.press`, `dispatchEvent`, assigning `.value` — stays banned, and every
+    element touched is found by walking out from *this field's* control. It cannot reach
+    a submit control: `_DISCOVER_JS` mints no handle for one.
+
+    Not finding the option is a refusal, not an error, and the menu is closed again on
+    the way out. Typing an answer the menu does not offer is the mistake `match_option`
+    exists to prevent, one layer down.
+    """
+    control = page.locator(f'[data-jt-ctl="{handle}"]')
+    if not control.count():
+        log.debug("no combobox control for %s", handle)
+        return False
+    _press(control.first, f"combobox {handle}")
+    page.wait_for_timeout(_MENU_SETTLE_MS)
+
+    found = page.evaluate(_OPTION_JS, {"handle": handle, "value": value})
+    if not found or not found.get("opened"):
+        # Some widgets have nothing to show until you type — Greenhouse's location field
+        # is a place-lookup that fetches its suggestions per keystroke, so an opened menu
+        # is genuinely empty and stays empty. Typing here is typing into the widget's own
+        # search box, which is now focused and live: the same `fill` refused to do
+        # anything at all while it was closed, because react-select had thrown the value
+        # away on its next render.
+        try:
+            page.fill(f'[data-jt-ctl="{handle}"] input', value)
+        except Exception as exc:  # noqa: BLE001 — an untypeable widget is a refusal
+            log.debug("combobox %s would not take a search: %s", handle, exc)
+            return False
+        page.wait_for_timeout(_SEARCH_SETTLE_MS)
+        found = page.evaluate(_OPTION_JS, {"handle": handle, "value": value})
+    if not found or not found.get("opened"):
+        log.debug("combobox %s did not open a menu", handle)
+        return False
+    if not found.get("chose"):
+        log.debug("combobox %s does not offer %r (offers %s)",
+                  handle, value, ", ".join(found.get("offered", [])[:8]))
+        _press(control.first, f"closing combobox {handle}")
+        return False
+
+    _press(page.locator(f'[data-jt-opt="{handle}"]').first, f"option {found['chose']!r}")
+    return True
+
+
+def _upload_name(answers, question_key, value: str) -> str:
+    """The filename an employer should see, for a file field. Empty means "the disk name".
+
+    The disk name is minted for collision safety and reads like it —
+    `twilio_7816159_1f4c9a02.pdf`, and from the `/apply` file box one with the field
+    handle in it. A person opens this file. `resume_name` in the answer bank is what they
+    should see, defaulting to `resume<ext>`; the suffix is always the real file's, never
+    the configured one, so renaming a `.pdf` to `.docx` in a text box cannot mislabel it.
+    """
+    if question_key not in ("resume", "cover_letter"):
+        return ""
+    suffix = Path(value).suffix
+    if question_key == "cover_letter":
+        return f"cover_letter{suffix}"
+    chosen = (getattr(answers, "resume_name", "") or "").strip()
+    stem = Path(chosen).stem if chosen else "resume"
+    return f"{stem}{suffix}"
+
+
+def _upload(value: str, upload_name: str = "") -> dict | str:
+    """What `set_input_files` should send: the path, or a payload under a chosen name.
+
+    Playwright sends the basename on disk, and this project's disk names are minted for
+    collision safety — `twilio_7816159_1f4c9a02.pdf`, or, from the `/apply` file box,
+    one with the field handle baked into it. That name is what a person at the other end
+    opens. Reading the bytes and naming them explicitly is the only way to keep the disk
+    name safe and the sent name human, and it costs one read of a file we are about to
+    upload anyway.
+    """
+    path = Path(value)
+    if not upload_name or upload_name == path.name:
+        return str(path)
+    return {
+        "name": upload_name,
+        "mimeType": _UPLOAD_TYPES.get(path.suffix.lower(), "application/octet-stream"),
+        "buffer": path.read_bytes(),
+    }
+
+
+def _write(page, raw: dict, value: str, upload_name: str = "") -> bool:
     """Put `value` in one field. False if the field would not take it.
 
     Refusing is a real outcome, not an error: a dropdown that does not offer the option
@@ -880,12 +1324,23 @@ def _write(page, raw: dict, value: str) -> bool:
             path = Path(value)
             if not path.is_file():
                 return False
-            page.set_input_files(selector, str(path))
+            page.set_input_files(selector, _upload(value, upload_name))
             return True
         if kind in ("select", "multiselect"):
             page.select_option(selector, label=value)
             return True
+        if kind == "combobox":
+            return _pick(page, raw["handle"], value)
         if kind == "checkbox":
+            # A member of a set is checked when the answer names *its* choice. Falling
+            # back to the yes/true/1/on reading would tick every box in a nine-option
+            # "how did you hear about us" the moment any of them was answered.
+            option = raw.get("option") or ""
+            if option:
+                if not _chose(value, option):
+                    return False
+                page.check(selector)
+                return True
             if str(value).strip().lower() in ("yes", "true", "1", "on"):
                 page.check(selector)
                 return True
@@ -922,6 +1377,17 @@ def _clear(page, raw: dict) -> bool:
             return True
         if kind in ("select", "multiselect"):
             page.select_option(selector, [])
+            return True
+        if kind == "combobox":
+            # The widget's own clear indicator, scoped to this field's control. Emptying
+            # the search box would not do it — the *chosen* value lives in the widget's
+            # state, so the row would report cleared over a field still holding an
+            # answer. A widget with no clear control cannot be emptied, and saying so is
+            # the honest outcome rather than a status nothing backs.
+            clear = page.locator(f'[data-jt-ctl="{raw["handle"]}"] [class*="clear"]')
+            if not clear.count():
+                return False
+            _press(clear.first, "combobox clear indicator")
             return True
         if kind == "checkbox":
             page.uncheck(selector)

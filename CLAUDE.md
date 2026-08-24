@@ -843,13 +843,33 @@ names what is missing, and an on-demand browser that carries the plan to the pag
 - **The browser never submits.** There is no click path in `browser.py` at all and a
   test asserts it against the source (no `.click(`, `.press(`, `requestSubmit`,
   `dispatchEvent`). An application is irreversible and goes out under the user's name.
+  (Superseded twice: `_submit` gained the one gated click on 2026-08-22, and `_press`
+  gained the widget click on 2026-08-23 — see "Reading a form as it actually is" below.
+  The ban on `requestSubmit`/`form.submit`/`dispatchEvent`/`keyboard.press` never moved.)
 - **The model may only point, never write.** Its schema is an enum of answer keys the
   user already wrote plus `none`. There must be no code path by which a sentence the
   model composed reaches a form field — free text with no stored answer is a gap, the
   same as an unanswered dropdown. It is the fourth bounded role in DESIGN.md §8, and the
   narrowest.
 - **A dropdown that does not offer our answer is a gap, not a fill.** Picking the nearest
-  option puts an answer the candidate did not give onto a submitted application.
+  option puts an answer the candidate did not give onto a submitted application. Extended
+  2026-08-23: a dropdown whose options we cannot *see* is also not something the model may
+  point at (`prefill.vocabulary_known`). `match_option` waves any string through when
+  `options` is empty, which is right for a text box and, for a menu, is a statement that
+  nothing checked it — and that is how identity `location` ("New York, New York") ended
+  up in a phone-number country selector. An `exact` canonical match or an alias the *user*
+  wrote is still allowed through; only the model is held to it.
+- **A resolved `question_key` is only stored when it actually placed a value.**
+  `known_question_keys` replays it as a deterministic alias at every company, so storing
+  one the rules then refused turned a guess into a rule nothing would reconsider.
+  `jobtracker forget-question "<label>"` is the way back out, and it moves all three
+  places that hold the decision — the `form_fields` key, the closed `prefill_gaps` row,
+  and the `prefill_plans` whose stored value beats a fresh `resolve_field`.
+- **The name a resume goes out under is a setting, not the name on disk.** Disk names are
+  minted for collision safety (`resumes.stored_name`) and read like it; `resume_name` in
+  the answer bank is what a person at the other end opens, defaulting to `resume<ext>`.
+  The suffix always comes from the real file. It is **not** in `Answers.hash` — it changes
+  no answer in any field, and folding it in would re-plan every posting for a rename.
 - **Gaps are split generic vs company-specific** (2026-08-16). `prefill.split_gaps`:
   generic = a key in `GENERIC_KEYS` *or* asked by 2+ employers, sorted by ask count
   descending; everything else groups under its one company. No new state and no
@@ -890,8 +910,11 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   `.bak` → atomic swap), extracted from `server._api_rule`, which had it inline.
 - **Adding an answer is text surgery, not a YAML round trip.** A round trip deletes every
   comment in the file, including the stubs the user is working through. Same for the
-  identity fields and the resume path — `upsert_identity` and `set_resume` sit beside
-  `insert_answer` in `answers.py` for exactly that reason.
+  identity fields and the resume path — `upsert_identity`, `set_resume` and
+  `set_resume_name` sit beside `insert_answer` in `answers.py` for exactly that reason.
+  `insert_answer` **updates in place** (2026-08-23) and only rewrites the `value:` line,
+  leaving alias lists, quoting and comments byte-for-byte; aliases are additive, because
+  an alias is one employer's exact wording and editing the value says nothing about it.
 - **The Settings tab creates the bank; there is no `cp` step** (added 2026-08-15). Saving
   identity writes `answers.STARTER` and upserts into it, so a fresh box gets there from
   the browser. STARTER deliberately carries the example's prose and **none of its values**
@@ -909,6 +932,45 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   the DOM on the first `apply-to` visit and cached per company, which is what puts every
   ATS in the same gap loop. A company whose form is neither held nor fetchable is **not**
   counted as pending work — it is waiting on a browser, not a model.
+
+### Reading a form as it actually is (2026-08-23)
+
+Measured against Twilio's live Greenhouse embed and kept as
+`tests/fixtures/greenhouse_react_form.html`. **That page has no `<select>` on it at all**,
+and five reported bugs were one consequence of assuming it did.
+
+- **Every dropdown is a react-select combobox**, so `page.fill` sets a search query the
+  widget discards on its next render — *and* remounts the input, taking the `data-jt-id`
+  with it. The field stayed empty while the row reported `filled` and the submit gate
+  counted it as answered: absence read as success, on the one page where the cost is an
+  application going out blank. `_pick` opens the widget, reads what it offers, and presses
+  the matching option; `data-jt-ctl` is on the *control*, which survives being typed into.
+- **A combobox's options exist only while its menu is open**, so `_learn_vocabularies`
+  opens each unknown one once per visit (bounded by `MAX_VOCABULARIES`) and
+  `upsert_form_field` keeps them — its `options` column is `COALESCE`d now, because a DOM
+  pass that cannot see them was erasing what the Greenhouse API had published. A field
+  past the cap keeps an empty list and renders as a text box saying so.
+- **`_press` is the module's second click and the rule got narrower, not looser.**
+  `_submit` presses the employer's button once behind the gate; `_press` presses a
+  *widget's* own control — an option, a clear indicator, its open/close toggle — reached
+  only from `_pick`, `_clear` and `_read_vocabulary`, always scoped to the control of the
+  field being written. A controlled React component learns a value from its own handlers
+  and nothing else. There is a test pinning both sites and all three callers.
+- **`aria-hidden` elements are skipped.** react-select renders a phantom
+  `<input required tabindex="-1" aria-hidden="true">` beside every combobox; with no name
+  and no id it keyed on a slug of the same label as the widget it shadows. One dropdown,
+  two required rows — and since `Session.carried()` is keyed by field key, the phantom's
+  stale value was handed back to the row you had just edited, which is what made typing
+  into a field revert one poll later. `carried()` is first-wins now as a second line.
+- **A checkbox set is one question.** Members carry the question in `label`/`group` and
+  their own choice in `option`; grouping is fieldset legend → Greenhouse's `description`
+  attribute → shared `name`, and a set of one is not a set. One gap, one block on the
+  page, one bank control — and each box pushes *its own choice*, not `"yes"`.
+  `live._unanswered` counts by question, or a nine-box set would leave eight permanent
+  blockers on the submit gate.
+- **`Country*` on a Greenhouse form is the phone's dialling code** — its menu offers
+  "United States +1". Nothing in the code knows that, and nothing needs to: it is a
+  dropdown with a vocabulary now, so a wrong answer is refused rather than typed.
 
 Three things learned from live forms; all are handled and none is obvious:
 
@@ -966,6 +1028,16 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   never a selector and never anything the browser thread evaluates. That is `browser.py`'s
   no-click-path rule carried across the new channel, and it needs its own test because the
   existing one only scans that module's source.
+- **Every answerable row shows the answer behind it, and can change it** (2026-08-23).
+  The bank control used to render only on `GAP`/`REFUSED` rows, so the bank was writable
+  exactly once per question — the first time it was asked — and a field holding "New York,
+  New York" under the label "Country" gave no sign where that came from. Rows carry
+  `question_key` now. Both controls post to `/api/answer`, which is a real **upsert**:
+  `insert_answer` used to prepend unconditionally, so re-answering a key wrote a duplicate
+  YAML mapping key, `yaml.safe_load` kept the *last* one (the old one), `safewrite`
+  validated it, and the page said saved while the value you typed was discarded — a silent
+  failure inside the writer. An identity key goes to `identity:`, because `Answers.get`
+  reads that first and an `answers:` entry of the same name is a write nothing loads.
 - **`clear` is a name of its own, and an empty `set` is refused** (2026-08-22). Deleting
   a value used to reach `page.fill(el, "")`, which succeeds — so the row was recorded
   `filled` holding nothing, counted as done and counted *out* of "need you". That is the

@@ -1298,7 +1298,7 @@ def _live_session():
               FormField(key="why", label="Why do you want to work here?",
                         type="textarea")]
     s.absorb(live.rows_from(found, fields,
-                            {"first_name": ("filled", "Dylan"), "why": ("gap", "")}))
+                            {"first_name": ("filled", "Dylan", None), "why": ("gap", "", None)}))
     s.set_phase("ready", "1/2 fields filled")
     return s
 
@@ -1360,7 +1360,8 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone"} <= ids
     for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone"):
         assert f"getElementById('{element}')" in script, element
-    for hook in ("lf-file", "lf-detach", "tobank", "bankkey", ".lv"):
+    for hook in ("lf-file", "lf-detach", "tobank", "bankkey", "savebank", "bankval",
+                 ".lv"):
         assert hook in script, hook
     for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
                      "/api/session/highlight", "/api/session/rediscover",
@@ -2380,3 +2381,125 @@ def test_an_unknown_list_is_refused(tmp_path):
     h = _handler_for(tmp_path / "s.db", path)
     res = h._api_rule({"phrase": "x", "list": "role_type_exclud"})
     assert res["ok"] is False and "unknown criteria list" in res["error"]
+
+
+# -- the answer behind a field, and the way to change it ---------------------------------
+def _mirror(rows):
+    """A session holding exactly these rows. `rows` are `(FormField, status, value,
+    question_key)` — the shape `browser.fill_application` publishes."""
+    from jobtracker import live
+    from jobtracker.models import FormField  # noqa: F401 — used by callers
+
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    found = [{"handle": f"jt{i}"} for i in range(len(rows))]
+    fields = [r[0] for r in rows]
+    carried = {r[0].key: (r[1], r[2], r[3]) for r in rows}
+    session.absorb(live.rows_from(found, fields, carried))
+    session.set_phase("ready", "x")
+    return session
+
+
+def test_a_field_says_which_answer_filled_it_and_lets_you_change_it(tmp_path):
+    """The bank block used to appear only on questions the fill could not answer.
+
+    So the bank was writable exactly once per question — the first time it was asked —
+    and a field holding "New York, New York" under the label "Country" gave no sign that
+    the value had come from the bank at all, let alone which key held it. The only way to
+    fix a wrong answer already going into real applications was to edit the file.
+    """
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _mirror([
+        (FormField(key="country", label="Country*", type="combobox", required=True),
+         live.FILLED, "New York, New York", "location"),
+        (FormField(key="why", label="Why us?", type="textarea"), live.GAP, "", None),
+    ]))
+    conn.close()
+
+    assert "from your answer bank as <code>location</code>" in page
+    assert 'class="bankval" type="text" value="New York, New York"' in page
+    assert 'class="savebank" data-key="location"' in page
+    # An unanswered field still offers to teach the bank, under a key you can edit.
+    assert 'class="tobank"' in page and 'value="why_us"' in page
+
+
+def test_a_checkbox_set_renders_as_one_question_with_its_choices(tmp_path):
+    """Nine boxes under one head, not nine questions named after their own answers."""
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    members = [
+        FormField(key=f"q[]::{n.lower()}", label="How did you hear about us?",
+                  type="checkbox", required=True, group="How did you hear about us?",
+                  option=n, options=("LinkedIn", "Glassdoor"))
+        for n in ("LinkedIn", "Glassdoor")
+    ]
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(
+        conn, _mirror([(m, live.GAP, "", None) for m in members])
+    )
+    conn.close()
+
+    assert page.count('class="lfg"') == 1
+    assert page.count("How did you hear about us?") >= 1
+    assert "> LinkedIn</label>" in page and "> Glassdoor</label>" in page
+    # One bank control for the question, not one per box, and each box knows the choice
+    # it sends — 'yes' compared against "LinkedIn" would refuse every tick.
+    assert page.count('class="tobank"') == 1
+    assert 'data-option="LinkedIn"' in page
+
+
+def test_a_dropdown_renders_as_a_dropdown_when_its_options_are_known(tmp_path):
+    """And as a text box, with a note, when they are not — because a `<select>` holding
+    only "— choose —" is worse than either."""
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _mirror([
+        (FormField(key="q1", label="Work auth?", type="combobox", required=True,
+                   options=("Yes", "No")), live.GAP, "", None),
+        (FormField(key="country", label="Country*", type="combobox", required=True),
+         live.GAP, "", None),
+    ]))
+    conn.close()
+
+    assert '<option value="Yes">Yes</option>' in page
+    assert "a menu on the real form" in page
+    assert page.count("<select class=\"lv\"") == 1
+
+
+def test_the_filename_an_employer_sees_is_a_setting(tmp_path):
+    """Disk names are minted for collision safety — `twilio_7816159_1f4c9a02.pdf` — and
+    a person at the other end opens whatever the upload was called."""
+    answers = tmp_path / "answers.yaml"
+    (tmp_path / "resume.pdf").write_bytes(b"%PDF-1.4 x")
+    answers.write_text("identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n"
+                       "resume: ./resume.pdf\n")
+
+    handler = _handler_for(tmp_path / "state.db", config.CRITERIA_YAML,
+                           answers_path=answers)
+    assert handler._api_resume_name({"name": "Dylan_Dodds_Resume.pdf"})["ok"] is True
+    assert "Dylan_Dodds_Resume.pdf" in answers.read_text()
+    # A path is refused: this names a file, it does not choose where one goes.
+    assert handler._api_resume_name({"name": "../etc/passwd"})["ok"] is False
+
+
+def test_changing_an_identity_answer_reaches_identity_not_answers(tmp_path):
+    """`Answers.get` reads `identity:` first, so an `answers:` entry of the same name is
+    a write nothing ever loads — saved, validated, and silently inert."""
+    import yaml as _yaml
+
+    answers = tmp_path / "answers.yaml"
+    answers.write_text("identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n"
+                       "  location: New York, New York\n")
+
+    handler = _handler_for(tmp_path / "state.db", config.CRITERIA_YAML,
+                           answers_path=answers)
+    assert handler._api_answer({"question_key": "location", "value": "Brooklyn, NY"})["ok"]
+
+    parsed = _yaml.safe_load(answers.read_text())
+    assert parsed["identity"]["location"] == "Brooklyn, NY"
+    assert "location" not in (parsed.get("answers") or {})

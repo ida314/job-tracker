@@ -26,6 +26,7 @@ Subcommands:
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
   repair        read careers pages for broken boards' new slugs; --write applies
   add-company   append a curated entry to companies.yaml
+  forget-question  un-learn a form label's resolved answer key
   migrate       backend-newgrad-2027-tracker.md -> companies.yaml (one-time)
 
 Progress goes to stderr via `logging`; the report goes to stdout. `check > out.md` is
@@ -1671,6 +1672,40 @@ def cmd_serve(args: argparse.Namespace) -> int:
     )
 
 
+# -- forget-question ----------------------------------------------------------------
+def cmd_forget_question(args: argparse.Namespace) -> int:
+    """Un-learn the answer key a form label was resolved to.
+
+    The one way back out of a bad match. `store.known_question_keys` replays every
+    resolved label as a *deterministic* alias at every company, so a guess nobody
+    reviewed becomes permanent and stops costing a model call — which is how "Country*"
+    came to mean `location` on three Greenhouse boards and typed a city into a phone
+    country selector.
+
+    Dry by default, like `repair`: this rewrites something a run decided, and the list is
+    worth reading before it goes.
+    """
+    conn = store.connect(args.db or config.DB_PATH)
+    try:
+        rows = store.forget_question(conn, args.question, write=args.write)
+        if not rows:
+            print(f"nothing has been resolved from {args.question!r}.")
+            return 0
+        verb = "forgot" if args.write else "would forget"
+        print(f"{verb} {len(rows)} resolved field(s):\n")
+        for row in rows:
+            print(f"  {row['company']:<16} {row['label'][:52]:<54} -> "
+                  f"{row['question_key']}")
+        if args.write:
+            print("\nThe gap is open again and the affected plans will be rebuilt on the")
+            print("next prefill run. Answer it once in Settings and it fills everywhere.")
+        else:
+            print("\nNothing was changed. Re-run with --write to apply.")
+        return 0
+    finally:
+        conn.close()
+
+
 # -- add-company -------------------------------------------------------------------
 def cmd_add_company(args: argparse.Namespace) -> int:
     """Append a curated entry to companies.yaml.
@@ -1975,6 +2010,16 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--host", default="127.0.0.1",
                     help="default 127.0.0.1 — it has no auth and can edit criteria.yaml")
     sv.set_defaults(func=cmd_serve)
+
+    fq = sub.add_parser(
+        "forget-question",
+        help="un-learn the answer key a form label was resolved to",
+    )
+    fq.add_argument("question", help="the label as the form writes it, or the answer key")
+    fq.add_argument("--db", default=None)
+    fq.add_argument("--write", action="store_true",
+                    help="apply it; without this the changes are only listed")
+    fq.set_defaults(func=cmd_forget_question)
 
     a = sub.add_parser("add-company", help="append a curated entry")
     a.add_argument("--name", required=True)

@@ -287,6 +287,77 @@ read, its label resolved through four conventions in order (`aria-label`,
 the placeholder), and stored against that company. That is what puts Ashby, Lever and
 even a Workday portal into the same gap loop as Greenhouse, with no API involved.
 
+### What a modern Greenhouse form is actually made of
+
+Measured against Twilio's live embed on 2026-08-23, and kept as a fixture at
+`tests/fixtures/greenhouse_react_form.html` because five separate bugs came from
+assuming otherwise. **The page has no `<select>` element on it at all.**
+
+- **Every dropdown is a react-select combobox** — `<input role="combobox">` over a menu
+  rendered only while it is open, and mounted in a shell two levels above the control
+  rather than inside it. A dropdown read as a text box gets `page.fill`, which react-
+  select throws away on its next render *and* which remounts the input, taking the handle
+  with it. The field was left empty, the row said `filled`, and the submit gate counted
+  it as answered. Discovery types these `combobox`; `_pick` opens the widget, reads what
+  it offers, and presses the option that matches.
+- **Its options are not in the page until you open it**, so `_learn_vocabularies` opens
+  each one once per visit and keeps what it saw. That is what turns a row on `/apply`
+  from a text box into a menu, and what gives `match_option` something to check a stored
+  answer against. Bounded by `MAX_VOCABULARIES`; a form past the cap keeps an empty list,
+  renders as a text box, and says so.
+- **Some have no fixed vocabulary at all.** The location field is a place lookup that
+  fetches per keystroke, so an opened menu is genuinely empty. `_pick` types the answer
+  into the widget's own search box — which works once it is open and focused, and did
+  nothing whatever while it was closed — and reads again.
+- **Every combobox is followed by a phantom** `<input required tabindex="-1"
+  aria-hidden="true">` that react-select renders to drive native validation. It has no
+  name and no id, so it keyed on a slug of the same label as the widget it shadows: one
+  dropdown, two identical required rows, and — because the mirror carries values by field
+  key — the phantom's stale value handed back to the row you had just typed into. That is
+  what made editing a field revert one poll later. `aria-hidden` is skipped now.
+- **A checkbox set is one question.** "How did you hear about Twilio?" is a `<fieldset>`
+  with a `<legend>` and nine boxes sharing `name="question_65614028[]"`; the API agrees,
+  calling it one `multi_value_multi_select` with nine values. Read box by box it became
+  nine questions named "LinkedIn", "Glassdoor", "Careers Website" and so on, each with
+  its own stub in `answers.yaml`. Members now carry the question in `label`/`group` and
+  their own choice in `option`, the page renders one block, and it is one gap.
+- **`Country*` on that form is the phone number's dialling code**, not a country of
+  residence: its menu offers "United States +1", "Afghanistan +93". Read as free text it
+  took whatever the model pointed at, which was identity `location` — "New York, New
+  York" — into the field beside your phone number. Two things stop that now: it is a
+  dropdown, so `match_option` checks the answer against 244 options and refuses; and the
+  model is no longer asked about a field whose vocabulary is unknown (`vocabulary_known`).
+
+### A bad match used to be permanent
+
+`store.known_question_keys` replays every resolved label as a *deterministic* alias at
+every company — that is the point of it, and it is why most nights cost no model calls.
+But `apply` stored a `question_key` even for an entry whose value the rules had gone on
+to refuse, so a guess nobody reviewed became a rule nothing would reconsider. `Country*`
+meant `location` on three boards. Two halves to the fix: only a key that actually placed
+a value is written, and
+
+```bash
+jobtracker forget-question "Country*"          # names every row it would change
+jobtracker forget-question "Country*" --write
+```
+
+clears the ones already learned. It moves three things together, because leaving any of
+them behind only looks fixed: the `form_fields.question_key` that teaches the alias, the
+`prefill_gaps` row that was closed when the match was believed, and the `prefill_plans`
+whose stored value beats a fresh `resolve_field` in `browser._plan_index`.
+
+### The name your resume goes out under
+
+The file on disk is named for collision safety — `twilio_7695702_1f4c9a02.pdf`, and from
+the `/apply` file box one with the field handle in it — and a person at the other end
+opens whatever the upload was called. Two different questions, and they used to be one
+string. `resume_name` in the answer bank is the second, editable in Settings and
+defaulting to `resume<ext>`; the extension always comes from the real file, so renaming a
+PDF in a text box cannot mislabel it. It is deliberately **not** part of `Answers.hash`:
+it changes no answer in any field, and folding it in would re-plan every posting for a
+cosmetic rename.
+
 Three things learned from live forms, all now handled:
 
 - **Greenhouse's current UI sets no `name` attributes.** Everything is keyed off `id`,
@@ -379,12 +450,13 @@ channel from the page you are looking at to that writer.
 Cloudflare — Backend Engineer, New Grad          [Read the form again]
 
 ┌─ preview ───────────── Pause ─┐   First Name   [ Dylan          ]  filled
-│  [jpeg of the real form]      │   Resume/CV    [ Choose file    ]  filled
+│  [jpeg of the real form]      │     from your answer bank as `first_name`
+│                               │     [ Dylan            ] [Save]
+│                               │   Resume/CV    [ Choose file    ]  filled
 │                               │   Work auth?   [ Yes         ▾  ]  filled
 └───────────────────────────────┘   Why us?      [                ]  needs you
                                       ☐ also save to my answer bank as `why_us`
-Review & submit
-View window ↗                       3/4 fields filled · 1 need you
+Review & submit                     3/4 fields filled · 1 need you
 ```
 
 ### How it works
@@ -409,7 +481,17 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 - **A command points, it does not write.** The vocabulary is exactly five names — `set`,
   `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
   never a selector and never anything the browser thread evaluates. That is `browser.py`'s
-  no-click-path rule carried across the new channel, and it has its own test.
+  click rule carried across the new channel, and it has its own test.
+- **There are two clicks in `browser.py`, and the rule narrowed rather than loosened when
+  the second arrived.** `_submit` presses the employer's own button, once, behind the
+  gate. `_press` is everything a *widget* needs to be operated — an option in its listbox,
+  its clear indicator, its own open/close toggle — reached only from `_pick`, `_clear` and
+  `_read_vocabulary`, and only ever scoped to the control of the field being written.
+  `requestSubmit`, `form.submit`, `dispatchEvent` and `keyboard.press` are still banned,
+  and `_DISCOVER_JS` mints no handle for a submit control, so nothing here can reach one.
+  The reason is the one that made `_submit` a real press: a controlled React component
+  learns a value from its own handlers and from nothing else, and the alternative was a
+  form reporting `filled` over fields holding nothing.
 - **Deleting is `clear`, and it is not `set` with an empty value.** Two reasons, both
   real. A `file` row's value is a path on this machine, so `""` there means *no file*
   rather than *no text*, and the one field where the two readings differ is the one
@@ -437,6 +519,20 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
   the epoch, the second field you typed would be refused because the first one succeeded —
   every edit poisoning the next. `live.signature` asks the one question the epoch is
   about: does every position still report the same field under the same handle.
+- **Every answerable row says which answer filled it, and lets you change it.** The bank
+  control used to appear only on questions the fill could not place, which made the bank
+  writable exactly once per question — the first time it was asked — and gave a field
+  holding "New York, New York" under the label "Country" no way to say where that came
+  from. Saving goes through `/api/answer`, which is a true **upsert** now: it used to
+  insert unconditionally, so re-answering a key wrote a second YAML mapping key of the
+  same name, `yaml.safe_load` kept the last one — the old one, since the new entry went
+  in at the top — and the page said saved while the value you typed was discarded. An
+  identity key is written to `identity:`, because `Answers.get` reads that first and an
+  `answers:` entry of the same name is a write nothing ever loads.
+- **A checkbox set renders as one block.** One head carrying the question, one bank
+  control, and a box per choice — and each box sends its own choice rather than `"yes"`,
+  which is right only for a lone consent checkbox and would otherwise have the writer
+  compare "yes" against "LinkedIn" and refuse every tick.
 - **The preview is the whole page, not the window.** Chromium's viewport is 720px tall and
   an application form is several thousand — Asana's measured 1280x3352 — so a
   viewport-shaped shot showed five fields of thirty-two, over a window nobody looking at

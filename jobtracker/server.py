@@ -320,18 +320,26 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
             p.extend(_gap_card(gap, 1))
 
     if answers is not None:
+        # Editable, because `/api/answer` is an upsert now. It was a read-only table
+        # under a note telling you to edit the file, which for a wrong answer already
+        # typed into a form is the wrong place to have to go.
         p.append(f"<h2>Answers you have written ({len(answers.answerable)})</h2>")
-        p.append("<table><thead><tr><th>Key</th><th>Answer</th></tr></thead><tbody>")
+        p.append("<table><thead><tr><th>Key</th><th>Answer</th><th></th></tr></thead>"
+                 "<tbody>")
         for key in answers.answerable:
-            value = answers.get(key) or ""
+            value = html.escape(answers.get(key) or "", quote=True)
+            safe = html.escape(key, quote=True)
             p.append(
                 f"<tr><td><code>{html.escape(key)}</code></td>"
-                f"<td>{html.escape(value[:160])}</td></tr>"
+                f'<td><input class=answer data-key="{safe}" type=text '
+                f'value="{value}"></td>'
+                f'<td><button class=save data-key="{safe}">Save</button></td></tr>'
             )
         p.append("</tbody></table>")
         p.append(
-            "<p class=note>Edit these in the file directly; this page only adds "
-            "answers to questions it asked you.</p>"
+            "<p class=note>Identity fields are written to <code>identity:</code> and "
+            "everything else to <code>answers:</code>. Aliases and comments you wrote "
+            "are kept; only the value changes.</p>"
         )
 
     p.append(f"<script>{_JS}</script></div></body></html>")
@@ -697,8 +705,24 @@ def render_apply(conn: sqlite3.Connection, session) -> str:
             "rendered, may only link to the real application, or may be behind a login. "
             "Open the window and look.</p>"
         )
+    # A checkbox set is one question with several boxes, so it gets one head and its
+    # members render as choices underneath. Rendered from the rows in the form's own
+    # order — consecutive members share a `group`, and a run of them opens one block.
+    # Without this, "How did you hear about us?" arrived as nine questions, each named
+    # after one of its own answers.
+    dead = snap["phase"] == live.CLOSED
+    open_group = None
     for row in snap["fields"]:
-        p.extend(_live_field(row, snap["epoch"], dead=snap["phase"] == live.CLOSED))
+        group = row.get("group") or ""
+        if group != open_group:
+            if open_group:
+                p.append("</div>")
+            open_group = group
+            if group:
+                p.extend(_group_head(row, snap["epoch"], dead))
+        p.extend(_live_field(row, snap["epoch"], dead=dead))
+    if open_group:
+        p.append("</div>")
     p.append(
         f'<p class=note id="counts">{html.escape(live.summary(snap))}</p>'
     )
@@ -860,7 +884,8 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
     out = [
         f'<div class="lf" data-handle="{handle}" '
         f'data-epoch="{html.escape(str(epoch), quote=True)}" '
-        f'data-type="{html.escape(row["type"], quote=True)}">',
+        f'data-type="{html.escape(row["type"], quote=True)}" '
+        f'data-option="{html.escape(row["option"] or "", quote=True)}">',
         f'<div class="lab">{label}',
     ]
     if row["required"]:
@@ -870,7 +895,14 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
     out.append("</div>")
 
     value = html.escape(row["value"] or "")
-    if row["type"] in ("select", "multiselect"):
+    if row["option"]:
+        # One box of a set. Its own label is an *answer* to the question in the head
+        # above it, so it renders as a choice, not as another question — nine of these
+        # used to arrive as nine questions called "LinkedIn", "Glassdoor" and so on.
+        checked = " checked" if row["status"] == live.FILLED else ""
+        out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}'
+                   f'{off}> {html.escape(row["option"])}</label>')
+    elif row["type"] in ("select", "multiselect", "combobox") and row["options"]:
         out.append(f'<select class="lv"{off}>')
         # A blank first option, always. Without one, opening the page would look like
         # every dropdown already holds its first value — and a dropdown we could not
@@ -893,22 +925,78 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
         checked = " checked" if row["status"] == live.FILLED else ""
         out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}'
                    f"{off}> yes</label>")
+    elif row["type"] == "combobox":
+        # A dropdown whose options nobody has published yet. It is still a menu on the
+        # real page — typing here searches it and the first exact match is chosen — and
+        # saying so is better than a text box that looks like free text and is not.
+        out.append(f'<input class="lv" type="text" value="{value}"{off}>')
+        out.append("<p class=note>a menu on the real form — type an option's exact "
+                   "wording. Its choices are not published, so nothing here can list "
+                   "them.</p>")
     elif row["type"] == "textarea":
         out.append(f'<textarea class="lv" rows="4"{off}>{value}</textarea>')
     else:
         out.append(f'<input class="lv" type="text" value="{value}"{off}>')
 
-    # Answering it here can also answer it everywhere. Offered only where there is
-    # something to learn — a field the fill could not answer — and it goes through
-    # `/api/answer`, the same writer the Settings tab uses. No second path into the bank.
-    if status in (live.GAP, live.REFUSED) and row["type"] != "file":
-        key = html.escape(answers_mod.slugify(row["label"] or row["key"]), quote=True)
-        out.append(
-            '<label class="bank"><input type="checkbox" class="tobank"> also save to my '
-            f'answer bank as <input class="bankkey" type="text" value="{key}"></label>'
-        )
+    out.extend(_bank_block(row, off))
     out.append("</div>")
     return out
+
+
+def _group_head(row: dict, epoch: int, dead: bool) -> list:
+    """The question a set of checkboxes answers, and the one place to save its answer.
+
+    Opens a `<div class="lfg">` that the caller closes when the run of members ends. The
+    head carries the question, whether it is required, and the bank control — one per
+    question, because the answer to "How did you hear about us?" is one answer that
+    happens to be typed by ticking a box.
+    """
+    label = html.escape(row["group"])
+    out = [
+        f'<div class="lfg" data-group="{html.escape(row["group"], quote=True)}">',
+        f'<div class="lab lgh">{label}',
+    ]
+    if row["required"]:
+        out.append(' <span class="req">required</span>')
+    out.append("</div>")
+    out.extend(_bank_block(
+        {**row, "option": "", "label": row["group"], "type": "multiselect"},
+        " disabled" if dead else "",
+    ))
+    return out
+
+
+def _bank_block(row: dict, off: str) -> list:
+    """The answer behind this field, and the way to change it.
+
+    On **every** answerable row, not only the ones the fill could not place. It used to
+    appear on gaps alone, which meant the bank was writable exactly once per question —
+    the first time it was asked — and a wrong answer, once stored, could only be fixed by
+    editing the file. Worse, the row gave no sign of *which* answer had filled it, so a
+    field holding "New York, New York" under the label "Country" looked like something
+    the form had done rather than something the bank held.
+
+    Both controls post to `/api/answer`, the same writer Settings uses, which is now a
+    true upsert. No second path into the bank.
+    """
+    if row["type"] == "file" or row["option"]:
+        # A file is answered by the `resume:` key, not by a sentence; a member of a set
+        # is a choice within a question, and the question's own head carries the block.
+        return []
+    key = row.get("question_key") or answers_mod.slugify(row["label"] or row["key"])
+    safe = html.escape(key, quote=True)
+    if row.get("question_key"):
+        value = html.escape(row["value"] or "", quote=True)
+        return [
+            '<div class="bank"><span class=note>from your answer bank as '
+            f'<code>{html.escape(key)}</code></span> '
+            f'<input class="bankval" type="text" value="{value}"{off}> '
+            f'<button class="savebank" data-key="{safe}"{off}>Save</button></div>'
+        ]
+    return [
+        '<label class="bank"><input type="checkbox" class="tobank"> also save to my '
+        f'answer bank as <input class="bankkey" type="text" value="{safe}"></label>'
+    ]
 
 
 # What each status is called on the page. Duplicated in `_APPLY_JS.paint`, because one
@@ -1169,7 +1257,7 @@ def _gap_card(gap, asked_by: int) -> list:
     """One unanswered question, with the box you answer it in.
 
     Identical markup in both lists on purpose. The split above decides ordering and
-    nothing else, so `div.gap`, `input.answer[data-key]` and `button.save[data-key]` are
+    nothing else, so `div.gap`, `.answer[data-key]` and `button.save[data-key]` are
     the same everywhere — which is why `_JS`'s save branch needed no change at all: it
     looks the input up by key, and `question_key` is the table's primary key.
     """
@@ -1180,16 +1268,26 @@ def _gap_card(gap, asked_by: int) -> list:
     if asked_by > 1:
         note += f" · <strong>{asked_by} employers</strong>"
     p.append(f"<div class=note>{note}</div>")
-    if gap["options"]:
-        p.append(f"<div class=note>one of: {html.escape(gap['options'])}</div>")
     # The key travels in a data attribute rather than being interpolated into a
     # handler — the question text comes from a third-party ATS.
     key = html.escape(gap["question_key"], quote=True)
-    p.append(
-        f"<div class=row><input class=answer type=text placeholder='Your answer' "
-        f'data-key="{key}">'
-        f'<button class=save data-key="{key}">Save</button></div>'
-    )
+    options = [o.strip() for o in (gap["options"] or "").split("|") if o.strip()]
+    if options and gap["type"] in ("select", "multiselect", "combobox"):
+        # A menu, so a menu. Typing a word the form does not offer is refused by
+        # `match_option` and stays a gap, so a free-text box beside a prose list of the
+        # only acceptable answers was an invitation to write one that would not work.
+        control = ['<select class=answer data-key="%s">' % key,
+                   '<option value="">— choose —</option>']
+        control += [f'<option value="{html.escape(o, quote=True)}">'
+                    f'{html.escape(o)}</option>' for o in options]
+        control.append("</select>")
+    else:
+        if options:
+            p.append(f"<div class=note>one of: {html.escape(gap['options'])}</div>")
+        control = [f"<input class=answer type=text placeholder='Your answer' "
+                   f'data-key="{key}">']
+    p.append("<div class=row>" + "".join(control)
+             + f'<button class=save data-key="{key}">Save</button></div>')
     p.append("</div>")
     return p
 
@@ -1222,6 +1320,20 @@ def _resume_card(answers) -> list:
             "<button class=upload-resume>Upload</button></div>"
             "<p class=note>PDF or DOCX, up to 6 MB. Replaces whatever is attached now."
             "</p>"
+        )
+        # The name on disk is not the name that goes out. Files are stored under a name
+        # this repo mints so two postings cannot overwrite each other — which reads like
+        # `twilio_7816159_1f4c9a02.pdf` — and a person at the other end opens whatever
+        # the upload was called. So the sent name is a setting, and defaults to
+        # something a human would have chosen.
+        current = html.escape(getattr(answers, "resume_name", "") or "", quote=True)
+        p.append(
+            "<label class=field><span>filename sent to employers</span>"
+            f"<input id=resume-name type=text value=\"{current}\" "
+            "placeholder='resume.pdf'></label>"
+            "<div class=row><button class=save-resume-name>Save</button></div>"
+            "<p class=note>What the employer's copy is called. Blank means "
+            "<code>resume.pdf</code>. The extension always comes from the real file.</p>"
         )
     p.append("</div>")
     return p
@@ -1391,6 +1503,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_identity(payload))
             elif path == "/api/resume":
                 self._send_json(self._api_resume(payload))
+            elif path == "/api/resume-name":
+                self._send_json(self._api_resume_name(payload))
             elif path == "/api/posting-resume":
                 self._send_json(self._api_posting_resume(payload))
             elif path == "/api/posting-resume/clear":
@@ -1855,8 +1969,14 @@ class Handler(BaseHTTPRequestHandler):
 
         The insertion is text surgery rather than a YAML round trip. A round trip would
         delete every comment in the file, including the stubs you are working through.
+
+        It is an **upsert**, in both blocks. `/apply` now offers this on every field
+        rather than only on ones it could not answer, so "save" mostly means "change what
+        you told me last time" — and an identity key has to reach `identity:`, because
+        `Answers.get` reads that first and an `answers:` entry of the same name would be
+        a write nothing ever loads.
         """
-        from .answers import insert_answer, load_answers
+        from .answers import IDENTITY_KEYS, insert_answer, load_answers, upsert_identity
 
         key = str(payload.get("question_key") or "").strip()
         value = str(payload.get("value") or "").strip()
@@ -1876,7 +1996,10 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             aliases = [gap["ask"]] if gap else []
 
-            body = insert_answer(path.read_text(), key, value, aliases)
+            if key in IDENTITY_KEYS:
+                body = upsert_identity(path.read_text(), {key: value})
+            else:
+                body = insert_answer(path.read_text(), key, value, aliases)
             try:
                 safewrite.write_text(path, body, load_answers)
             except safewrite.RefusedWrite as exc:
@@ -1892,6 +2015,32 @@ class Handler(BaseHTTPRequestHandler):
         # Every stored plan was an answer to "what do I know today", and today changed.
         # They rebuild on the next prefill run, mostly without any model call.
         return {"ok": True, "question_key": key, "remaining": remaining}
+
+    def _api_resume_name(self, payload: dict) -> dict:
+        """Set the filename the resume goes out under. Blank restores `resume<ext>`.
+
+        A setting rather than a rename, because the file on disk is named for collision
+        safety and must stay that way — two postings whose company and job slug alike
+        would otherwise overwrite each other's tailored resume. What a recruiter opens is
+        a different question from what this box calls it, and this is the only place the
+        two were ever conflated.
+        """
+        from .answers import load_answers, set_resume_name
+
+        name = str(payload.get("name") or "").strip()
+        path = Path(self.server.answers_path)
+        if not path.exists():
+            return {"ok": False, "error": f"no answer bank at {path}"}
+        if "/" in name or "\\" in name:
+            return {"ok": False, "error": "a filename, not a path"}
+        try:
+            safewrite.write_text(
+                path, set_resume_name(path.read_text(), name), load_answers
+            )
+        except safewrite.RefusedWrite as exc:
+            return {"ok": False, "error": f"refused invalid answers.yaml: {exc}"}
+        log.info("resume goes out as %r", name or "resume<ext>")
+        return {"ok": True, "name": name}
 
     def _api_identity(self, payload: dict) -> dict:
         """Write the identity block, creating the answer bank if there is not one.
@@ -2671,7 +2820,7 @@ _SETTINGS_CSS = """
 .gap{padding:.7rem .9rem;margin:.5rem 0;border-left:3px solid #d97706;background:rgba(217,119,6,.07)}
 .gap .ask{font-weight:600;margin-bottom:.2rem}
 .gap .row{display:flex;gap:.5rem;margin-top:.5rem}
-.gap input.answer{flex:1;padding:.3rem .5rem;border-radius:5px;
+.gap .answer{flex:1;padding:.3rem .5rem;border-radius:5px;
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 .card{padding:.8rem .9rem;margin:.5rem 0;border:1px solid rgba(127,127,127,.35);border-radius:6px}
 .card .row{display:flex;gap:.5rem;margin-top:.8rem;align-items:center}
@@ -2752,6 +2901,19 @@ opacity:.85;flex-wrap:wrap}
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
 font-size:.78rem}
 .lf .bank input[type=checkbox]{width:auto}
+.bank .bankval{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:4px;
+border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+font-size:.78rem}
+/* One question, several boxes. The block is what makes "How did you hear about us?"
+   read as a question with nine answers rather than as nine questions. */
+.lfg{padding:.55rem .7rem;margin:.45rem 0;border:1px solid rgba(127,127,127,.3);
+border-radius:6px}
+.lfg .lgh{font-size:.86rem;margin-bottom:.35rem;display:flex;gap:.45rem;
+align-items:baseline;flex-wrap:wrap;font-weight:600}
+.lfg .bank{display:flex;gap:.4rem;align-items:center;margin:.3rem 0 .5rem;
+font-size:.78rem;opacity:.85;flex-wrap:wrap}
+.lfg .lf{border:0;padding:.1rem .2rem;margin:.1rem 0}
+.lfg .lf .lab{margin:0}
 /* Status is a word, not a colour: a red dot alone does not say whether the field is
    waiting on you or was refused by the page, and those need different actions. */
 .st{margin-left:auto;font-size:.74rem;text-transform:uppercase;letter-spacing:.04em;
@@ -2903,7 +3065,11 @@ _APPLY_JS = """
     if (!card) return;
     if (e.target.classList.contains('lv')) {
       if (card.dataset.type === 'checkbox') {
-        push(card, e.target.checked ? 'yes' : '');
+        // A box in a set answers with its own choice. 'yes' is right only for a lone
+        // consent checkbox, and sending it for a set member would have the writer
+        // compare "yes" against "LinkedIn" and refuse every tick.
+        var choice = card.dataset.option || 'yes';
+        push(card, e.target.checked ? choice : '');
       } else if (card.dataset.type === 'select' ||
                  card.dataset.type === 'multiselect') {
         // Including the blank "— choose —" option, which is how you take a dropdown
@@ -2932,6 +3098,26 @@ _APPLY_JS = """
       };
       reader.readAsDataURL(file);
     }
+  });
+
+  // Changing an answer the bank already holds. The field shows which key filled it and
+  // what that key says; this writes the new text back through `/api/answer` — a true
+  // upsert — and then pushes it to the form, so the page you are looking at and the file
+  // that will fill the next form cannot disagree.
+  document.addEventListener('click', function (e) {
+    if (!e.target.classList.contains('savebank')) return;
+    var btn = e.target;
+    var box = btn.parentElement.querySelector('.bankval');
+    if (!box) return;
+    var value = box.value;
+    btn.disabled = true;
+    post('/api/answer', {question_key: btn.dataset.key, value: value})
+      .then(function (res) {
+        btn.disabled = false;
+        if (!res.ok) { alert(res.error || 'could not save that'); return; }
+        var card = btn.closest('.lf');
+        if (card) push(card, value);
+      });
   });
 
   // Detaching. A file input offers no way to hold nothing once it holds something, so
@@ -3242,7 +3428,12 @@ document.addEventListener('click', async (e) => {
   }
   const save = e.target.closest('button.save');
   if (save) {
-    const box = document.querySelector('input.answer[data-key="' + save.dataset.key + '"]');
+    // Within the button's own row first. The same key can appear twice on this page —
+    // once as a gap card, once in the table of answers already written — and a global
+    // lookup would save whichever the document happened to hold first.
+    const near = save.closest('tr, .card, article');
+    const sel = '.answer[data-key="' + save.dataset.key + '"]';
+    const box = (near && near.querySelector(sel)) || document.querySelector(sel);
     const res = await post('/api/answer', {question_key: save.dataset.key,
                                            value: box ? box.value : ''});
     if (!res.ok) { alert(res.error); return; }
@@ -3319,6 +3510,16 @@ document.addEventListener('click', async (e) => {
     });
     const res = await post('/api/resume', {filename: file.name, content_b64: b64});
     up.disabled = false;
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const rn = e.target.closest('button.save-resume-name');
+  if (rn) {
+    const box = document.getElementById('resume-name');
+    rn.disabled = true;
+    const res = await post('/api/resume-name', {name: box ? box.value : ''});
+    rn.disabled = false;
     if (!res.ok) { alert(res.error); return; }
     location.reload();
     return;

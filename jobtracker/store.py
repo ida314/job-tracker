@@ -1448,6 +1448,14 @@ def upsert_form_field(
     `question_key` is written even when NULL — an unresolved field must be able to
     *become* unresolved again if an answer is deleted, and a COALESCE here would pin
     the first resolution forever.
+
+    `options` goes the other way, and the asymmetry is the point. A DOM reading cannot
+    see a combobox's options at all — react-select renders its menu on demand — while
+    Greenhouse's API publishes every one of them. Overwriting with NULL meant a browser
+    visit erased what the API had taught, and the field went back to being a text box
+    with no vocabulary for `match_option` to check an answer against. A pass that does
+    not know a value must not erase one that does; same rule as `sync_postings` and
+    `posted_on`.
     """
     conn.execute(
         """
@@ -1456,7 +1464,8 @@ def upsert_form_field(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company, form_key) DO UPDATE SET
             label=excluded.label, type=excluded.type, required=excluded.required,
-            options=excluded.options, question_key=excluded.question_key,
+            options=COALESCE(excluded.options, form_fields.options),
+            question_key=excluded.question_key,
             source=excluded.source, last_seen=excluded.last_seen
         """,
         (company, form_key, label, field_type, 1 if required else 0, options,
@@ -1468,6 +1477,83 @@ def form_fields_for(conn: sqlite3.Connection, company: str) -> list[sqlite3.Row]
     return list(conn.execute(
         "SELECT * FROM form_fields WHERE company=? ORDER BY rowid", (company,)
     ))
+
+
+def known_options(conn: sqlite3.Connection, company: str) -> dict[str, list]:
+    """Every option list this company's form has ever published, by form key.
+
+    Read back into a DOM reading by `browser._with_known_options`, because a combobox
+    never carries its own. The keys agree across the two sources: Greenhouse's API names
+    a question `question_65614029` and the rendered input carries that as its `id`.
+    """
+    out: dict[str, list] = {}
+    for row in conn.execute(
+        "SELECT form_key, options FROM form_fields "
+        "WHERE company=? AND options IS NOT NULL",
+        (company,),
+    ):
+        try:
+            values = json.loads(row["options"])
+        except (ValueError, TypeError):
+            continue
+        if isinstance(values, list) and values:
+            out[row["form_key"]] = [str(v) for v in values]
+    return out
+
+
+def forget_question(
+    conn: sqlite3.Connection, target: str, write: bool = False
+) -> list[dict]:
+    """Un-learn the answer key a label was resolved to. Returns what it did, or would do.
+
+    `known_question_keys` replays every resolved label as a *deterministic* alias at
+    every company, so one bad match becomes permanent and model-free: "Country*" pointed
+    at `location` on three boards, which typed a city into a phone country selector, and
+    nothing would ever reconsider it. This is the way back out.
+
+    Three things move together, and leaving any of them behind would only look fixed:
+    the `form_fields.question_key` that teaches the alias, the `prefill_gaps` row that
+    was closed when the match was believed, and the `prefill_plans` rows that already
+    hold the value — a stored plan beats a fresh `resolve_field` in `browser._plan_index`,
+    so a plan built with the bad answer keeps carrying it. Blanking `answers_hash` puts
+    those postings back in `matches_needing_prefill`.
+
+    Dry by default. The write is `repair`'s shape and for its reason: this rewrites
+    something a run decided, and the diff is worth reading first.
+    """
+    wanted = normalize_label(target)
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT company, form_key, label, question_key FROM form_fields "
+            "WHERE question_key IS NOT NULL"
+        )
+        if normalize_label(r["label"]) == wanted or r["question_key"] == target
+    ]
+    if not rows or not write:
+        return rows
+
+    for row in rows:
+        conn.execute(
+            "UPDATE form_fields SET question_key=NULL WHERE company=? AND form_key=?",
+            (row["company"], row["form_key"]),
+        )
+    for company in {r["company"] for r in rows}:
+        conn.execute(
+            "UPDATE prefill_plans SET answers_hash='' WHERE company=?", (company,)
+        )
+    # Reopened by the *question*, not by the answer key it was pointed at. A gap is
+    # recorded under a slug of the question text, so clearing `location`'s row would
+    # reopen whatever legitimately resolved to `location` and leave "Country*" closed —
+    # exactly backwards.
+    for gap in conn.execute("SELECT question_key, ask FROM prefill_gaps").fetchall():
+        if normalize_label(gap["ask"]) == wanted:
+            conn.execute(
+                "UPDATE prefill_gaps SET resolved_at=NULL WHERE question_key=?",
+                (gap["question_key"],),
+            )
+    conn.commit()
+    return rows
 
 
 def known_question_keys(conn: sqlite3.Connection) -> dict[str, str]:

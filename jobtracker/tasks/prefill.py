@@ -177,6 +177,8 @@ class PlanEntry:
     question_key: Optional[str] = None
     source: str = "gap"  # exact | alias | model | file | gap
     options: tuple = ()
+    group: str = ""
+    option: str = ""
 
     @property
     def filled(self) -> bool:
@@ -191,6 +193,13 @@ class PlanEntry:
             "value": self.value,
             "question_key": self.question_key,
             "source": self.source,
+            # Carried so a stored plan can be re-checked against the field's vocabulary
+            # rather than trusted. `browser._plan_index` lets a plan value beat a fresh
+            # `resolve_field`, so without this an option list that has since changed —
+            # or a value planned when the list was unknown — reaches the form unread.
+            "options": list(self.options),
+            "group": self.group,
+            "option": self.option,
         }
 
 
@@ -204,7 +213,17 @@ class PrefillResult:
         # 'alternative' is not a gap. Greenhouse renders one question as two inputs when
         # either will satisfy it — "Resume/CV" is a file input *and* a textarea — and
         # having attached the file, the textarea is not something to go and ask about.
-        return [e for e in self.entries if not e.filled and e.source != "alternative"]
+        out, seen = [], set()
+        for e in self.entries:
+            if e.filled or e.source == "alternative":
+                continue
+            # A checkbox set is one question with several boxes, so it is one gap.
+            ident = e.group or e.form_key
+            if ident in seen:
+                continue
+            seen.add(ident)
+            out.append(e)
+        return out
 
     @property
     def summary(self) -> str:
@@ -217,6 +236,11 @@ def match_option(value: str, options) -> Optional[str]:
     A select whose stored answer is not one of its options is a gap, not a fill. Typing
     "Yes" into a dropdown offering "Authorized" and "Not authorized" would either fail
     silently or pick the wrong entry, and both are worse than being asked.
+
+    No options means no vocabulary to check against, and this returns the value — which
+    is right for a text box and, for a dropdown, is a statement that we could not check.
+    `vocabulary_known` is what separates the two; see its note for why only the model
+    pass is held to it.
     """
     if not options:
         return value
@@ -227,6 +251,25 @@ def match_option(value: str, options) -> Optional[str]:
     return None
 
 
+def vocabulary_known(entry: PlanEntry) -> bool:
+    """Whether we know what this field will accept.
+
+    A dropdown whose options we hold can have an answer checked against them. A
+    `combobox` — which is what every Greenhouse dropdown is now — renders its menu in
+    JavaScript, so a DOM reading finds no options at all, and `match_option` then waves
+    any string through. That is how `location` = "New York, New York" was typed into a
+    phone country selector: not a bad guess exactly, a guess nothing was in a position
+    to check.
+
+    Only the **model** pass is held to this. An `exact` canonical match, or an alias the
+    user wrote themselves, is a person saying "this answer belongs in this field", and
+    refusing that would make every unlisted dropdown permanently unanswerable. The rule
+    is the existing one — "a dropdown that does not offer our answer is a gap" — extended
+    to "a dropdown whose offer we cannot see".
+    """
+    return bool(entry.options) or entry.type not in ("select", "multiselect", "combobox")
+
+
 def resolve_field(field_: FormField, answers, alias_map: dict) -> PlanEntry:
     """Everything that can be decided without a model. `source='gap'` means ask one."""
     entry = PlanEntry(
@@ -235,6 +278,8 @@ def resolve_field(field_: FormField, answers, alias_map: dict) -> PlanEntry:
         type=field_.type,
         required=field_.required,
         options=field_.options,
+        group=field_.group,
+        option=field_.option,
     )
     lowered = field_.key.lower()
 
@@ -471,6 +516,13 @@ class PrefillTask(Task):
             for entry in entries:
                 if entry.filled or entry.type == "file" or entry.source == "alternative":
                     continue
+                if not vocabulary_known(entry):
+                    # A dropdown whose options we cannot see. The model may point at a
+                    # key, but nothing here could check the stored answer against what
+                    # the field actually accepts, so pointing is guessing — see
+                    # `vocabulary_known`. Left as a gap, which is a question you answer
+                    # once and then have everywhere.
+                    continue
                 key = await self._ask(entry, candidates, client, unit)
                 if key is None:
                     continue
@@ -516,7 +568,13 @@ class PrefillTask(Task):
                 now=ctx.today,
                 required=entry.required,
                 options=json.dumps(list(entry.options)) if entry.options else None,
-                question_key=entry.question_key,
+                # Only a key that actually placed a value. A match the rules then
+                # refused — the right answer in the wrong vocabulary — keeps its
+                # `question_key` on the entry, and storing that taught it to
+                # `known_question_keys`, which replays it as a *deterministic* alias at
+                # every company from then on. One rejected guess became permanent and
+                # model-free; that is how "Country*" came to mean `location`.
+                question_key=entry.question_key if entry.filled else None,
                 source=result.form_source,
             )
         for entry in result.gaps:
