@@ -361,3 +361,79 @@ def test_a_gap_seen_on_list_has_one_definition_of_its_delimiter():
     assert store.gap_companies("") == []
     assert store.gap_companies(None) == []
     conn.close()
+
+
+# -- un-learning a bad match ------------------------------------------------------------
+def _seed_bad_alias(conn):
+    for company in ("Twilio", "Asana"):
+        store.upsert_form_field(
+            conn, company=company, form_key="country", label="Country*",
+            field_type="text", now="2026-08-20", required=True,
+            question_key="location", source="dom",
+        )
+    store.record_gap(conn, question_key="country", ask="Country*", field_type="text",
+                     company="Twilio", now="2026-08-20")
+    store.resolve_gap(conn, "country", "2026-08-20")
+    store.record_plan(conn, company="Twilio", ats_job_id="1", plan_json="[]",
+                      fields=1, gaps=0, answers_hash="abc", now="2026-08-20")
+
+
+def test_forgetting_a_question_is_dry_until_you_ask_for_it(tmp_path):
+    """`repair`'s shape, for `repair`'s reason: this rewrites something a run decided,
+    and the list of what it would rewrite is worth reading first."""
+    conn = store.connect(tmp_path / "state.db")
+    _seed_bad_alias(conn)
+
+    rows = store.forget_question(conn, "Country*")
+    assert sorted(r["company"] for r in rows) == ["Asana", "Twilio"]
+    assert store.known_question_keys(conn)["country"] == "location"
+    conn.close()
+
+
+def test_forgetting_a_question_clears_the_alias_the_gap_and_the_plans(tmp_path):
+    """Three things move together, and leaving any of them behind only looks fixed.
+
+    `known_question_keys` replays every resolved label as a deterministic alias at every
+    company, so "Country*" meant `location` everywhere with no model call — but a stored
+    plan also beats a fresh `resolve_field` in `browser._plan_index`, so a plan built
+    with the bad answer keeps carrying it until it is rebuilt.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    _seed_bad_alias(conn)
+
+    store.forget_question(conn, "Country*", write=True)
+
+    assert store.known_question_keys(conn) == {}
+    assert [g["question_key"] for g in store.open_gaps(conn)] == ["country"]
+    plan = conn.execute("SELECT answers_hash FROM prefill_plans").fetchone()
+    assert plan["answers_hash"] == "", "the plan still holds the value it was told"
+    conn.close()
+
+
+def test_a_dom_reading_does_not_erase_options_the_ats_published(tmp_path):
+    """A combobox never carries its own options; Greenhouse's API publishes all of them.
+
+    Overwriting with NULL meant one browser visit erased the vocabulary, and the field
+    went back to being a text box with nothing for `match_option` to check against. Same
+    rule as `sync_postings` and `posted_on`: a pass that does not know a value must not
+    erase one that does.
+    """
+    import json as _json
+
+    conn = store.connect(tmp_path / "state.db")
+    store.upsert_form_field(
+        conn, company="Twilio", form_key="question_65614029", label="Work auth?",
+        field_type="select", now="2026-08-20", required=True,
+        options=_json.dumps(["Yes", "No"]), source="greenhouse-api",
+    )
+    store.upsert_form_field(
+        conn, company="Twilio", form_key="question_65614029", label="Work auth?",
+        field_type="combobox", now="2026-08-23", required=True,
+        options=None, source="dom",
+    )
+
+    assert store.known_options(conn, "Twilio") == {"question_65614029": ["Yes", "No"]}
+    # The rest of the row is still overwritten — only the absence is refused.
+    row = conn.execute("SELECT type, source FROM form_fields").fetchone()
+    assert (row["type"], row["source"]) == ("combobox", "dom")
+    conn.close()

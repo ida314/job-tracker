@@ -15,6 +15,7 @@ What the tests are protecting:
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -667,3 +668,78 @@ def test_a_changed_posting_resume_puts_that_posting_back_in_the_queue(answers):
     conn.commit()
     assert store.matches_needing_prefill(conn, answers.hash, TODAY) == []
     conn.close()
+
+
+# -- what the model is not allowed to point at -----------------------------------------
+def test_the_model_is_not_asked_about_a_menu_whose_options_nobody_published():
+    """A dropdown we cannot check an answer against is a gap, not a guess.
+
+    `match_option` waves any string through when there are no options, which is right for
+    a text box and, for a menu, is a statement that we could not check. Greenhouse's
+    dropdowns are react-select comboboxes whose menus render on demand, so a DOM reading
+    sees no options at all — and that is how identity `location`, "New York, New York",
+    was written into a phone-number country selector labelled "Country*".
+    """
+    known = prefill.PlanEntry(form_key="q1", label="Work auth?", type="select",
+                              required=True, options=("Yes", "No"))
+    unknown = prefill.PlanEntry(form_key="country", label="Country*", type="combobox",
+                                required=True)
+    free = prefill.PlanEntry(form_key="q2", label="Why us?", type="textarea",
+                             required=False)
+
+    assert prefill.vocabulary_known(known)
+    assert prefill.vocabulary_known(free)
+    assert not prefill.vocabulary_known(unknown)
+
+
+def test_a_match_the_rules_refused_is_not_taught_as_an_alias(tmp_path):
+    """`known_question_keys` replays a stored `question_key` as a *deterministic* alias
+    at every company, so a guess that was then rejected became permanent and model-free.
+
+    `resolve_field` leaves `question_key` on an entry whose value it went on to refuse —
+    the right answer in the wrong vocabulary — and `apply` used to store that.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    entry = prefill.PlanEntry(
+        form_key="country", label="Country*", type="select", required=True,
+        options=("United States", "Canada"),
+        value=None, question_key="location", source="gap",
+    )
+    result = prefill.PrefillResult(entries=[entry], form_source="dom")
+    ctx = SimpleNamespace(today="2026-08-23",
+                          answers=SimpleNamespace(hash="h"))
+    unit = SimpleNamespace(company="Twilio", ats_job_id="1", label="Twilio — x",
+                           payload={})
+
+    prefill.PrefillTask().apply(conn, unit, result, ctx)
+
+    row = conn.execute("SELECT question_key FROM form_fields").fetchone()
+    assert row["question_key"] is None
+    assert store.known_question_keys(conn) == {}
+    conn.close()
+
+
+def test_a_checkbox_set_is_one_gap_not_one_per_box():
+    """"How did you hear about us?" is one question. Its members share a label and differ
+    only in which answer they are, so listing each of them asked the user to write an
+    answer to the word "Glassdoor"."""
+    members = [
+        prefill.PlanEntry(form_key=f"q[]::{n}", label="How did you hear about us?",
+                          type="checkbox", required=True,
+                          group="How did you hear about us?", option=n)
+        for n in ("LinkedIn", "Glassdoor", "A friend")
+    ]
+    result = prefill.PrefillResult(entries=members, form_source="dom")
+
+    assert len(result.gaps) == 1
+    assert result.gaps[0].label == "How did you hear about us?"
+
+
+def test_a_stored_plan_carries_the_vocabulary_it_was_checked_against():
+    """`browser._plan_index` lets a stored value beat a fresh `resolve_field`, so a plan
+    that dropped its options handed a value to the form with nothing left to re-check it
+    against."""
+    entry = prefill.PlanEntry(form_key="q1", label="Work auth?", type="select",
+                              required=True, options=("Yes", "No"), value="Yes",
+                              question_key="work_authorization", source="alias")
+    assert entry.as_dict()["options"] == ["Yes", "No"]

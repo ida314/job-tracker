@@ -19,12 +19,20 @@ never touch `page`. So a request enqueues a command and returns; the browser thr
 drains the queue inside the poll it was already doing, and the outcome comes back on the
 next snapshot. Nothing here blocks on a browser.
 
-**A command points, it does not write.** The vocabulary is four names, and a command
+**A command points, it does not write.** The vocabulary is five names, and a command
 carries a field *handle* — an opaque token minted by the discovery pass — never a
 selector, never an expression, never anything the browser thread evaluates. That is the
 same bound the prefill model is held to, for the same reason: there must be no path by
 which text from outside becomes code running on somebody's application form. Nothing in
 this vocabulary can activate anything.
+
+**Submitting is therefore not a command.** It activates, which is the one thing the
+sentence above says a command cannot do — so it is a gate on the session rather than a
+name in the queue: armed by a request that passed every check in `request_submit`, and
+claimed exactly once, under the lock, on the browser thread. The shape is `request_close`'s
+and the reasoning is its mirror image. Closing is outside the vocabulary because it does
+nothing to the form; submitting is outside it because it does the only thing to the form
+that cannot be undone.
 
 **A handle is only valid for the discovery that minted it.** `_DISCOVER_JS` renumbers
 `jt0…jtN` from scratch on every pass, so once the form changes shape the same handle
@@ -40,11 +48,14 @@ a socket. Same split as the task modules, where the runner owns every socket.
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+
+log = logging.getLogger("jobtracker.live")
 
 # How long a poll buys. The page polls about every 2s, so this outlives a couple of
 # missed beats without leaving the browser thread taking screenshots for a closed tab.
@@ -58,25 +69,42 @@ WATCH_WINDOW_S = 8.0
 OPENING = "opening"
 FILLING = "filling"
 READY = "ready"
+SUBMITTED = "submitted"
 CLOSED = "closed"
 
 # The complete command vocabulary. Adding to it is adding to what a web request can make
 # a browser do on a page holding your name, address and work history — so it is a closed
 # list with a test on it, not an open protocol.
 SET = "set"                # put a value in one field, by handle
+CLEAR = "clear"            # empty one field, by handle
 REDISCOVER = "rediscover"  # read the form again; its shape may have changed
 SHOOT = "shoot"            # take a preview screenshot
 HIGHLIGHT = "highlight"    # outline one field, so the preview follows what you edit
 
-VOCABULARY = frozenset({SET, REDISCOVER, SHOOT, HIGHLIGHT})
+VOCABULARY = frozenset({SET, CLEAR, REDISCOVER, SHOOT, HIGHLIGHT})
+
+# `CLEAR` is its own name rather than `SET` with an empty value, for two reasons that both
+# bite. A `file` row's value is a path on this machine, so `""` there is not "no text" but
+# "no file", and the one place the two readings differ is the one holding your resume. And
+# a write that means "undo the write" should not be spelled the same as the write — the
+# outcome is a different status, and overloading the name is how it ends up sharing one.
+#
+# It stays inside the vocabulary because it still cannot activate anything: emptying a
+# field is the exact inverse of filling one. Submitting is not, which is why it is a
+# session flag and not a sixth name here — see `Session.request_submit`.
 
 # Row statuses. `refused` is a real outcome and not an error: a dropdown that does not
 # offer the answer we hold is a question we cannot answer, and saying so beats picking
 # the nearest option and putting words in your mouth.
+#
+# `cleared` is a fifth: you emptied it on purpose. It is not `filled` (there is nothing in
+# it), and it is not `gap` (a gap is a question nobody ever had an answer for). Keeping it
+# distinct is what lets the page say "cleared" rather than implying the fill missed it.
 FILLED = "filled"
 GAP = "gap"
 REFUSED = "refused"
 PENDING = "pending"
+CLEARED = "cleared"
 
 
 @dataclass
@@ -101,27 +129,61 @@ def rows_from(found: list, fields: list, carried: Optional[dict] = None) -> list
     mirror's rows and the fill's own outcome come from a single pass and cannot disagree
     about what is on the page.
 
-    `carried` maps a field *key* to `(status, value)` from the previous reading. Keyed by
-    key rather than handle deliberately: handles are positional and shift when the form
-    grows a question, whereas the key is the ATS's own field name (or the label's slug),
-    which does not. A field with nothing carried is `PENDING` — the correct state for a
-    question that has only just appeared.
+    `carried` maps a field *key* to `(status, value, question_key)` from the previous
+    reading. Keyed by key rather than handle deliberately: handles are positional and
+    shift when the form grows a question, whereas the key is the ATS's own field name (or
+    the label's slug), which does not. A field with nothing carried is `PENDING` — the
+    correct state for a question that has only just appeared.
+
+    `group`/`option` carry the fact that one question is often several inputs: a "How did
+    you hear about us?" set is one question with nine boxes, and the page renders it as
+    one block rather than nine questions named after their own answers. `question_key`
+    names the answer that filled the row, so the page can show you which one it was and
+    let you change it — before this it could only offer to save a question it had failed
+    to answer.
     """
     carried = carried or {}
     rows = []
     for raw, field_ in zip(found, fields):
-        status, value = carried.get(field_.key, (PENDING, ""))
+        status, value, question_key = carried.get(field_.key, (PENDING, "", None))
         rows.append({
             "handle": raw["handle"],
             "key": field_.key,
             "label": field_.label,
+            "group": field_.group,
+            "option": field_.option,
             "type": field_.type,
             "required": bool(field_.required),
             "options": list(field_.options),
             "value": value,
             "status": status,
+            "question_key": question_key,
         })
     return rows
+
+
+def question_of(row: dict) -> str:
+    """What question a row answers. Its set's, when it is one box of several."""
+    return row.get("group") or row.get("label") or row.get("key") or ""
+
+
+def _unanswered(rows: list, required_only: bool = True) -> list:
+    """The questions nothing on the form answers, once each, in the form's own order.
+
+    By question rather than by input, because a checkbox set is one question with several
+    boxes: ticking "LinkedIn" answers "How did you hear about us?", and the eight boxes
+    left unticked are not eight unanswered questions. Counting inputs made a nine-option
+    set into eight permanent blockers on the submit gate.
+    """
+    answered: set = set()
+    pending: dict = {}
+    for row in rows:
+        ident = question_of(row)
+        if row["status"] == FILLED:
+            answered.add(ident)
+        elif (row["required"] or not required_only) and ident not in pending:
+            pending[ident] = row["label"] or row["key"]
+    return [label for ident, label in pending.items() if ident not in answered]
 
 
 def signature(rows: list) -> tuple:
@@ -160,6 +222,11 @@ class Session:
     fields: list = field(default_factory=list)
     note: str = ""
 
+    # What a file field's upload should be called on the way out. Set by the fill from
+    # the answer bank, because the browser thread is where the file is attached and the
+    # name on disk is not the name a person at the other end opens.
+    upload_name: str = ""
+
     shot: Optional[bytes] = None
     shot_at: float = 0.0
     watch_until: float = 0.0
@@ -173,11 +240,42 @@ class Session:
     # any more, which is exactly when you most want it.
     closing: bool = False
 
+    # Sending it. Also not a `Command`, and for the opposite reason: the vocabulary's
+    # stated property is that nothing in it can activate anything, and this activates the
+    # one control on the page that matters. Putting it in the queue would make submitting
+    # the same kind of act as filling a text box — one request among the hundreds this
+    # page makes while you type — when it is the single irreversible thing here.
+    #
+    # So it is a gate rather than a name: armed once, by a request that had to pass every
+    # check below, and claimed exactly once on the browser thread.
+    submit_control: Optional[dict] = None   # {"handle", "label"}, or None if there is none
+    submit_armed: bool = False
+    submitted_at: float = 0.0               # non-zero means it has already gone
+    submit_result: Optional[dict] = None
+
     # -- written from the browser thread -------------------------------------------
     def carried(self) -> dict:
-        """The current statuses, keyed for `rows_from` to carry into the next reading."""
+        """The current statuses, keyed for `rows_from` to carry into the next reading.
+
+        First writer wins, and that is not a style choice. This used to be a plain dict
+        comprehension, so two rows sharing a key collapsed and the *last* one's value was
+        handed back to both. react-select renders a phantom validation input beside every
+        combobox with no name and no id, which keyed on a slug of the same label as the
+        widget it shadows — so typing into a dropdown, waiting one poll, and watching it
+        revert to the prefilled value was the ordinary experience of using this page.
+
+        `_DISCOVER_JS` now skips those, so a duplicate key should not occur; keeping the
+        precedence explicit means the next widget that mints one costs a log line rather
+        than an answer nobody typed.
+        """
         with self.lock:
-            return {r["key"]: (r["status"], r["value"]) for r in self.fields}
+            out: dict = {}
+            for row in self.fields:
+                if row["key"] in out:
+                    log.debug("duplicate field key %r — keeping the first", row["key"])
+                    continue
+                out[row["key"]] = (row["status"], row["value"], row.get("question_key"))
+            return out
 
     def absorb(self, rows: list) -> bool:
         """Take a fresh reading, bumping the epoch only if the handles moved.
@@ -274,6 +372,106 @@ class Session:
         with self.lock:
             return self.closing
 
+    # -- sending it ------------------------------------------------------------------
+    def set_submit_control(self, control: Optional[dict]) -> None:
+        """What the browser thread found to click, or None. Written on every re-reading.
+
+        None is a finding, not a blank: a page with no submit control is a page this
+        cannot send, and the gate refuses rather than offering a button that would do
+        nothing. Same rule as zero fields discovered, one control along.
+        """
+        with self.lock:
+            self.submit_control = dict(control) if control else None
+
+    def unfilled_required(self) -> list:
+        """The questions no required field answers. The checklist, computed once.
+
+        `CLEARED` counts as unfilled, which is the point of it having its own status —
+        deleting a required answer has to put the job back in the way of the button.
+
+        By *question*, not by input. A required checkbox set is answered when any one of
+        its boxes is ticked, so counting members would leave eight permanent blockers on
+        a nine-option "how did you hear about us" and no way past the submit button.
+        """
+        with self.lock:
+            return _unanswered(self.fields)
+
+    def request_submit(self, epoch: int, confirm: str) -> tuple:
+        """Arm the submit, or say why not. Returns `(ok, error)`.
+
+        Every check here is also re-taken on the browser thread before the click, because
+        this reading is up to one tick old and the click cannot be taken back. This is not
+        redundancy for its own sake: the form can reveal a required question in the time
+        between reading the page and pressing the button.
+
+        The typed confirmation is the company name. A `confirm()` dialog is one keystroke
+        from a habit, and this is the only control in the project that spends something
+        you cannot get back — an application goes out under your name, once.
+        """
+        with self.lock:
+            if self.phase == CLOSED:
+                return False, "the window is closed"
+            if self.submitted_at:
+                return False, "this application has already been submitted"
+            if self.phase != READY:
+                return False, f"the form is still {self.phase} — wait for it to settle"
+            if not self.fields:
+                return False, "no application form was found on that page"
+            if not self.submit_control:
+                return False, ("no submit button was found on the form — send it in the "
+                               "window, or read the form again")
+            if epoch != self.epoch:
+                return False, ("the form changed shape since this page was loaded — "
+                               "reload it and look again before sending")
+            missing = [r["label"] or r["key"] for r in self.fields
+                       if r["required"] and r["status"] != FILLED]
+            if missing:
+                shown = ", ".join(missing[:4])
+                more = f" and {len(missing) - 4} more" if len(missing) > 4 else ""
+                return False, f"still needed: {shown}{more}"
+            if confirm.strip().casefold() != self.company.strip().casefold():
+                return False, f"type {self.company} to confirm"
+            self.submit_armed = True
+            return True, ""
+
+    def submit_requested(self) -> bool:
+        with self.lock:
+            return self.submit_armed and not self.submitted_at
+
+    def disarm(self) -> None:
+        """Stand down without spending the submit. For a check that fails at the page.
+
+        `submitted_at` is deliberately untouched: nothing was sent, so the button has to
+        come back rather than jamming the session on a state it never reached.
+        """
+        with self.lock:
+            self.submit_armed = False
+
+    def claim_submit(self, now: Optional[float] = None) -> bool:
+        """Take the one submit this session has. False if it is already taken.
+
+        Under the lock and before the click, so that two reads of the flag — a retry, a
+        second hold loop, anything — cannot become two applications.
+        """
+        with self.lock:
+            if self.submitted_at:
+                return False
+            self.submitted_at = time.time() if now is None else now
+            return True
+
+    def finish_submit(self, result: dict) -> None:
+        """Record what was observed after the click. Never whether it "worked".
+
+        Nothing on this side of an HTTP request can prove an employer received an
+        application. What can be said is what changed — the URL, the number of fields
+        still on the page — and the page says exactly that, because an unverifiable
+        success message is how you end up not re-checking a submit that failed.
+        """
+        with self.lock:
+            self.submit_result = dict(result)
+            self.phase = SUBMITTED
+            self.note = result.get("note", "")
+
     def submit(self, command: Command) -> bool:
         """Queue one command. False if it is not one of the four, or the window is gone.
 
@@ -298,9 +496,15 @@ class Session:
             # fill has not reached, or one a re-reading has only just revealed, is
             # emphatically not "nothing left to type", and counting it as such is the
             # same absence-read-as-success mistake `summary` guards against for zero.
-            need = sum(1 for r in self.fields if r["status"] != FILLED)
+            need = len(_unanswered(self.fields, required_only=False))
             return {
                 "closing": self.closing,
+                "submit_control": dict(self.submit_control)
+                                  if self.submit_control else None,
+                "blockers": _unanswered(self.fields),
+                "submitted": bool(self.submitted_at),
+                "submit_result": dict(self.submit_result)
+                                 if self.submit_result else None,
                 "company": self.company,
                 "ats_job_id": self.ats_job_id,
                 "title": self.title,

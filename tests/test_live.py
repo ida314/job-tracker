@@ -28,13 +28,19 @@ def _session(*specs, handles=None):
 
 # -- the invariant that matters most ---------------------------------------------------
 def test_the_command_vocabulary_cannot_activate_anything():
-    """A web request may make the browser do exactly four things, none of them a click.
+    """A web request may make the browser do exactly five things, none of them a click.
 
     This is `browser.py`'s no-submit rule carried across the new channel. That rule is
     enforced against the module's own source, which says nothing about commands arriving
     from outside it — so the bound has to be restated here, on the vocabulary itself.
+
+    `clear` is in and `submit` is not, and the line between them is what this asserts:
+    emptying a field is the inverse of filling one and reaches nothing a fill does not,
+    whereas submitting activates a control and is therefore a session-level act with its
+    own gate, not a name a queued request can reach.
     """
-    assert live.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+    assert live.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert "submit" not in live.VOCABULARY
 
     # And a command carries a handle and a value — never a selector, never an
     # expression, never anything the browser thread would evaluate.
@@ -169,6 +175,24 @@ def test_the_summary_counts_only_what_still_needs_you():
     assert live.summary(snap) == "1/3 fields filled · 2 need you"
 
 
+def test_a_field_you_emptied_is_counted_as_needing_you():
+    """Clearing is not filling with nothing, and the count is where the difference shows.
+
+    An empty value written as `filled` reads as done and drops out of "need you" — the
+    reading `answers.py` refuses for the identical reason ("an empty answer is
+    indistinguishable from a missing one"), here on a form about to be submitted.
+    """
+    session = _session(("a", "A", "text"), ("b", "B", "text"))
+    session.mark("jt0", live.FILLED, "x")
+    session.mark("jt1", live.FILLED, "y")
+    assert live.summary(session.snapshot()) == "2/2 fields filled · nothing left to type"
+
+    session.mark("jt1", live.CLEARED, "")
+    snap = session.snapshot()
+    assert snap["need"] == 1
+    assert live.summary(snap) == "1/2 fields filled · 1 need you"
+
+
 def test_a_snapshot_carries_no_bytes_and_no_locks():
     """It becomes JSON, and it is built while holding the lock the browser thread wants."""
     session = _session(("a", "A", "text"))
@@ -226,3 +250,61 @@ def test_the_session_names_the_page_the_browser_actually_opened():
     snap = session.snapshot()
     assert snap["url"] == "https://job-boards.greenhouse.io/embed/job_app?for=a&token=1"
     assert live.summary({**snap, "discovered": 0}).endswith(snap["url"])
+
+
+def test_two_rows_sharing_a_key_do_not_overwrite_each_other(caplog):
+    """The carry-over is keyed by field key, and it used to be a dict comprehension.
+
+    So two rows with the same key collapsed and the *last* one won. react-select mints
+    exactly that: a phantom validation input beside every combobox, with no name and no
+    id, keying on a slug of the same label as the widget it shadows. Typing into a
+    dropdown and waiting one poll handed the phantom's stale value back to the row you
+    had just edited — the prefilled "New York, New York" reappearing over the "1" you
+    typed into a phone country selector.
+
+    `_DISCOVER_JS` no longer reports those, so this should not arise; the precedence is
+    explicit anyway, because the next widget that mints a duplicate should cost a log
+    line rather than an answer nobody gave.
+    """
+    from jobtracker.models import FormField
+
+    session = live.start("Acme", "1", "SWE", "https://x")
+    session.absorb(live.rows_from(
+        [{"handle": "jt0"}, {"handle": "jt1"}],
+        [FormField(key="country", label="Country*", type="combobox"),
+         FormField(key="country", label="Country*", type="text")],
+    ))
+    session.mark("jt0", live.FILLED, "1")
+
+    assert session.carried()["country"] == (live.FILLED, "1", None)
+    rebuilt = live.rows_from(
+        [{"handle": "jt0"}, {"handle": "jt1"}],
+        [FormField(key="country", label="Country*", type="combobox"),
+         FormField(key="country", label="Country*", type="text")],
+        session.carried(),
+    )
+    assert rebuilt[0]["value"] == "1", "the edited row reverted to its shadow's value"
+
+
+def test_a_checkbox_set_is_answered_by_one_box_not_by_all_of_them():
+    """A required set with nine options is one blocker, and ticking one clears it.
+
+    Counting inputs left eight permanent entries on the submit gate's checklist and no
+    way past the button — the field-at-a-time version of reading absence as failure.
+    """
+    from jobtracker.models import FormField
+
+    session = live.start("Acme", "1", "SWE", "https://x")
+    members = [
+        FormField(key=f"q[]::{n}", label="How did you hear about us?", type="checkbox",
+                  required=True, group="How did you hear about us?", option=n,
+                  options=("LinkedIn", "Glassdoor", "A friend"))
+        for n in ("LinkedIn", "Glassdoor", "A friend")
+    ]
+    found = [{"handle": f"jt{i}"} for i in range(3)]
+    session.absorb(live.rows_from(found, members))
+
+    assert session.unfilled_required() == ["How did you hear about us?"]
+    session.mark("jt1", live.FILLED, "Glassdoor")
+    assert session.unfilled_required() == []
+    assert session.snapshot()["need"] == 0

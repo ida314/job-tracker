@@ -1298,7 +1298,7 @@ def _live_session():
               FormField(key="why", label="Why do you want to work here?",
                         type="textarea")]
     s.absorb(live.rows_from(found, fields,
-                            {"first_name": ("filled", "Dylan"), "why": ("gap", "")}))
+                            {"first_name": ("filled", "Dylan", None), "why": ("gap", "", None)}))
     s.set_phase("ready", "1/2 fields filled")
     return s
 
@@ -1312,7 +1312,7 @@ def test_the_apply_page_is_a_pure_read(tmp_path):
     conn = store.connect(db)
     session = _live_session()
     before = session.snapshot()
-    server.render_apply(conn, session, "")
+    server.render_apply(conn, session)
     assert session.snapshot() == before
     # And nothing was written: a fresh DB has no tables' worth of rows to lose, so
     # assert on the one thing rendering could plausibly have touched.
@@ -1323,7 +1323,7 @@ def test_the_apply_page_is_a_pure_read(tmp_path):
 def test_the_apply_page_says_so_when_no_window_is_open(tmp_path):
     """Never a 500, and never a blank form implying there is one."""
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, None, "")
+    page = server.render_apply(conn, None)
     assert "No window is open" in page
     assert 'class="lf"' not in page
     conn.close()
@@ -1335,7 +1335,7 @@ def test_zero_fields_renders_as_no_form_found(tmp_path):
 
     conn = store.connect(tmp_path / "state.db")
     session = live.start("Acme", "1", "SWE", "https://x/apply")
-    page = server.render_apply(conn, session, "")
+    page = server.render_apply(conn, session)
     # The body, not the script: the script carries both branches of that sentence and
     # picks between them at runtime, exactly as this function does.
     body = page[:page.rindex("<script>")]
@@ -1352,7 +1352,7 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     every click did nothing at all with nothing logged.
     """
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, _live_session(), "https://viewer.example/vnc")
+    page = server.render_apply(conn, _live_session())
     conn.close()
 
     script = page[page.rindex("<script>"):]
@@ -1360,29 +1360,254 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone"} <= ids
     for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone"):
         assert f"getElementById('{element}')" in script, element
-    for hook in ("lf-file", "tobank", "bankkey", ".lv"):
+    for hook in ("lf-file", "lf-detach", "tobank", "bankkey", "savebank", "bankval",
+                 ".lv"):
         assert hook in script, hook
-    for endpoint in ("/api/session", "/api/session/set", "/api/session/rediscover",
+    for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
+                     "/api/session/highlight", "/api/session/rediscover",
                      "/api/session/file", "/api/session/close", "/api/answer"):
         assert endpoint in script, endpoint
 
 
-def test_the_apply_page_carries_no_control_that_can_submit(tmp_path):
-    """The invariant `browser.py` protects, restated on the page that drives it.
+def test_the_only_way_to_submit_is_armed_and_one_shot(tmp_path):
+    """The page can send an application now. Everything about how is the invariant.
 
-    An application is irreversible and goes out under your name. The mirror exists to
-    make typing fast, not to make sending it one click away.
+    It replaces "there is no control on this page that can submit". That rule existed
+    because an application is irreversible and goes out under your name — which is still
+    true, and is now carried by the gate rather than by the absence of a button.
+
+    Three properties, and all three have to hold together: it is not in the command
+    vocabulary (so it cannot be reached by the channel that carries your typing), it is
+    not an HTML form (so the CSP's `form-action 'none'` still means something and a
+    stray Enter cannot send anything), and it is spent exactly once.
     """
+    from jobtracker import live as live_mod
+
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, _live_session(), "https://viewer.example/vnc")
+    page = server.render_apply(conn, _live_session())
     conn.close()
+
+    # Still not a form. The page fetches; it never submits anything itself.
     assert "<form" not in page
     assert 'type="submit"' not in page
-    assert "/api/session/submit" not in page
-    # The vocabulary the page can reach is the four in live.py, and none of them clicks.
-    from jobtracker import live
 
-    assert live.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+    # And still not something the queue can carry: `submit` is a session-level gate, so
+    # nothing that reaches `Session.submit` can activate a control.
+    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert "submit" not in live_mod.VOCABULARY
+    session = live_mod.current()
+    assert session.submit(live_mod.Command(kind="submit", handle="jt0")) is False
+
+
+def test_a_submit_is_refused_until_every_required_field_is_filled(tmp_path):
+    """And the refusal names them. "Not ready" is not something you can act on."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    session.mark("jt0", live_mod.GAP, "")   # First Name is the required one
+
+    res = h._api_session_submit({"epoch": session.epoch, "confirm": "Acme"})
+    assert res["ok"] is False
+    assert "First Name" in res["error"]
+    assert session.submit_requested() is False
+
+    session.mark("jt0", live_mod.FILLED, "Dylan")
+    assert h._api_session_submit(
+        {"epoch": session.epoch, "confirm": "Acme"})["ok"] is True
+    assert session.submit_requested() is True
+
+
+def test_deleting_a_required_answer_puts_it_back_in_the_way_of_the_button(tmp_path):
+    """The reason `cleared` is a status and not "filled with nothing"."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    session.mark("jt0", live_mod.FILLED, "Dylan")
+    assert h._api_session_submit(
+        {"epoch": session.epoch, "confirm": "Acme"})["ok"] is True
+
+    session.mark("jt0", live_mod.CLEARED, "")
+    res = h._api_session_submit({"epoch": session.epoch, "confirm": "Acme"})
+    assert res["ok"] is False
+    assert "First Name" in res["error"]
+
+
+def test_the_typed_confirmation_has_to_match_the_company(tmp_path):
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    session.mark("jt0", live_mod.FILLED, "Dylan")
+
+    for typed in ("", "acme corp", "Stripe", "  "):
+        res = h._api_session_submit({"epoch": session.epoch, "confirm": typed})
+        assert res["ok"] is False, typed
+        assert "type Acme" in res["error"]
+    assert session.submit_requested() is False
+
+    # Case and surrounding space are not the point of the check.
+    assert h._api_session_submit(
+        {"epoch": session.epoch, "confirm": " acme "})["ok"] is True
+
+
+def test_a_form_with_no_submit_control_says_so_rather_than_offering_a_dead_button(
+        tmp_path):
+    """Zero candidates is a finding, one control along from zero fields discovered.
+
+    A button that looks like it would work if you filled one more field, over a page with
+    nothing on it to press, is absence read as success in the place it costs most.
+    """
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.mark("jt0", live_mod.FILLED, "Dylan")
+    session.set_submit_control(None)
+
+    res = h._api_session_submit({"epoch": session.epoch, "confirm": "Acme"})
+    assert res["ok"] is False
+    assert "no submit button" in res["error"]
+
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, session)
+    conn.close()
+    body = page[:page.rindex("<script>")]
+    assert "No submit button was found" in body
+    assert 'id="submitbtn"' not in body, "a dead button was rendered anyway"
+
+
+def test_a_submit_written_against_a_form_that_has_moved_is_refused(tmp_path):
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    session.mark("jt0", live_mod.FILLED, "Dylan")
+
+    res = h._api_session_submit({"epoch": session.epoch - 1, "confirm": "Acme"})
+    assert res["ok"] is False
+    assert "changed shape" in res["error"]
+    assert h._api_session_submit({"epoch": "soon", "confirm": "Acme"})["ok"] is False
+    assert session.submit_requested() is False
+
+
+def test_an_application_can_only_be_sent_once(tmp_path):
+    """Two reads of the armed flag must not become two applications."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    session.mark("jt0", live_mod.FILLED, "Dylan")
+    assert h._api_session_submit(
+        {"epoch": session.epoch, "confirm": "Acme"})["ok"] is True
+
+    assert session.claim_submit() is True
+    assert session.claim_submit() is False, "the one submit was spent twice"
+    assert session.submit_requested() is False
+
+    res = h._api_session_submit({"epoch": session.epoch, "confirm": "Acme"})
+    assert res["ok"] is False
+    assert "already been submitted" in res["error"]
+
+
+def test_the_form_is_not_sendable_before_it_has_settled(tmp_path):
+    """`opening` and `filling` are still writing answers into it."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    session.mark("jt0", live_mod.FILLED, "Dylan")
+
+    for phase in (live_mod.OPENING, live_mod.FILLING, live_mod.CLOSED):
+        session.set_phase(phase)
+        assert h._api_session_submit(
+            {"epoch": session.epoch, "confirm": "Acme"})["ok"] is False, phase
+
+
+def test_a_submit_nobody_can_vouch_for_is_offered_rather_than_recorded(tmp_path):
+    """"applied" is the status that stops a job coming back round.
+
+    Written on a guess, a failed send goes quiet in exactly the way a successful one
+    does — and this is the one table whose job is to remember. So a page that did not
+    move offers the write instead of making it, the shape `inbox` uses for proposals.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    session = _live_session()
+    session.claim_submit()
+    session.finish_submit({"changed": False, "url_before": "https://x/apply",
+                           "url_after": "https://x/apply", "fields_before": 2,
+                           "fields_after": 2, "note": "nothing changed"})
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "has not been recorded as applied" in page
+    assert 'id="recordit"' in page
+    script = page[page.rindex("<script>"):]
+    assert "getElementById('recordit')" in script
+    assert "/api/application" in script
+
+
+def test_a_submit_that_landed_is_recorded_without_being_asked(tmp_path):
+    conn = store.connect(tmp_path / "state.db")
+    session = _live_session()
+    session.claim_submit()
+    session.finish_submit({"changed": True, "url_before": "https://x/apply",
+                           "url_after": "https://x/thanks", "fields_before": 2,
+                           "fields_after": 0, "note": "the page went to https://x/thanks"})
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "Recorded in Applications." in page
+    assert 'id="recordit"' not in page, "it asked about something it already did"
+
+
+def test_the_submit_controls_have_their_handlers_on_the_page_that_renders_them(tmp_path):
+    conn = store.connect(tmp_path / "state.db")
+    session = _live_session()
+    session.set_submit_control({"handle": "go", "label": "Submit application"})
+    page = server.render_apply(conn, session)
+    conn.close()
+    script = page[page.rindex("<script>"):]
+
+    for element in ("armtext", "submitbtn", "sendmsg", "blockers"):
+        assert f'id="{element}"' in page, element
+        assert f"getElementById('{element}')" in script, element
+    assert "/api/session/submit" in script
+    # The second of the three gates, and the one you can misclick past.
+    arm = script[script.index("submitbtn.addEventListener"):]
+    assert arm.index("confirm(") < arm.index("/api/session/submit")
+
+
+def test_what_happened_after_the_click_is_reported_rather_than_assumed(tmp_path):
+    """Nothing on this side can prove an employer received an application.
+
+    So a page that changed and a page that did not are two different readings, and
+    neither of them is the sentence "submitted successfully".
+    """
+    conn = store.connect(tmp_path / "state.db")
+    session = _live_session()
+    session.claim_submit()
+    session.finish_submit({
+        "changed": False, "url_before": "https://x/apply", "url_after": "https://x/apply",
+        "fields_before": 2, "fields_after": 2,
+        "note": "clicked 'Submit application' and nothing on the page changed — "
+                "read the preview before assuming it went",
+    })
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "nothing on the page changed" in page
+    assert "Read the preview before assuming it went" in page
+    assert "successfully" not in page
+    # And the controls are gone: there is nothing left to arm.
+    assert 'id="submitbtn"' not in page[:page.rindex("<script>")]
 
 
 def test_the_apply_page_lands_the_closed_state_rather_than_looking_alive(tmp_path):
@@ -1399,7 +1624,7 @@ def test_the_apply_page_lands_the_closed_state_rather_than_looking_alive(tmp_pat
     conn = store.connect(tmp_path / "state.db")
     session = _live_session()
     session.set_phase(live_mod.CLOSED)
-    page = server.render_apply(conn, session, "")
+    page = server.render_apply(conn, session)
     conn.close()
 
     # From <body>, so the stylesheet's own `button[disabled]` rule is not read as markup.
@@ -1419,7 +1644,7 @@ def test_the_apply_page_lands_the_closed_state_rather_than_looking_alive(tmp_pat
 def test_an_open_session_leaves_the_form_usable(tmp_path):
     """The other half of the assertion above: `disabled` must not leak into a live page."""
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, _live_session(), "")
+    page = server.render_apply(conn, _live_session())
     conn.close()
     body = page[page.index("<body"):page.rindex("<script>")]
     assert "disabled" not in body
@@ -1431,12 +1656,134 @@ def test_closing_the_window_is_confirmed_first(tmp_path):
     the same fact that makes this a browser rather than a link — so the window is the
     only place the work exists and one misclick is all of it."""
     conn = store.connect(tmp_path / "state.db")
-    page = server.render_apply(conn, _live_session(), "")
+    page = server.render_apply(conn, _live_session())
     conn.close()
     script = page[page.rindex("<script>"):]
     close_handler = script[script.index("closewin.addEventListener"):]
     assert "confirm(" in close_handler[:600]
     assert close_handler.index("confirm(") < close_handler.index("/api/session/close")
+
+
+def test_pausing_stops_the_work_rather_than_hiding_it(tmp_path):
+    """Pause suppressed the `<img>` src and nothing else.
+
+    The poll kept refreshing the watch window, so the browser thread kept rendering a
+    full-page JPEG every four seconds for a picture nobody was going to look at — on the
+    box that also runs the nightly pipeline. `watching()` is the only thing that stops
+    the work, so pausing has to withhold the claim, not discard the bytes.
+    """
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    assert not session.watching()
+
+    assert h._api_session()["ok"] is True
+    assert session.watching(), "an ordinary poll is what says somebody is looking"
+
+    session.watch_until = 0.0
+    assert h._api_session(idle=True)["ok"] is True
+    assert not session.watching(), "a paused poll still claimed a watcher"
+
+
+def test_the_paused_poll_carries_the_flag_the_server_reads(tmp_path):
+    """The two halves of Pause are in different files, so assert they agree."""
+    conn = store.connect(tmp_path / "state.db")
+    script = server.render_apply(conn, _live_session())
+    conn.close()
+    script = script[script.rindex("<script>"):]
+    assert "'/api/session' + (paused ? '?idle=1' : '')" in script
+    assert 'idle="idle=1" in self.path' in inspect.getsource(server.Handler.do_GET)
+
+
+def test_the_preview_says_how_old_it_is(tmp_path):
+    """It said "refreshed just now" forever, including when it had stopped refreshing.
+
+    That was survivable while the window was reachable and this was a second opinion. It
+    is the only view of the form now, so how far behind it is has to be on the page.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    script = page[page.rindex("<script>"):]
+    assert "function age(then)" in script
+    assert "ago.textContent = age(s.shot_at)" in script
+    assert "'s ago'" in script and "'m ago'" in script
+
+
+def test_the_poll_puts_back_a_value_the_fill_landed_after_the_page_did(tmp_path):
+    """The fill takes seconds and the page renders immediately, so every prefilled answer
+    arrived on the real form and nowhere on the page mirroring it."""
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    script = page[page.rindex("<script>"):]
+
+    assert "input.value = f.value" in script
+    assert "input.checked = f.status === 'filled'" in script
+    # Still only text, classes and values — the rows are the server's, not the script's.
+    for writer in ("innerHTML", "insertAdjacentHTML", "createElement"):
+        assert writer not in script, writer
+
+
+def test_the_page_and_its_script_call_a_status_the_same_thing(tmp_path):
+    """Two copies of one table: `_STATUS_WORD` renders it, `paint` repaints it on a poll.
+
+    Nothing bound them, so a status added to one showed the word on first load and the
+    raw enum after the first poll — or the reverse. Both are the kind of drift that reads
+    as a bug in the browser rather than in a lookup table.
+    """
+    script = server._APPLY_JS
+    for status, word in server._STATUS_WORD.items():
+        assert f"{status}: '{word}'" in script, f"{status} is not painted the same way"
+
+    # And every status `live` defines has a word at all — an unlisted one falls through
+    # to the raw enum on the page, which is legible to nobody.
+    from jobtracker import live as live_mod
+    for status in (live_mod.FILLED, live_mod.GAP, live_mod.REFUSED,
+                   live_mod.PENDING, live_mod.CLEARED):
+        assert status in server._STATUS_WORD
+
+
+def test_deleting_a_value_is_sent_as_a_clear_rather_than_an_empty_set(tmp_path):
+    """The endpoint refuses an empty `set`, so the page has to know the difference.
+
+    If it did not, emptying a text box would come back "refused" over a field that is in
+    fact still holding the old answer — the mirror disagreeing with the form.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    script = page[page.rindex("<script>"):]
+
+    assert "var url = '/api/session/clear';" in script
+    assert "if (value) { url = '/api/session/set'; body.value = value; }" in script
+
+
+def test_an_empty_set_is_refused_and_names_the_endpoint_that_does_it(tmp_path):
+    """Refusing rather than guessing, because for a file row the value is a path on this
+    machine — so "" means no file there and no text everywhere else."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    refused = h._api_session_set({"handle": "jt0", "value": "",
+                                  "epoch": session.epoch})
+    assert refused["ok"] is False
+    assert "clear" in refused["error"]
+    assert session.commands.empty()
+
+    assert h._api_session_clear({"handle": "jt0", "epoch": session.epoch})["ok"] is True
+    command = session.commands.get_nowait()
+    assert (command.kind, command.handle, command.value) == (
+        live_mod.CLEAR, "jt0", "")
+
+
+def test_a_clear_with_an_unreadable_epoch_is_refused_rather_than_guessed(tmp_path):
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    assert h._api_session_clear({"handle": "jt0", "epoch": "soon"})["ok"] is False
+    assert h._api_session_clear({"epoch": session.epoch})["ok"] is False
+    assert session.commands.empty()
 
 
 def test_a_hostile_label_cannot_break_out_of_the_mirrored_form(tmp_path):
@@ -1451,7 +1798,7 @@ def test_a_hostile_label_cannot_break_out_of_the_mirrored_form(tmp_path):
         [FormField(key="k", label='"><script>alert(1)</script>', type="select",
                    options=('"><img onerror=alert(1)>',))],
     ))
-    page = server.render_apply(conn, s, "")
+    page = server.render_apply(conn, s)
     conn.close()
     # Parsed, not grepped. A substring assertion would fail on the *escaped* form,
     # which is the outcome we want — what matters is whether the browser ends up with
@@ -1525,7 +1872,7 @@ def test_the_window_can_be_closed_from_the_page(tmp_path):
     assert h._api_session_close()["ok"] is True
     assert session.close_requested() is True
     assert session.commands.empty()
-    assert live_mod.VOCABULARY == {"set", "rediscover", "shoot", "highlight"}
+    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
 
 
 def test_closing_works_from_any_phase(tmp_path):
@@ -2034,3 +2381,125 @@ def test_an_unknown_list_is_refused(tmp_path):
     h = _handler_for(tmp_path / "s.db", path)
     res = h._api_rule({"phrase": "x", "list": "role_type_exclud"})
     assert res["ok"] is False and "unknown criteria list" in res["error"]
+
+
+# -- the answer behind a field, and the way to change it ---------------------------------
+def _mirror(rows):
+    """A session holding exactly these rows. `rows` are `(FormField, status, value,
+    question_key)` — the shape `browser.fill_application` publishes."""
+    from jobtracker import live
+    from jobtracker.models import FormField  # noqa: F401 — used by callers
+
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    found = [{"handle": f"jt{i}"} for i in range(len(rows))]
+    fields = [r[0] for r in rows]
+    carried = {r[0].key: (r[1], r[2], r[3]) for r in rows}
+    session.absorb(live.rows_from(found, fields, carried))
+    session.set_phase("ready", "x")
+    return session
+
+
+def test_a_field_says_which_answer_filled_it_and_lets_you_change_it(tmp_path):
+    """The bank block used to appear only on questions the fill could not answer.
+
+    So the bank was writable exactly once per question — the first time it was asked —
+    and a field holding "New York, New York" under the label "Country" gave no sign that
+    the value had come from the bank at all, let alone which key held it. The only way to
+    fix a wrong answer already going into real applications was to edit the file.
+    """
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _mirror([
+        (FormField(key="country", label="Country*", type="combobox", required=True),
+         live.FILLED, "New York, New York", "location"),
+        (FormField(key="why", label="Why us?", type="textarea"), live.GAP, "", None),
+    ]))
+    conn.close()
+
+    assert "from your answer bank as <code>location</code>" in page
+    assert 'class="bankval" type="text" value="New York, New York"' in page
+    assert 'class="savebank" data-key="location"' in page
+    # An unanswered field still offers to teach the bank, under a key you can edit.
+    assert 'class="tobank"' in page and 'value="why_us"' in page
+
+
+def test_a_checkbox_set_renders_as_one_question_with_its_choices(tmp_path):
+    """Nine boxes under one head, not nine questions named after their own answers."""
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    members = [
+        FormField(key=f"q[]::{n.lower()}", label="How did you hear about us?",
+                  type="checkbox", required=True, group="How did you hear about us?",
+                  option=n, options=("LinkedIn", "Glassdoor"))
+        for n in ("LinkedIn", "Glassdoor")
+    ]
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(
+        conn, _mirror([(m, live.GAP, "", None) for m in members])
+    )
+    conn.close()
+
+    assert page.count('class="lfg"') == 1
+    assert page.count("How did you hear about us?") >= 1
+    assert "> LinkedIn</label>" in page and "> Glassdoor</label>" in page
+    # One bank control for the question, not one per box, and each box knows the choice
+    # it sends — 'yes' compared against "LinkedIn" would refuse every tick.
+    assert page.count('class="tobank"') == 1
+    assert 'data-option="LinkedIn"' in page
+
+
+def test_a_dropdown_renders_as_a_dropdown_when_its_options_are_known(tmp_path):
+    """And as a text box, with a note, when they are not — because a `<select>` holding
+    only "— choose —" is worse than either."""
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _mirror([
+        (FormField(key="q1", label="Work auth?", type="combobox", required=True,
+                   options=("Yes", "No")), live.GAP, "", None),
+        (FormField(key="country", label="Country*", type="combobox", required=True),
+         live.GAP, "", None),
+    ]))
+    conn.close()
+
+    assert '<option value="Yes">Yes</option>' in page
+    assert "a menu on the real form" in page
+    assert page.count("<select class=\"lv\"") == 1
+
+
+def test_the_filename_an_employer_sees_is_a_setting(tmp_path):
+    """Disk names are minted for collision safety — `twilio_7816159_1f4c9a02.pdf` — and
+    a person at the other end opens whatever the upload was called."""
+    answers = tmp_path / "answers.yaml"
+    (tmp_path / "resume.pdf").write_bytes(b"%PDF-1.4 x")
+    answers.write_text("identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n"
+                       "resume: ./resume.pdf\n")
+
+    handler = _handler_for(tmp_path / "state.db", config.CRITERIA_YAML,
+                           answers_path=answers)
+    assert handler._api_resume_name({"name": "Dylan_Dodds_Resume.pdf"})["ok"] is True
+    assert "Dylan_Dodds_Resume.pdf" in answers.read_text()
+    # A path is refused: this names a file, it does not choose where one goes.
+    assert handler._api_resume_name({"name": "../etc/passwd"})["ok"] is False
+
+
+def test_changing_an_identity_answer_reaches_identity_not_answers(tmp_path):
+    """`Answers.get` reads `identity:` first, so an `answers:` entry of the same name is
+    a write nothing ever loads — saved, validated, and silently inert."""
+    import yaml as _yaml
+
+    answers = tmp_path / "answers.yaml"
+    answers.write_text("identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n"
+                       "  location: New York, New York\n")
+
+    handler = _handler_for(tmp_path / "state.db", config.CRITERIA_YAML,
+                           answers_path=answers)
+    assert handler._api_answer({"question_key": "location", "value": "Brooklyn, NY"})["ok"]
+
+    parsed = _yaml.safe_load(answers.read_text())
+    assert parsed["identity"]["location"] == "Brooklyn, NY"
+    assert "location" not in (parsed.get("answers") or {})

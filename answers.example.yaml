@@ -39,6 +39,12 @@ identity:
 resume: ./resume.pdf
 # cover_letter: ./cover-letter.pdf
 
+# What the employer's copy is called. The file on disk is named for collision safety —
+# a resume tailored to one posting lands as `twilio_7695702_1f4c9a02.pdf` — and that is
+# what a person at the other end would otherwise open. Blank means `resume.pdf`; the
+# extension always comes from the real file, whatever this says.
+# resume_name: "Ada Lovelace - Resume.pdf"
+
 # Everything else, keyed by a slug. A plain string is the answer; the long form adds
 # `aliases`, which are the exact question texts this answer covers. Aliases are what let
 # an answer you wrote once be recognized at every company that phrases it the same way,

@@ -13,6 +13,7 @@ Two mechanisms have tests because they are easy to break invisibly:
 """
 
 import pytest
+import yaml
 
 from jobtracker.answers import (
     GAP_MARKER,
@@ -23,6 +24,7 @@ from jobtracker.answers import (
     render_gap_block,
     rewrite_gaps,
     set_resume,
+    set_resume_name,
     slugify,
     upsert_identity,
 )
@@ -359,3 +361,99 @@ def test_a_first_save_comes_out_in_canonical_order(tmp_path):
             < body.index("  email:") < body.index("  school:"))
     assert body.index("  school:") < body.index("# A path, relative to this file.")
     assert load_answers(path).get("school") == "NYU"
+
+
+# -- changing an answer you already wrote ----------------------------------------------
+def test_answering_a_question_twice_updates_it_rather_than_shadowing_it():
+    """This used to insert unconditionally, and the failure was completely silent.
+
+    A key already in the file got a *second* YAML mapping key with the same name.
+    `yaml.safe_load` accepts that and keeps the last occurrence — the old one, since the
+    new entry went in at the top — so `load_answers` validated it, `safewrite` accepted
+    it, the page said saved, and the value you typed was discarded. `/apply` now offers
+    this on every field rather than only on unanswered ones, so "save" usually means
+    "change what I told you last time".
+    """
+    text = (
+        "identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n\n"
+        "answers:\n"
+        "  work_authorization:\n"
+        "    value: \"Yes\"\n"
+        "    aliases:\n"
+        "      - \"Are you authorized to work in the US?\"\n"
+        "  # a comment of my own\n"
+        "  current_employer: \"NYU\"\n"
+    )
+    out = insert_answer(text, "work_authorization", "No")
+
+    assert yaml.safe_load(out)["answers"]["work_authorization"]["value"] == "No"
+    assert out.count("  work_authorization:") == 1
+    assert "# a comment of my own" in out
+
+
+def test_editing_an_answer_keeps_the_aliases_that_made_it_match():
+    """An alias is the exact wording one employer used. Editing the value is not a
+    statement about any of them, and dropping them would un-match every form the answer
+    already fills."""
+    text = (
+        "identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n\n"
+        "answers:\n"
+        "  sponsorship:\n"
+        "    value: \"No\"\n"
+        "    aliases: [\"Will you require sponsorship?\"]\n"
+    )
+    out = insert_answer(text, "sponsorship", "Yes", ["Do you need a visa?"])
+    parsed = yaml.safe_load(out)["answers"]["sponsorship"]
+
+    assert parsed["value"] == "Yes"
+    assert parsed["aliases"] == ["Will you require sponsorship?", "Do you need a visa?"]
+    # Saving the same thing again does not grow the list.
+    again = yaml.safe_load(insert_answer(out, "sponsorship", "Yes",
+                                         ["Do you need a visa?"]))
+    assert len(again["answers"]["sponsorship"]["aliases"]) == 2
+
+
+def test_a_scalar_answer_becomes_the_long_form_when_it_gains_an_alias():
+    """A plain string is a legal answer and has nowhere to put an alias. Expanding it is
+    the only way an edit can also record the question it was an answer to."""
+    text = ("identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n\n"
+            "answers:\n  current_employer: \"NYU\"\n")
+    parsed = yaml.safe_load(
+        insert_answer(text, "current_employer", "Anthropic", ["Current employer?"])
+    )["answers"]["current_employer"]
+
+    assert parsed == {"value": "Anthropic", "aliases": ["Current employer?"]}
+
+
+# -- the name a resume goes out under --------------------------------------------------
+def test_the_resume_can_be_given_the_name_an_employer_sees(tmp_path):
+    """Disk names are minted for collision safety and read like it. This is the one a
+    person at the other end opens, and until now it was the same string."""
+    text = ("identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n"
+            "resume: ./resume.pdf\n")
+    out = set_resume_name(text, "Dylan_Dodds_Resume.pdf")
+
+    assert yaml.safe_load(out)["resume_name"] == "Dylan_Dodds_Resume.pdf"
+    # Beside the key it qualifies, and replaced in place on a second save.
+    assert out.count("resume_name:") == 1
+    assert set_resume_name(out, "Other.pdf").count("resume_name:") == 1
+    # Clearing removes the key. A blank would load as an answer and send a file called
+    # ".pdf" — the same reading `upsert_identity` refuses for an identity field.
+    assert "resume_name" not in yaml.safe_load(set_resume_name(out, ""))
+
+
+def test_the_sent_name_is_not_part_of_the_answers_hash(tmp_path):
+    """It changes which name an upload carries, not which answer goes in any field, so a
+    plan built before it was set is still a correct plan. Folding it in would re-plan
+    every posting for a cosmetic rename."""
+    (tmp_path / "resume.pdf").write_bytes(b"%PDF-1.4 x")
+    path = tmp_path / "answers.yaml"
+    base = ("identity:\n  first_name: A\n  last_name: B\n  email: a@b.c\n"
+            "resume: ./resume.pdf\n")
+    path.write_text(base)
+    before = load_answers(path).hash
+    path.write_text(set_resume_name(base, "Ada_Lovelace_CV.pdf"))
+    after = load_answers(path)
+
+    assert after.resume_name == "Ada_Lovelace_CV.pdf"
+    assert after.hash == before

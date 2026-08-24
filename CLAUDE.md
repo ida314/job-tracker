@@ -457,14 +457,17 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   `serve` restarted. `_hold_until_closed` waits in `page.wait_for_timeout(500)`; both
   endings then arrive as an empty page list or `TargetClosedError`. Measured against a
   real browser 2026-08-16, and there is a test asserting the call is still there.
-- **The browser opens on the machine running `serve`, not the machine viewing the page.**
-  On a headless host (gx10) that means no window at all, or an invisible one under
-  `xvfb-run`. `JOBTRACKER_BROWSER_VIEW_URL` puts a "View window" link on the Today card
-  pointing at whatever shows that host's display (noVNC, xpra, …) — **a link and nothing
-  more.** The app must never start, probe, or manage the viewer: it is deployment, it
-  lives on the machine, and a dashboard that thought it owned a remote desktop would be a
-  second system to debug. Unset, the link does not render. **Since 2026-08-18 that link is the
-  escape hatch, not the interface** — see "The mirrored form" below.
+- **The browser opens on the machine running `serve`, not the machine viewing the page**,
+  and as of 2026-08-22 **nothing in this app links you to it**. `JOBTRACKER_BROWSER_VIEW_URL`
+  and both "View window" links are deleted; `config.BROWSER_VIEW_URL` no longer exists.
+  They pointed at a remote-desktop view of that host's display (noVNC, xpra, …) and existed
+  for the two things the mirror could not do — read the application over, and send it. The
+  full-page preview is the first and `/apply`'s Submit is the second, so what was left was a
+  video stream for fifteen text fields, which is the slow path this page was built to
+  replace. A link to an interface too laggy to use is worse than no link.
+  **`DISPLAY` and Xvfb stay** — Chromium will not launch headful without a display, and
+  headless is a different bot-detection posture. The window is an implementation detail
+  nobody looks at, not a thing that stopped existing.
 - **The resume upload is base64 inside JSON, not multipart.** It reuses the one POST path
   this server has and keeps `form-action 'none'` in the CSP meaningful — the page never
   submits a form, it fetches. `MAX_UPLOAD` is applied per-route, so a decision POST still
@@ -840,13 +843,33 @@ names what is missing, and an on-demand browser that carries the plan to the pag
 - **The browser never submits.** There is no click path in `browser.py` at all and a
   test asserts it against the source (no `.click(`, `.press(`, `requestSubmit`,
   `dispatchEvent`). An application is irreversible and goes out under the user's name.
+  (Superseded twice: `_submit` gained the one gated click on 2026-08-22, and `_press`
+  gained the widget click on 2026-08-23 — see "Reading a form as it actually is" below.
+  The ban on `requestSubmit`/`form.submit`/`dispatchEvent`/`keyboard.press` never moved.)
 - **The model may only point, never write.** Its schema is an enum of answer keys the
   user already wrote plus `none`. There must be no code path by which a sentence the
   model composed reaches a form field — free text with no stored answer is a gap, the
   same as an unanswered dropdown. It is the fourth bounded role in DESIGN.md §8, and the
   narrowest.
 - **A dropdown that does not offer our answer is a gap, not a fill.** Picking the nearest
-  option puts an answer the candidate did not give onto a submitted application.
+  option puts an answer the candidate did not give onto a submitted application. Extended
+  2026-08-23: a dropdown whose options we cannot *see* is also not something the model may
+  point at (`prefill.vocabulary_known`). `match_option` waves any string through when
+  `options` is empty, which is right for a text box and, for a menu, is a statement that
+  nothing checked it — and that is how identity `location` ("New York, New York") ended
+  up in a phone-number country selector. An `exact` canonical match or an alias the *user*
+  wrote is still allowed through; only the model is held to it.
+- **A resolved `question_key` is only stored when it actually placed a value.**
+  `known_question_keys` replays it as a deterministic alias at every company, so storing
+  one the rules then refused turned a guess into a rule nothing would reconsider.
+  `jobtracker forget-question "<label>"` is the way back out, and it moves all three
+  places that hold the decision — the `form_fields` key, the closed `prefill_gaps` row,
+  and the `prefill_plans` whose stored value beats a fresh `resolve_field`.
+- **The name a resume goes out under is a setting, not the name on disk.** Disk names are
+  minted for collision safety (`resumes.stored_name`) and read like it; `resume_name` in
+  the answer bank is what a person at the other end opens, defaulting to `resume<ext>`.
+  The suffix always comes from the real file. It is **not** in `Answers.hash` — it changes
+  no answer in any field, and folding it in would re-plan every posting for a rename.
 - **Gaps are split generic vs company-specific** (2026-08-16). `prefill.split_gaps`:
   generic = a key in `GENERIC_KEYS` *or* asked by 2+ employers, sorted by ask count
   descending; everything else groups under its one company. No new state and no
@@ -887,8 +910,11 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   `.bak` → atomic swap), extracted from `server._api_rule`, which had it inline.
 - **Adding an answer is text surgery, not a YAML round trip.** A round trip deletes every
   comment in the file, including the stubs the user is working through. Same for the
-  identity fields and the resume path — `upsert_identity` and `set_resume` sit beside
-  `insert_answer` in `answers.py` for exactly that reason.
+  identity fields and the resume path — `upsert_identity`, `set_resume` and
+  `set_resume_name` sit beside `insert_answer` in `answers.py` for exactly that reason.
+  `insert_answer` **updates in place** (2026-08-23) and only rewrites the `value:` line,
+  leaving alias lists, quoting and comments byte-for-byte; aliases are additive, because
+  an alias is one employer's exact wording and editing the value says nothing about it.
 - **The Settings tab creates the bank; there is no `cp` step** (added 2026-08-15). Saving
   identity writes `answers.STARTER` and upserts into it, so a fresh box gets there from
   the browser. STARTER deliberately carries the example's prose and **none of its values**
@@ -906,6 +932,45 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   the DOM on the first `apply-to` visit and cached per company, which is what puts every
   ATS in the same gap loop. A company whose form is neither held nor fetchable is **not**
   counted as pending work — it is waiting on a browser, not a model.
+
+### Reading a form as it actually is (2026-08-23)
+
+Measured against Twilio's live Greenhouse embed and kept as
+`tests/fixtures/greenhouse_react_form.html`. **That page has no `<select>` on it at all**,
+and five reported bugs were one consequence of assuming it did.
+
+- **Every dropdown is a react-select combobox**, so `page.fill` sets a search query the
+  widget discards on its next render — *and* remounts the input, taking the `data-jt-id`
+  with it. The field stayed empty while the row reported `filled` and the submit gate
+  counted it as answered: absence read as success, on the one page where the cost is an
+  application going out blank. `_pick` opens the widget, reads what it offers, and presses
+  the matching option; `data-jt-ctl` is on the *control*, which survives being typed into.
+- **A combobox's options exist only while its menu is open**, so `_learn_vocabularies`
+  opens each unknown one once per visit (bounded by `MAX_VOCABULARIES`) and
+  `upsert_form_field` keeps them — its `options` column is `COALESCE`d now, because a DOM
+  pass that cannot see them was erasing what the Greenhouse API had published. A field
+  past the cap keeps an empty list and renders as a text box saying so.
+- **`_press` is the module's second click and the rule got narrower, not looser.**
+  `_submit` presses the employer's button once behind the gate; `_press` presses a
+  *widget's* own control — an option, a clear indicator, its open/close toggle — reached
+  only from `_pick`, `_clear` and `_read_vocabulary`, always scoped to the control of the
+  field being written. A controlled React component learns a value from its own handlers
+  and nothing else. There is a test pinning both sites and all three callers.
+- **`aria-hidden` elements are skipped.** react-select renders a phantom
+  `<input required tabindex="-1" aria-hidden="true">` beside every combobox; with no name
+  and no id it keyed on a slug of the same label as the widget it shadows. One dropdown,
+  two required rows — and since `Session.carried()` is keyed by field key, the phantom's
+  stale value was handed back to the row you had just edited, which is what made typing
+  into a field revert one poll later. `carried()` is first-wins now as a second line.
+- **A checkbox set is one question.** Members carry the question in `label`/`group` and
+  their own choice in `option`; grouping is fieldset legend → Greenhouse's `description`
+  attribute → shared `name`, and a set of one is not a set. One gap, one block on the
+  page, one bank control — and each box pushes *its own choice*, not `"yes"`.
+  `live._unanswered` counts by question, or a nine-box set would leave eight permanent
+  blockers on the submit gate.
+- **`Country*` on a Greenhouse form is the phone's dialling code** — its menu offers
+  "United States +1". Nothing in the code knows that, and nothing needs to: it is a
+  dropdown with a vocabulary now, so a wrong answer is refused rather than typed.
 
 Three things learned from live forms; all are handled and none is obvious:
 
@@ -958,12 +1023,35 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   that made them** — an HTTP handler calling into one is the bug this shape prevents. So a
   write is queued and answered immediately and the outcome arrives on the next poll, the
   same shape `_api_apply_to` already had and for the same reason.
-- **A command points, it does not write.** The vocabulary is exactly four names — `set`,
-  `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*, never a
-  selector and never anything the browser thread evaluates. That is `browser.py`'s
+- **A command points, it does not write.** The vocabulary is exactly five names — `set`,
+  `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
+  never a selector and never anything the browser thread evaluates. That is `browser.py`'s
   no-click-path rule carried across the new channel, and it needs its own test because the
-  existing one only scans that module's source. **Nothing on the page can submit**, and
-  there is a test asserting the page has no form, no submit control and no such endpoint.
+  existing one only scans that module's source.
+- **Every answerable row shows the answer behind it, and can change it** (2026-08-23).
+  The bank control used to render only on `GAP`/`REFUSED` rows, so the bank was writable
+  exactly once per question — the first time it was asked — and a field holding "New York,
+  New York" under the label "Country" gave no sign where that came from. Rows carry
+  `question_key` now. Both controls post to `/api/answer`, which is a real **upsert**:
+  `insert_answer` used to prepend unconditionally, so re-answering a key wrote a duplicate
+  YAML mapping key, `yaml.safe_load` kept the *last* one (the old one), `safewrite`
+  validated it, and the page said saved while the value you typed was discarded — a silent
+  failure inside the writer. An identity key goes to `identity:`, because `Answers.get`
+  reads that first and an `answers:` entry of the same name is a write nothing loads.
+- **`clear` is a name of its own, and an empty `set` is refused** (2026-08-22). Deleting
+  a value used to reach `page.fill(el, "")`, which succeeds — so the row was recorded
+  `filled` holding nothing, counted as done and counted *out* of "need you". That is the
+  reading `answers.py:327` refuses in the answer bank ("an empty answer is
+  indistinguishable from a missing one"), arriving instead on a form about to be sent.
+  `cleared` is its own status and counts as needing you. Overloading `set` was the
+  tempting fix and is wrong for `file` rows, where the value is a path on this box and
+  `""` means *no file*, not *no text*.
+- **All four control kinds empty, and three of them could not.** `_clear` mirrors
+  `_write` branch for branch (`fill("")`, `select_option([])`, `uncheck`,
+  `set_input_files([])`). Before this, unticking a checkbox reported "would not take it"
+  and changed nothing on the page, the select's blank option was dropped by the client's
+  `if (v)` guard, and a file input — which no browser lets you empty — had no path at
+  all, hence the **detach** button on a file row that holds something.
 - **A handle is only valid for the discovery that minted it.** `_DISCOVER_JS` renumbers
   `jt0…jtN` from scratch every pass, so once the form changes shape a handle names its
   neighbour. Commands carry the `epoch` they were written against and are dropped on a
@@ -994,9 +1082,25 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   22 KB / 36 ms, measured). `.fit` is in the server's markup and `#zoom` is hidden until
   the script adds `js-zoom`, so JS-off gets the whole page and no dead control.
 - **No screenshots for a page nobody is looking at.** Each poll refreshes a deadline; the
-  drain shoots only inside it. That is also the Pause button and the closed-tab case, for
-  free — a JPEG every two seconds forever on the box that also runs the nightly pipeline
-  is pure waste.
+  drain shoots only inside it. That is also the closed-tab case, for free — a JPEG every
+  two seconds forever on the box that also runs the nightly pipeline is pure waste.
+  **Pause was not that case until 2026-08-22**, though this file said it was: the button
+  suppressed the `<img>` src on the client and the poll kept refreshing the deadline, so
+  the browser thread went on rendering a full-page JPEG every four seconds for a picture
+  nobody would see. It saved the download and none of the work. A paused poll now sends
+  `?idle=1` and `_api_session` skips `session.watch()` — the claim is withheld, which is
+  the only thing that stops the shooting.
+- **The preview says how old it is, and `paint` writes values as well as statuses**
+  (both 2026-08-22, both consequences of this being the *only* view now). `#ago` said
+  "refreshed just now" unconditionally, which is indistinguishable from a preview that
+  has stopped refreshing. And `paint` moved only the status pill, so the several seconds
+  of fill that land *after* the page renders showed up on the real form and nowhere on
+  the page mirroring it. Neither mattered while the window was reachable.
+- **`highlight` is wired to focus** (2026-08-22). It was in the vocabulary from the start
+  with no route emitting it — dead code — and it is what ties the row under your cursor
+  to a place in a 3352 px picture. Fire-and-forget: it moves no value, and the epoch is
+  still checked, because a second rule about when the epoch matters is one somebody gets
+  wrong later.
 - **The window closing must set `CLOSED`, and the page must land it.** Otherwise the page
   polls a form nobody holds and every edit queues into nothing — a mirror that looks live
   over a browser that is gone. Failure-is-absence, in the UI again. Setting the phase was
@@ -1006,6 +1110,60 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   banner, disables every control, and **stops the poll** — there is nothing left to ask,
   and asking anyway is what made it look alive. `render_apply` emits that state directly
   too, so a reload is honest with no script.
+- **Sending it is a gate, not a command** (2026-08-22). `/apply` can now submit, and every
+  line of how is the invariant. It is **not** in the vocabulary — that list's stated
+  property is that nothing in it can activate anything, and queuing a submit would make
+  sending an application the same kind of act as typing into a text box, one request among
+  the hundreds this page makes while you work. So it takes `request_close`'s shape for the
+  mirror-image reason: closing is outside the vocabulary because it does nothing to the
+  form, submitting because it does the one thing to the form that cannot be undone.
+  - **Three checks, in three places, and none is redundant.** `Session.request_submit`
+    refuses unless the phase is `READY`, the epoch matches, a submit control was found,
+    every required row is `FILLED`, and the company name has been typed. `_submit` takes
+    the same checks again on the browser thread, because the gate's reading is up to one
+    poll old and a form can reveal a required question in that gap — it stands down with
+    `disarm()`, leaving `submitted_at` untouched so the button returns rather than the
+    session jamming. `claim_submit` spends the one submit under the lock **before** the
+    click, so two reads of the flag cannot become two applications.
+  - **The refusal names the fields.** "Not ready" is not actionable; the required
+    questions it is waiting on are. This is also why `cleared` had to be its own status —
+    deleting a required answer must put the job back in the way of the button.
+  - **`browser.py` has exactly one click, in `_submit`, reached only from the hold loop**,
+    and `requestSubmit` / `form.submit` / `dispatchEvent` / `keyboard.press` are still
+    banned. That is stricter than the old no-click rule for this purpose, not weaker: a
+    real press of the employer's own control runs their validation, their required-field
+    checks and their captcha hooks, all of which a programmatic send skips — which is how
+    you submit an application their own page would have rejected. The test scans the
+    source **with docstrings stripped**, because the prose now names the mechanisms it
+    bans in order to explain them; the old test warned about exactly this and then fell
+    into it.
+  - **`_SUBMIT_JS` is separate from `_DISCOVER_JS`** and mints its own attribute
+    (`data-jt-submit`), because the discovery pass deliberately skips submit and button
+    inputs — a handle minted for one would put a clickable target inside the vocabulary
+    that says it has none. It ranks candidates (explicit `type=submit` beats submit-shaped
+    wording, since "Apply" is also what the button that *opens* a form says) and drops
+    cancel/back/cookie-banner text outright. **Zero candidates is "no submit button
+    found"**, and the page renders no button at all — a control that looks like it would
+    work if you filled one more field, over a page with nothing to press, is
+    absence-read-as-success where it costs most.
+  - **What follows the click is a reading, never a verdict.** Nothing on this side can
+    prove an employer received an application, so `finish_submit` records what changed —
+    the URL, the field count — and the page says exactly that. A page that did not change
+    reads *"nothing on the page changed — read the preview before assuming it went"*. An
+    unverifiable "submitted successfully" is how a failed send stops being re-checked.
+  - **It reaches `applications` only when the page moved**, through an `on_submitted`
+    callback supplied by `server._api_apply_to._run` — so `browser.py` never learns about
+    that table and the write goes through the worker thread's own connection, which is the
+    thread the submit lands on. `record_submission` is **module-level and not a closure**,
+    which is not tidiness: it began as one nested in the wrong scope, so `worker_conn` was
+    unbound and every recording would have raised `NameError` inside the callback's own
+    `except` — reaching the log and nowhere else, leaving a submit that looked complete
+    and landed nothing. Ruff's F821 found it; the test did not, because it read the source
+    for the right words instead of calling the function. Test the write, not the text. When nothing changed, nothing is written and the page
+    offers a **Record it as applied** button instead. `applied` is the status that stops a
+    job coming back round, so setting it on a guess would make a failed send go quiet in
+    exactly the way a successful one does — inside the one table whose job is to remember.
+    Proposing rather than guessing is `inbox`'s rule, one loop out.
 - **Closing discards the fill, so the button confirms first.** No ATS keeps a draft for an
   anonymous candidate — the same fact that makes this a browser rather than a link — so
   the window is the only place the work exists.
@@ -1025,9 +1183,14 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   request may do to the *form*, and this does nothing to the form — and **deliberately
   not conditional on the phase**, because a session stuck mid-fill is exactly the one
   holding the lock. The refusal on the dashboard names the job and points at the page.
-- **This did not remove `DISPLAY`, Xvfb or the viewer units**, and must not be read as
-  having done so. Chromium still draws somewhere, and captchas and the submit itself still
-  happen in the window. What changed is what you type into.
+- **This did not remove `DISPLAY` or Xvfb**, and must not be read as having done so.
+  Chromium still draws somewhere and will not launch headful without a display. What it
+  removed, as of 2026-08-22, is every reason to look at it: the viewer link is gone, the
+  submit is on this page, and the window is an implementation detail. The **viewer units**
+  on gx10 (`jobtracker-x11vnc`, `jobtracker-novnc`) are no longer referenced by anything
+  in the app and can be retired at the deployment layer; `jobtracker-xvfb` cannot.
+  Captchas are the one thing still stuck in the window, and the honest answer there is
+  that a form raising one is a form this cannot finish — see `docs/prefill.md`.
 
 ## Slug repair
 

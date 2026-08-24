@@ -320,18 +320,26 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
             p.extend(_gap_card(gap, 1))
 
     if answers is not None:
+        # Editable, because `/api/answer` is an upsert now. It was a read-only table
+        # under a note telling you to edit the file, which for a wrong answer already
+        # typed into a form is the wrong place to have to go.
         p.append(f"<h2>Answers you have written ({len(answers.answerable)})</h2>")
-        p.append("<table><thead><tr><th>Key</th><th>Answer</th></tr></thead><tbody>")
+        p.append("<table><thead><tr><th>Key</th><th>Answer</th><th></th></tr></thead>"
+                 "<tbody>")
         for key in answers.answerable:
-            value = answers.get(key) or ""
+            value = html.escape(answers.get(key) or "", quote=True)
+            safe = html.escape(key, quote=True)
             p.append(
                 f"<tr><td><code>{html.escape(key)}</code></td>"
-                f"<td>{html.escape(value[:160])}</td></tr>"
+                f'<td><input class=answer data-key="{safe}" type=text '
+                f'value="{value}"></td>'
+                f'<td><button class=save data-key="{safe}">Save</button></td></tr>'
             )
         p.append("</tbody></table>")
         p.append(
-            "<p class=note>Edit these in the file directly; this page only adds "
-            "answers to questions it asked you.</p>"
+            "<p class=note>Identity fields are written to <code>identity:</code> and "
+            "everything else to <code>answers:</code>. Aliases and comments you wrote "
+            "are kept; only the value changes.</p>"
         )
 
     p.append(f"<script>{_JS}</script></div></body></html>")
@@ -575,21 +583,19 @@ def _tracked_companies(conn: sqlite3.Connection, companies) -> list:
         p.append("</tbody></table>")
     return p
 
-def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
+def render_apply(conn: sqlite3.Connection, session) -> str:
     """The live application form, mirrored into fields you can actually type in.
 
     Pure read — it never writes to `conn`, and it never touches the browser. Everything
     it renders comes from the `live.Session` the worker thread publishes into.
 
-    Why this page exists at all: the window is on the machine running `serve`, which on a
-    headless host means watching it through VNC. Every keystroke was a round trip to a
-    remote X server rendered as video, for a task that is fifteen text fields. Here the
-    typing is local and instant and only the finished value crosses the wire.
-
-    What it deliberately does not do is submit. There is no control on this page that
-    can, for the same reason `browser.py` has no click path: an application is
-    irreversible and goes out under your name. The window is still where you read it over
-    and send it, which is why the viewer link is kept and pointed at exactly that job.
+    **This page is the whole job.** The window is on the machine running `serve`, and
+    there is no longer anything anywhere that links you to it: reaching it meant a remote
+    X server shipping video frames for a task that is fifteen text fields, and the lag was
+    structural rather than a tuning problem. So the window is an implementation detail —
+    it still draws on a display, because Chromium has to, and nobody looks at it. What you
+    read instead is the preview: a still of the whole form, a few seconds behind, over
+    fields that are local and instant.
     """
     p = [
         "<!doctype html><meta charset=utf-8><title>Fill in</title>",
@@ -673,24 +679,7 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
         '<p class=note>The whole page, a few seconds behind. The fields are not behind. '
         'Click it (or <b>100%</b>) to read it at full size.</p>'
     )
-    if view_url:
-        # Kept, and pointed at the two things a mirrored form genuinely cannot do:
-        # solve a captcha, and let you read the whole application before you send it.
-        # Still only a link — this app does not start, probe or manage the viewer.
-        p.append(
-            "<h3>Review &amp; submit</h3>"
-            "<p class=note>When it is right, open the window and send it yourself. "
-            "Nothing on this page can submit an application.</p>"
-            f'<p><a class="viewwin" href="{dashboard_mod._safe_url(view_url)}" '
-            'target="_blank" rel="noopener">View window ↗</a></p>'
-        )
-    else:
-        p.append(
-            "<h3>Review &amp; submit</h3>"
-            "<p class=note>Nothing on this page can submit an application — that is "
-            "deliberate. Set <code>JOBTRACKER_BROWSER_VIEW_URL</code> to get a link to "
-            "the window from here, or use the screen the browser is drawing on.</p>"
-        )
+    p.extend(_submit_block(snap))
     # The way out of a session, and on a headless host the only one there is. The window
     # is on the machine running `serve`; if you cannot reach that machine's screen you
     # cannot close it, and until it closes the one-window lock stays held and every later
@@ -716,8 +705,24 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
             "rendered, may only link to the real application, or may be behind a login. "
             "Open the window and look.</p>"
         )
+    # A checkbox set is one question with several boxes, so it gets one head and its
+    # members render as choices underneath. Rendered from the rows in the form's own
+    # order — consecutive members share a `group`, and a run of them opens one block.
+    # Without this, "How did you hear about us?" arrived as nine questions, each named
+    # after one of its own answers.
+    dead = snap["phase"] == live.CLOSED
+    open_group = None
     for row in snap["fields"]:
-        p.extend(_live_field(row, snap["epoch"], dead=snap["phase"] == live.CLOSED))
+        group = row.get("group") or ""
+        if group != open_group:
+            if open_group:
+                p.append("</div>")
+            open_group = group
+            if group:
+                p.extend(_group_head(row, snap["epoch"], dead))
+        p.extend(_live_field(row, snap["epoch"], dead=dead))
+    if open_group:
+        p.append("</div>")
     p.append(
         f'<p class=note id="counts">{html.escape(live.summary(snap))}</p>'
     )
@@ -734,6 +739,128 @@ def render_apply(conn: sqlite3.Connection, session, view_url: str = "") -> str:
     p.append("</div>")
     p.append(f"<script>{_APPLY_JS}</script></div></body></html>")
     return "\n".join(p)
+
+
+def record_submission(conn, company: str, ats_job_id: str, title: str, url: str,
+                      result: dict, today: str) -> bool:
+    """Put a submitted application into the outer loop. Returns whether it wrote.
+
+    Only when the page observably moved. `applied` is the status that stops a job coming
+    back round, so writing it on a guess makes a failed send go quiet in exactly the way
+    a successful one does — inside the one table whose whole job is to remember. When
+    nothing changed, `/apply` offers the write instead of making it, which is `inbox`'s
+    rule one loop out: propose, and let accepting be a human act.
+
+    A module-level function rather than a closure, and that is not tidiness. It began as
+    one nested in the wrong scope, so `worker_conn` was not bound: every recording would
+    have raised `NameError` inside the callback's own `except`, reaching the log and
+    nowhere else — a submit that looked complete and silently never landed. A test that
+    only read the source for the right words passed over it.
+    """
+    if not result.get("changed"):
+        log.info("submitted %s but the page did not change — not recorded", title)
+        return False
+    store.advance_application(
+        conn, company=company, ats_job_id=ats_job_id, title=title,
+        status="applied", now=today, note=result.get("note", ""),
+        url=url, source="tracked",
+    )
+    conn.commit()
+    log.info("recorded %s at %s as applied", title, company)
+    return True
+
+
+def _blocker_line(blockers: list) -> str:
+    """What is still in the way of the button, said the same way on both sides.
+
+    Named rather than counted: "3 fields still needed" is not something you can act on,
+    and this is the sentence standing between you and an application you cannot recall.
+    """
+    if not blockers:
+        return ""
+    shown = ", ".join(blockers[:6])
+    more = f" and {len(blockers) - 6} more" if len(blockers) > 6 else ""
+    return f"still needed: {shown}{more}"
+
+
+def _submit_block(snap: dict) -> list:
+    """Sending it. The only control in this project that spends something irreversible.
+
+    Rendered server-side in every state, including the states where it cannot be used, so
+    the page is honest with no script running: what it would click, what is still in the
+    way, and what happened if it has already gone. The script enables the button and
+    repaints the checklist; it never mints either.
+
+    Three things are load-bearing:
+
+    **Zero candidates is "no submit button found", not a disabled button.** A control that
+    looks like it might work if you filled one more field, over a page that has nothing to
+    press, is the absence-read-as-success shape one row along from `live.summary`'s zero.
+
+    **The blockers are named.** "Not ready" is not actionable; the required fields it is
+    waiting on are.
+
+    **Arming is typing the company name.** A `confirm()` dialog is one keystroke from a
+    habit, and there is no undo behind this one.
+    """
+    control = snap.get("submit_control")
+    blockers = snap.get("blockers") or []
+    result = snap.get("submit_result")
+    out = ["<h3>Send it</h3>"]
+
+    if snap.get("submitted") and result:
+        # Deliberately a reading and not a verdict: nothing here can prove an employer
+        # received an application, and an unverifiable success message is how a failed
+        # send stops being re-checked.
+        kind = "ok" if result.get("changed") else "warn"
+        out.append(f'<p class="banner {kind}" id="sent">'
+                   f'{html.escape(result.get("note", "it was sent"))}</p>')
+        if not result.get("changed"):
+            # Nothing was written to `applications`, because "applied" is the status
+            # that stops a job coming back round and it must not be set on a guess. So
+            # it is offered instead — the shape `inbox` uses, where accepting is yours.
+            out.append('<p class=note>Read the preview before assuming it went. '
+                       "Nothing on this side can see the employer's answer, so this "
+                       "has not been recorded as applied.</p>")
+            out.append(
+                '<p><button id="recordit" '
+                f'data-company="{html.escape(snap["company"], quote=True)}" '
+                f'data-job="{html.escape(snap["ats_job_id"], quote=True)}" '
+                f'data-title="{html.escape(snap["title"], quote=True)}">'
+                "Record it as applied</button> "
+                '<span class="note" id="recordmsg"></span></p>'
+            )
+        else:
+            out.append('<p class=note id="recordmsg">Recorded in Applications.</p>')
+        return out
+
+    if not snap["discovered"]:
+        out.append("<p class=note>There is no form on that page to send.</p>")
+        return out
+    if not control:
+        out.append('<p class="banner bad" id="nobutton">No submit button was found on '
+                   "this form. Read the form again — and if it is still not there, this "
+                   "application has to go out from the window itself.</p>")
+        return out
+
+    label = html.escape(control.get("label") or "the submit button")
+    out.append(f'<p class=note>Will press <b>{label}</b>.</p>')
+    # One text node, not a list the script rebuilds: the rule everywhere on these pages
+    # is that JS sets text and never writes markup, and this is the element most likely
+    # to be repainted while you work.
+    hidden = "" if blockers else " hidden"
+    out.append(f'<p class="banner warn" id="blockers"{hidden}>'
+               f'{html.escape(_blocker_line(blockers))}</p>')
+
+    company = html.escape(snap["company"], quote=True)
+    out.append(
+        '<p class="arm">Type <b>' + html.escape(snap["company"]) + "</b> to confirm: "
+        f'<input id="armtext" type="text" autocomplete="off" data-company="{company}">'
+        ' <button id="submitbtn" disabled>Submit application</button> '
+        '<span class="note" id="sendmsg"></span></p>'
+    )
+    out.append('<p class=note>There is no undo. It goes out under your name.</p>')
+    return out
 
 
 def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
@@ -757,7 +884,8 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
     out = [
         f'<div class="lf" data-handle="{handle}" '
         f'data-epoch="{html.escape(str(epoch), quote=True)}" '
-        f'data-type="{html.escape(row["type"], quote=True)}">',
+        f'data-type="{html.escape(row["type"], quote=True)}" '
+        f'data-option="{html.escape(row["option"] or "", quote=True)}">',
         f'<div class="lab">{label}',
     ]
     if row["required"]:
@@ -767,7 +895,14 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
     out.append("</div>")
 
     value = html.escape(row["value"] or "")
-    if row["type"] in ("select", "multiselect"):
+    if row["option"]:
+        # One box of a set. Its own label is an *answer* to the question in the head
+        # above it, so it renders as a choice, not as another question — nine of these
+        # used to arrive as nine questions called "LinkedIn", "Glassdoor" and so on.
+        checked = " checked" if row["status"] == live.FILLED else ""
+        out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}'
+                   f'{off}> {html.escape(row["option"])}</label>')
+    elif row["type"] in ("select", "multiselect", "combobox") and row["options"]:
         out.append(f'<select class="lv"{off}>')
         # A blank first option, always. Without one, opening the page would look like
         # every dropdown already holds its first value — and a dropdown we could not
@@ -781,34 +916,98 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
     elif row["type"] == "file":
         out.append(f'<input class="lf-file" type="file"{off}>')
         if row["value"]:
-            out.append(f'<p class=note>attached: <code>{value}</code></p>')
+            # A file input is the one control a browser gives you no way to empty — you
+            # can pick a different file, never no file. Without this button the resume
+            # is the single field on the form that cannot be taken back off.
+            out.append(f'<p class=note>attached: <code>{value}</code> '
+                       f'<button class="lf-detach"{off}>detach</button></p>')
     elif row["type"] == "checkbox":
         checked = " checked" if row["status"] == live.FILLED else ""
         out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}'
                    f"{off}> yes</label>")
+    elif row["type"] == "combobox":
+        # A dropdown whose options nobody has published yet. It is still a menu on the
+        # real page — typing here searches it and the first exact match is chosen — and
+        # saying so is better than a text box that looks like free text and is not.
+        out.append(f'<input class="lv" type="text" value="{value}"{off}>')
+        out.append("<p class=note>a menu on the real form — type an option's exact "
+                   "wording. Its choices are not published, so nothing here can list "
+                   "them.</p>")
     elif row["type"] == "textarea":
         out.append(f'<textarea class="lv" rows="4"{off}>{value}</textarea>')
     else:
         out.append(f'<input class="lv" type="text" value="{value}"{off}>')
 
-    # Answering it here can also answer it everywhere. Offered only where there is
-    # something to learn — a field the fill could not answer — and it goes through
-    # `/api/answer`, the same writer the Settings tab uses. No second path into the bank.
-    if status in (live.GAP, live.REFUSED) and row["type"] != "file":
-        key = html.escape(answers_mod.slugify(row["label"] or row["key"]), quote=True)
-        out.append(
-            '<label class="bank"><input type="checkbox" class="tobank"> also save to my '
-            f'answer bank as <input class="bankkey" type="text" value="{key}"></label>'
-        )
+    out.extend(_bank_block(row, off))
     out.append("</div>")
     return out
 
 
+def _group_head(row: dict, epoch: int, dead: bool) -> list:
+    """The question a set of checkboxes answers, and the one place to save its answer.
+
+    Opens a `<div class="lfg">` that the caller closes when the run of members ends. The
+    head carries the question, whether it is required, and the bank control — one per
+    question, because the answer to "How did you hear about us?" is one answer that
+    happens to be typed by ticking a box.
+    """
+    label = html.escape(row["group"])
+    out = [
+        f'<div class="lfg" data-group="{html.escape(row["group"], quote=True)}">',
+        f'<div class="lab lgh">{label}',
+    ]
+    if row["required"]:
+        out.append(' <span class="req">required</span>')
+    out.append("</div>")
+    out.extend(_bank_block(
+        {**row, "option": "", "label": row["group"], "type": "multiselect"},
+        " disabled" if dead else "",
+    ))
+    return out
+
+
+def _bank_block(row: dict, off: str) -> list:
+    """The answer behind this field, and the way to change it.
+
+    On **every** answerable row, not only the ones the fill could not place. It used to
+    appear on gaps alone, which meant the bank was writable exactly once per question —
+    the first time it was asked — and a wrong answer, once stored, could only be fixed by
+    editing the file. Worse, the row gave no sign of *which* answer had filled it, so a
+    field holding "New York, New York" under the label "Country" looked like something
+    the form had done rather than something the bank held.
+
+    Both controls post to `/api/answer`, the same writer Settings uses, which is now a
+    true upsert. No second path into the bank.
+    """
+    if row["type"] == "file" or row["option"]:
+        # A file is answered by the `resume:` key, not by a sentence; a member of a set
+        # is a choice within a question, and the question's own head carries the block.
+        return []
+    key = row.get("question_key") or answers_mod.slugify(row["label"] or row["key"])
+    safe = html.escape(key, quote=True)
+    if row.get("question_key"):
+        value = html.escape(row["value"] or "", quote=True)
+        return [
+            '<div class="bank"><span class=note>from your answer bank as '
+            f'<code>{html.escape(key)}</code></span> '
+            f'<input class="bankval" type="text" value="{value}"{off}> '
+            f'<button class="savebank" data-key="{safe}"{off}>Save</button></div>'
+        ]
+    return [
+        '<label class="bank"><input type="checkbox" class="tobank"> also save to my '
+        f'answer bank as <input class="bankkey" type="text" value="{safe}"></label>'
+    ]
+
+
+# What each status is called on the page. Duplicated in `_APPLY_JS.paint`, because one
+# renders on the server and the other repaints on a poll; `test_the_page_and_its_script
+# _call_a_status_the_same_thing` is what keeps the two in step.
 _STATUS_WORD = {
     live.FILLED: "filled",
     live.GAP: "needs you",
     live.REFUSED: "would not take it",
     live.PENDING: "…",
+    live.CLEARED: "cleared",
 }
 
 
@@ -1058,7 +1257,7 @@ def _gap_card(gap, asked_by: int) -> list:
     """One unanswered question, with the box you answer it in.
 
     Identical markup in both lists on purpose. The split above decides ordering and
-    nothing else, so `div.gap`, `input.answer[data-key]` and `button.save[data-key]` are
+    nothing else, so `div.gap`, `.answer[data-key]` and `button.save[data-key]` are
     the same everywhere — which is why `_JS`'s save branch needed no change at all: it
     looks the input up by key, and `question_key` is the table's primary key.
     """
@@ -1069,16 +1268,26 @@ def _gap_card(gap, asked_by: int) -> list:
     if asked_by > 1:
         note += f" · <strong>{asked_by} employers</strong>"
     p.append(f"<div class=note>{note}</div>")
-    if gap["options"]:
-        p.append(f"<div class=note>one of: {html.escape(gap['options'])}</div>")
     # The key travels in a data attribute rather than being interpolated into a
     # handler — the question text comes from a third-party ATS.
     key = html.escape(gap["question_key"], quote=True)
-    p.append(
-        f"<div class=row><input class=answer type=text placeholder='Your answer' "
-        f'data-key="{key}">'
-        f'<button class=save data-key="{key}">Save</button></div>'
-    )
+    options = [o.strip() for o in (gap["options"] or "").split("|") if o.strip()]
+    if options and gap["type"] in ("select", "multiselect", "combobox"):
+        # A menu, so a menu. Typing a word the form does not offer is refused by
+        # `match_option` and stays a gap, so a free-text box beside a prose list of the
+        # only acceptable answers was an invitation to write one that would not work.
+        control = ['<select class=answer data-key="%s">' % key,
+                   '<option value="">— choose —</option>']
+        control += [f'<option value="{html.escape(o, quote=True)}">'
+                    f'{html.escape(o)}</option>' for o in options]
+        control.append("</select>")
+    else:
+        if options:
+            p.append(f"<div class=note>one of: {html.escape(gap['options'])}</div>")
+        control = [f"<input class=answer type=text placeholder='Your answer' "
+                   f'data-key="{key}">']
+    p.append("<div class=row>" + "".join(control)
+             + f'<button class=save data-key="{key}">Save</button></div>')
     p.append("</div>")
     return p
 
@@ -1111,6 +1320,20 @@ def _resume_card(answers) -> list:
             "<button class=upload-resume>Upload</button></div>"
             "<p class=note>PDF or DOCX, up to 6 MB. Replaces whatever is attached now."
             "</p>"
+        )
+        # The name on disk is not the name that goes out. Files are stored under a name
+        # this repo mints so two postings cannot overwrite each other — which reads like
+        # `twilio_7816159_1f4c9a02.pdf` — and a person at the other end opens whatever
+        # the upload was called. So the sent name is a setting, and defaults to
+        # something a human would have chosen.
+        current = html.escape(getattr(answers, "resume_name", "") or "", quote=True)
+        p.append(
+            "<label class=field><span>filename sent to employers</span>"
+            f"<input id=resume-name type=text value=\"{current}\" "
+            "placeholder='resume.pdf'></label>"
+            "<div class=row><button class=save-resume-name>Save</button></div>"
+            "<p class=note>What the employer's copy is called. Blank means "
+            "<code>resume.pdf</code>. The extension always comes from the real file.</p>"
         )
     p.append("</div>")
     return p
@@ -1244,12 +1467,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/apply":
                 conn = self._conn()
                 try:
-                    page = render_apply(conn, live.current(), config.BROWSER_VIEW_URL)
+                    page = render_apply(conn, live.current())
                 finally:
                     conn.close()
                 self._send(page)
             elif path == "/api/session":
-                self._send_json(self._api_session())
+                # `idle=1` is the Pause button: keep polling for the phase and the
+                # counts, stop claiming somebody is looking at the picture.
+                self._send_json(self._api_session(idle="idle=1" in self.path))
             elif path == "/api/session/preview.jpg":
                 self._send_preview()
             else:
@@ -1278,6 +1503,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_identity(payload))
             elif path == "/api/resume":
                 self._send_json(self._api_resume(payload))
+            elif path == "/api/resume-name":
+                self._send_json(self._api_resume_name(payload))
             elif path == "/api/posting-resume":
                 self._send_json(self._api_posting_resume(payload))
             elif path == "/api/posting-resume/clear":
@@ -1288,8 +1515,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_apply_to(payload))
             elif path == "/api/session/set":
                 self._send_json(self._api_session_set(payload))
+            elif path == "/api/session/clear":
+                self._send_json(self._api_session_clear(payload))
+            elif path == "/api/session/highlight":
+                self._send_json(self._api_session_highlight(payload))
             elif path == "/api/session/rediscover":
                 self._send_json(self._api_session_command(live.REDISCOVER))
+            elif path == "/api/session/submit":
+                self._send_json(self._api_session_submit(payload))
             elif path == "/api/session/close":
                 self._send_json(self._api_session_close())
             elif path == "/api/session/file":
@@ -1359,7 +1592,6 @@ class Handler(BaseHTTPRequestHandler):
             # because only here is there something for them to POST to.
             page = dashboard_mod.build_dashboard(
                 conn, companies, _today(), criteria, interactive=True,
-                view_url=config.BROWSER_VIEW_URL,
             )
         finally:
             conn.close()
@@ -1737,8 +1969,14 @@ class Handler(BaseHTTPRequestHandler):
 
         The insertion is text surgery rather than a YAML round trip. A round trip would
         delete every comment in the file, including the stubs you are working through.
+
+        It is an **upsert**, in both blocks. `/apply` now offers this on every field
+        rather than only on ones it could not answer, so "save" mostly means "change what
+        you told me last time" — and an identity key has to reach `identity:`, because
+        `Answers.get` reads that first and an `answers:` entry of the same name would be
+        a write nothing ever loads.
         """
-        from .answers import insert_answer, load_answers
+        from .answers import IDENTITY_KEYS, insert_answer, load_answers, upsert_identity
 
         key = str(payload.get("question_key") or "").strip()
         value = str(payload.get("value") or "").strip()
@@ -1758,7 +1996,10 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             aliases = [gap["ask"]] if gap else []
 
-            body = insert_answer(path.read_text(), key, value, aliases)
+            if key in IDENTITY_KEYS:
+                body = upsert_identity(path.read_text(), {key: value})
+            else:
+                body = insert_answer(path.read_text(), key, value, aliases)
             try:
                 safewrite.write_text(path, body, load_answers)
             except safewrite.RefusedWrite as exc:
@@ -1774,6 +2015,32 @@ class Handler(BaseHTTPRequestHandler):
         # Every stored plan was an answer to "what do I know today", and today changed.
         # They rebuild on the next prefill run, mostly without any model call.
         return {"ok": True, "question_key": key, "remaining": remaining}
+
+    def _api_resume_name(self, payload: dict) -> dict:
+        """Set the filename the resume goes out under. Blank restores `resume<ext>`.
+
+        A setting rather than a rename, because the file on disk is named for collision
+        safety and must stay that way — two postings whose company and job slug alike
+        would otherwise overwrite each other's tailored resume. What a recruiter opens is
+        a different question from what this box calls it, and this is the only place the
+        two were ever conflated.
+        """
+        from .answers import load_answers, set_resume_name
+
+        name = str(payload.get("name") or "").strip()
+        path = Path(self.server.answers_path)
+        if not path.exists():
+            return {"ok": False, "error": f"no answer bank at {path}"}
+        if "/" in name or "\\" in name:
+            return {"ok": False, "error": "a filename, not a path"}
+        try:
+            safewrite.write_text(
+                path, set_resume_name(path.read_text(), name), load_answers
+            )
+        except safewrite.RefusedWrite as exc:
+            return {"ok": False, "error": f"refused invalid answers.yaml: {exc}"}
+        log.info("resume goes out as %r", name or "resume<ext>")
+        return {"ok": True, "name": name}
 
     def _api_identity(self, payload: dict) -> dict:
         """Write the identity block, creating the answer bank if there is not one.
@@ -2264,6 +2531,15 @@ class Handler(BaseHTTPRequestHandler):
                     # through a video stream of this window. `hold` still governs how
                     # long the window lives; this governs what you type into.
                     session=session,
+                    # Called on the browser thread once the submit has been read
+                    # back. It closes over `worker_conn`, which is this thread's:
+                    # `browser.py` must not learn about the applications table, and a
+                    # SQLite connection made on the request thread must not be written
+                    # from this one.
+                    on_submitted=lambda result: record_submission(
+                        worker_conn, company_name, job_id, row["title"], url,
+                        result, _today(),
+                    ),
                 )
             except Exception:  # noqa: BLE001 — a browser failure must not kill serve
                 log.exception("apply-to %s/%s failed", company_name, job_id)
@@ -2289,12 +2565,20 @@ class Handler(BaseHTTPRequestHandler):
     # browser lives on a daemon thread that owns its Playwright objects exclusively. So
     # a write here queues a command and answers immediately, and the outcome arrives on
     # the next poll — the same shape `_api_apply_to` already has, for the same reason.
-    def _api_session(self) -> dict:
-        """The poll. Also what tells the browser thread somebody is still watching."""
+    def _api_session(self, idle: bool = False) -> dict:
+        """The poll. Also what tells the browser thread somebody is still watching.
+
+        `idle` is Pause, and it belongs here rather than on the client because that is
+        where the cost is. Suppressing the `<img>` src saves the download and nothing
+        else: the browser thread was still rendering a full-page JPEG every four seconds
+        for a picture nobody was going to look at. `watching()` is the only thing that
+        stops the work, so pausing has to be a claim withheld, not a byte discarded.
+        """
         session = live.current()
         if session is None:
             return {"ok": False, "error": "no window is open"}
-        session.watch()
+        if not idle:
+            session.watch()
         return {"ok": True, "session": session.snapshot()}
 
     def _send_preview(self) -> None:
@@ -2350,9 +2634,79 @@ class Handler(BaseHTTPRequestHandler):
             epoch = int(payload.get("epoch", -1))
         except (TypeError, ValueError):
             return {"ok": False, "error": "bad epoch"}
-        return self._api_session_command(
-            live.SET, handle, str(payload.get("value") or ""), epoch
-        )
+        value = str(payload.get("value") or "")
+        if not value:
+            # `clear` is a different act with a different outcome, and the page knows
+            # which one it means. Guessing here would make an empty text box and a
+            # deliberate erasure arrive as the same request.
+            return {"ok": False, "error": "an empty value is a clear, not a set"}
+        return self._api_session_command(live.SET, handle, value, epoch)
+
+    def _api_session_clear(self, payload: dict) -> dict:
+        """Empty one field of the live form.
+
+        Same shape as `_api_session_set` with no value to carry, and the same epoch rule:
+        clearing the wrong field is exactly as bad as filling it, so the check stays on
+        the browser thread where it cannot be bypassed.
+        """
+        handle = str(payload.get("handle") or "")
+        if not handle:
+            return {"ok": False, "error": "no field"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        return self._api_session_command(live.CLEAR, handle, "", epoch)
+
+    def _api_session_submit(self, payload: dict) -> dict:
+        """Arm the one submit this session has, or say exactly why it will not.
+
+        A sibling of `_api_session_close` and deliberately not a `live.Command`: the
+        vocabulary's stated property is that nothing in it can activate anything, and
+        this activates the only control on the page that spends something you cannot get
+        back. Queuing it would make sending an application the same kind of act as typing
+        into a text box — one request among the hundreds this page makes while you work.
+
+        Every check is `Session.request_submit`'s, and every one of them is taken again on
+        the browser thread before the click, because this reading is up to one poll old.
+
+        The refusal is the useful half. "Not ready" is useless; the required fields it is
+        waiting on are what you can act on, so they come back by name.
+        """
+        session = live.current()
+        if session is None:
+            return {"ok": False, "error": "no window is open"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        ok, error = session.request_submit(epoch, str(payload.get("confirm") or ""))
+        if not ok:
+            return {"ok": False, "error": error}
+        log.info("submit armed for %s at %s", session.title, session.company)
+        return {"ok": True, "detail": "sending it…"}
+
+    def _api_session_highlight(self, payload: dict) -> dict:
+        """Outline one field on the real page, so the preview follows what you are typing.
+
+        The preview is the whole form — several thousand pixels of it — and until this was
+        wired there was nothing tying the row under your cursor to a place in that
+        picture. `highlight` has been in the vocabulary since the mirror was built and no
+        route emitted it; `_HIGHLIGHT_JS` already outlines and scrolls.
+
+        It changes no value, so a stale epoch costs a misplaced outline rather than a
+        wrong answer — but it is checked anyway, in the same place as every other command,
+        because a second rule about when the epoch matters is a rule somebody will get
+        wrong later.
+        """
+        handle = str(payload.get("handle") or "")
+        if not handle:
+            return {"ok": False, "error": "no field"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        return self._api_session_command(live.HIGHLIGHT, handle, "", epoch)
 
     def _api_session_file(self, payload: dict) -> dict:
         """Attach a file to a file field of the live form.
@@ -2466,7 +2820,7 @@ _SETTINGS_CSS = """
 .gap{padding:.7rem .9rem;margin:.5rem 0;border-left:3px solid #d97706;background:rgba(217,119,6,.07)}
 .gap .ask{font-weight:600;margin-bottom:.2rem}
 .gap .row{display:flex;gap:.5rem;margin-top:.5rem}
-.gap input.answer{flex:1;padding:.3rem .5rem;border-radius:5px;
+.gap .answer{flex:1;padding:.3rem .5rem;border-radius:5px;
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 .card{padding:.8rem .9rem;margin:.5rem 0;border:1px solid rgba(127,127,127,.35);border-radius:6px}
 .card .row{display:flex;gap:.5rem;margin-top:.8rem;align-items:center}
@@ -2522,8 +2876,11 @@ background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
 #preview.fit{width:auto;max-width:100%;max-height:78vh;object-fit:contain;
 cursor:zoom-in}
 #preview.actual{width:100%;height:auto;cursor:zoom-out}
-#zoom{display:none}
-.js-zoom #zoom{display:inline-block}
+/* Both are script-only controls, so neither exists until the script says it does. A
+   visible Pause that does nothing reads as a broken page, not as a page without JS —
+   the same rule `.tabs` and `.cotoggle` follow on the dashboard. */
+#zoom,#pause{display:none}
+.js-zoom #zoom,.js-zoom #pause{display:inline-block}
 .who{margin:.2rem 0 .1rem}
 .phase{margin:.1rem 0 1rem;font-size:.9rem}
 .phase .pill{padding:.1rem .5rem;border-radius:99px;background:rgba(127,127,127,.18);
@@ -2544,6 +2901,19 @@ opacity:.85;flex-wrap:wrap}
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
 font-size:.78rem}
 .lf .bank input[type=checkbox]{width:auto}
+.bank .bankval{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:4px;
+border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+font-size:.78rem}
+/* One question, several boxes. The block is what makes "How did you hear about us?"
+   read as a question with nine answers rather than as nine questions. */
+.lfg{padding:.55rem .7rem;margin:.45rem 0;border:1px solid rgba(127,127,127,.3);
+border-radius:6px}
+.lfg .lgh{font-size:.86rem;margin-bottom:.35rem;display:flex;gap:.45rem;
+align-items:baseline;flex-wrap:wrap;font-weight:600}
+.lfg .bank{display:flex;gap:.4rem;align-items:center;margin:.3rem 0 .5rem;
+font-size:.78rem;opacity:.85;flex-wrap:wrap}
+.lfg .lf{border:0;padding:.1rem .2rem;margin:.1rem 0}
+.lfg .lf .lab{margin:0}
 /* Status is a word, not a colour: a red dot alone does not say whether the field is
    waiting on you or was refused by the page, and those need different actions. */
 .st{margin-left:auto;font-size:.74rem;text-transform:uppercase;letter-spacing:.04em;
@@ -2553,7 +2923,7 @@ padding:.05rem .4rem;border-radius:99px}
 .st-refused{color:#dc3545;background:rgba(220,53,69,.14)}
 .st-pending{opacity:.6;background:rgba(127,127,127,.14)}
 .lf.busy{opacity:.6}
-.viewwin{font-weight:600}
+
 """
 
 _EXTRA_CSS = """
@@ -2612,13 +2982,19 @@ _APPLY_JS = """
   // The value goes with the epoch it was typed against. The browser thread drops it if
   // the form has been read again since, because the handle would by then name a
   // different input — see live.py. So a refusal here is a correct refusal.
+  //
+  // An empty value is a clear, not a set, and it goes to its own endpoint. Sending it as
+  // a set would land on the real page as a field holding nothing while the row read
+  // "filled" — done, and out of the "need you" count, which is the one number on this
+  // page that has to stay honest.
   function push(card, value) {
     var st = card.querySelector('.st');
     setStatus(st, 'pending', '…');
     card.classList.add('busy');
-    return post('/api/session/set', {
-      handle: card.dataset.handle, value: value, epoch: epoch
-    }).then(function (res) {
+    var body = {handle: card.dataset.handle, epoch: epoch};
+    var url = '/api/session/clear';
+    if (value) { url = '/api/session/set'; body.value = value; }
+    return post(url, body).then(function (res) {
       card.classList.remove('busy');
       if (!res.ok) setStatus(st, 'refused', res.error || 'refused');
       return res;
@@ -2662,6 +3038,15 @@ _APPLY_JS = """
     schedule(card, e.target.value);
   });
 
+  // Entering a field outlines it on the real page, so the next shot shows you where in
+  // several thousand pixels of form you actually are. Fire-and-forget: it moves no value,
+  // and a preview that did not scroll is not worth an error message.
+  document.addEventListener('focusin', function (e) {
+    var card = e.target.closest('.lf');
+    if (!card) return;
+    post('/api/session/highlight', {handle: card.dataset.handle, epoch: epoch});
+  });
+
   // Blur beats the timer: leaving a field is the clearest statement that you are done
   // with it, and waiting out the debounce after that just looks like lag.
   document.addEventListener('focusout', function (e) {
@@ -2680,11 +3065,18 @@ _APPLY_JS = """
     if (!card) return;
     if (e.target.classList.contains('lv')) {
       if (card.dataset.type === 'checkbox') {
-        push(card, e.target.checked ? 'yes' : '');
+        // A box in a set answers with its own choice. 'yes' is right only for a lone
+        // consent checkbox, and sending it for a set member would have the writer
+        // compare "yes" against "LinkedIn" and refuse every tick.
+        var choice = card.dataset.option || 'yes';
+        push(card, e.target.checked ? choice : '');
       } else if (card.dataset.type === 'select' ||
                  card.dataset.type === 'multiselect') {
+        // Including the blank "— choose —" option, which is how you take a dropdown
+        // answer back. Ignoring it left the one control on this page you could not
+        // change your mind about.
         var v = e.target.value;
-        if (v) push(card, v).then(function () { bank(card, v); });
+        push(card, v).then(function () { bank(card, v); });
       }
       return;
     }
@@ -2706,6 +3098,38 @@ _APPLY_JS = """
       };
       reader.readAsDataURL(file);
     }
+  });
+
+  // Changing an answer the bank already holds. The field shows which key filled it and
+  // what that key says; this writes the new text back through `/api/answer` — a true
+  // upsert — and then pushes it to the form, so the page you are looking at and the file
+  // that will fill the next form cannot disagree.
+  document.addEventListener('click', function (e) {
+    if (!e.target.classList.contains('savebank')) return;
+    var btn = e.target;
+    var box = btn.parentElement.querySelector('.bankval');
+    if (!box) return;
+    var value = box.value;
+    btn.disabled = true;
+    post('/api/answer', {question_key: btn.dataset.key, value: value})
+      .then(function (res) {
+        btn.disabled = false;
+        if (!res.ok) { alert(res.error || 'could not save that'); return; }
+        var card = btn.closest('.lf');
+        if (card) push(card, value);
+      });
+  });
+
+  // Detaching. A file input offers no way to hold nothing once it holds something, so
+  // this is the only way the resume comes back off — and the picker is reset too, or it
+  // would keep reporting the file that is no longer on the form.
+  document.addEventListener('click', function (e) {
+    if (!e.target.classList.contains('lf-detach')) return;
+    var card = e.target.closest('.lf');
+    if (!card) return;
+    var picker = card.querySelector('.lf-file');
+    if (picker) picker.value = '';
+    push(card, '');
   });
 
   // -- the two buttons ---------------------------------------------------------------
@@ -2764,6 +3188,68 @@ _APPLY_JS = """
     });
   });
 
+  // -- sending it --------------------------------------------------------------------
+  // The button is enabled by typing the company name, and the server checks the same
+  // thing again — this is the affordance, not the gate. The gate is `request_submit`,
+  // and every check in it is taken a third time on the browser thread before the click.
+  var armtext = document.getElementById('armtext');
+  var submitbtn = document.getElementById('submitbtn');
+  var sendmsg = document.getElementById('sendmsg');
+  var blockers = document.getElementById('blockers');
+
+  function armed() {
+    if (!armtext || !submitbtn) return false;
+    var typed = armtext.value.trim().toLowerCase();
+    var want = (armtext.dataset.company || '').trim().toLowerCase();
+    var clear = blockers ? blockers.hidden : true;
+    submitbtn.disabled = !(typed && typed === want && clear);
+    return !submitbtn.disabled;
+  }
+  if (armtext) armtext.addEventListener('input', armed);
+
+  if (submitbtn) submitbtn.addEventListener('click', function () {
+    if (!armed()) return;
+    // The second of three. Typing the name is deliberate rather than habitual; this is
+    // the last chance to notice you meant a different job. There is no undo behind it.
+    if (!confirm('Submit this application to ' + (armtext.dataset.company || 'them')
+                 + '? It goes out under your name and cannot be taken back.')) return;
+    submitbtn.disabled = true;
+    sendmsg.textContent = 'sending…';
+    post('/api/session/submit', {epoch: epoch, confirm: armtext.value})
+      .then(function (res) {
+        // Never "sent": the request only armed it. The browser thread clicks on its next
+        // tick and `s.submitted` is what says it actually happened.
+        sendmsg.textContent = res.ok ? (res.detail || 'sending…')
+                                     : (res.error || 'it was not sent');
+        if (!res.ok) armed();
+      }).catch(function () {
+        sendmsg.textContent = 'the server did not answer';
+        armed();
+      });
+  });
+
+  // Only rendered when the click landed and the page did not move, so nothing was
+  // written. Recording it is a judgement you make from the preview — the same reason
+  // an inbox proposal is accepted rather than applied.
+  var recordit = document.getElementById('recordit');
+  var recordmsg = document.getElementById('recordmsg');
+  if (recordit) recordit.addEventListener('click', function () {
+    recordit.disabled = true;
+    recordmsg.textContent = 'recording…';
+    post('/api/application', {
+      company: recordit.dataset.company, ats_job_id: recordit.dataset.job,
+      title: recordit.dataset.title, status: 'applied',
+      note: 'submitted from the mirrored form; the page did not visibly change'
+    }).then(function (res) {
+      recordmsg.textContent = res.ok ? 'recorded in Applications'
+                                     : (res.error || 'it was not recorded');
+      if (!res.ok) recordit.disabled = false;
+    }).catch(function () {
+      recordit.disabled = false;
+      recordmsg.textContent = 'the server did not answer';
+    });
+  });
+
   // -- the poll ----------------------------------------------------------------------
   // This is also what tells the browser thread somebody is watching, which is the only
   // thing that makes it take screenshots. Stop polling and the work stops.
@@ -2774,6 +3260,7 @@ _APPLY_JS = """
   // the poll stops — there is nothing left to ask about, and asking anyway is what kept
   // the button sitting on "closing…" over a browser that had already closed.
   var stopped = false;
+  var sent = false;
   function gone() {
     if (stopped) return;
     stopped = true;
@@ -2787,8 +3274,21 @@ _APPLY_JS = """
     ago.textContent = 'the window is closed';
   }
 
+  function age(then) {
+    if (!then) return '';
+    var secs = Math.max(0, Math.round(Date.now() / 1000 - then));
+    if (secs < 5) return 'refreshed just now';
+    if (secs < 90) return 'refreshed ' + secs + 's ago';
+    return 'refreshed ' + Math.round(secs / 60) + 'm ago';
+  }
+
   function tick() {
-    fetch('/api/session').then(function (r) { return r.json(); }).then(function (res) {
+    // Paused polls still ask — the phase and the counts matter whether or not you are
+    // looking at the picture — but they do not claim anyone is watching, which is what
+    // stops the browser thread taking screenshots.
+    fetch('/api/session' + (paused ? '?idle=1' : '')).then(function (r) {
+      return r.json();
+    }).then(function (res) {
       if (!res.ok) { gone(); return; }
       var s = res.session;
       if (s.phase === 'closed') { gone(); return; }
@@ -2812,27 +3312,65 @@ _APPLY_JS = """
         return;
       }
       paint(s);
+      if (blockers) {
+        // Text, never markup — the rule every repaint on this page follows. A stale
+        // checklist over a live button is how you arm against yesterday's form.
+        var names = s.blockers || [];
+        var shown = names.slice(0, 6).join(', ');
+        blockers.textContent = names.length
+          ? 'still needed: ' + shown
+            + (names.length > 6 ? ' and ' + (names.length - 6) + ' more' : '')
+          : '';
+        blockers.hidden = names.length === 0;
+        armed();
+      }
+      if (s.submitted && s.submit_result) {
+        // It has gone. Reload once so the server renders the outcome — this page has no
+        // markup for a state it did not start in, and inventing some here would be the
+        // one place the script writes UI it cannot be tested against.
+        if (!sent) { sent = true; location.reload(); }
+        return;
+      }
       if (!paused && s.has_shot) {
         img.src = '/api/session/preview.jpg?t=' + s.shot_at;
-        ago.textContent = 'refreshed just now';
+        // The real age, not the word "now". This picture is the only view of the form
+        // there is, so how far behind it is has to be readable off the page — a shot
+        // that stopped refreshing looked identical to one that just did.
+        ago.textContent = age(s.shot_at);
       } else if (paused) {
-        ago.textContent = 'paused';
+        ago.textContent = 'paused' + (s.shot_at ? ' · ' + age(s.shot_at) : '');
       }
     }).catch(function () {}).then(function () {
       if (!stopped) setTimeout(tick, POLL_MS);
     });
   }
 
-  // Statuses only, and only for fields you are not in the middle of typing into. The
-  // rows themselves were rendered by the server and are not rebuilt here.
+  // Statuses and values, and only for fields you are not in the middle of typing into.
+  // The rows themselves were rendered by the server and are never rebuilt here — this
+  // sets text, classes and `.value`, and writes no markup.
+  //
+  // The value matters because the fill lands several seconds after this page does: the
+  // window is still navigating when you arrive, so every answer the prefill wrote used
+  // to appear on the real form and nowhere on the page mirroring it. Two skips, both
+  // already here: a field you are focused in is yours, and one with a push in flight
+  // would flicker back to the old value before the new one is acknowledged.
   function paint(s) {
     s.fields.forEach(function (f) {
       var card = document.querySelector('.lf[data-handle="' + f.handle + '"]');
       if (!card || card.contains(document.activeElement)) return;
       if (card.classList.contains('busy')) return;
       var word = {filled: 'filled', gap: 'needs you',
-                  refused: 'would not take it', pending: '…'}[f.status] || f.status;
+                  refused: 'would not take it', pending: '…',
+                  cleared: 'cleared'}[f.status] || f.status;
       setStatus(card.querySelector('.st'), f.status, word);
+
+      var input = card.querySelector('.lv');
+      if (!input) return;                      // a file row; its picker is the browser's
+      if (card.dataset.type === 'checkbox') {
+        input.checked = f.status === 'filled';
+      } else if (input.value !== f.value) {
+        input.value = f.value;
+      }
     });
   }
 
@@ -2890,7 +3428,12 @@ document.addEventListener('click', async (e) => {
   }
   const save = e.target.closest('button.save');
   if (save) {
-    const box = document.querySelector('input.answer[data-key="' + save.dataset.key + '"]');
+    // Within the button's own row first. The same key can appear twice on this page —
+    // once as a gap card, once in the table of answers already written — and a global
+    // lookup would save whichever the document happened to hold first.
+    const near = save.closest('tr, .card, article');
+    const sel = '.answer[data-key="' + save.dataset.key + '"]';
+    const box = (near && near.querySelector(sel)) || document.querySelector(sel);
     const res = await post('/api/answer', {question_key: save.dataset.key,
                                            value: box ? box.value : ''});
     if (!res.ok) { alert(res.error); return; }
@@ -2967,6 +3510,16 @@ document.addEventListener('click', async (e) => {
     });
     const res = await post('/api/resume', {filename: file.name, content_b64: b64});
     up.disabled = false;
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const rn = e.target.closest('button.save-resume-name');
+  if (rn) {
+    const box = document.getElementById('resume-name');
+    rn.disabled = true;
+    const res = await post('/api/resume-name', {name: box ? box.value : ''});
+    rn.disabled = false;
     if (!res.ok) { alert(res.error); return; }
     location.reload();
     return;
