@@ -871,7 +871,14 @@ been deciding. Two rules follow from the removal and both are load-bearing:
   sponsorship?"* → a work-**authorization** answer, whose stored value means the
   opposite. **`jobtracker forget-learned`** is the sweep: everything no rule and no alias
   the user wrote can account for, dry by default, grouped by key. It is also the bulk
-  form of `forget-question` for a bad *human* alias, which is the only kind left.
+  form of `forget-question` for a bad *human* alias, which is the only kind left. It
+  **takes the values out of the stored plans too** — blanking `answers_hash` only helps a
+  posting that will be re-planned, and 13 of 64 live plans had left the queue for good
+  while `apply-to` still reads them through `get_plan`. That sweep is judged from the plan
+  entry rather than a join to `form_fields` (the two records drift, and the join missed 7
+  of 37), exempts `file` and `alternative` entries (a DOM file input can be keyed
+  `attach`, and detaching the resume is the worst thing this could do), and runs even when
+  `form_fields` has nothing left to clear.
 - **The bank now only grows by hand, so both doors have to work.** See "Growing the
   answer bank" below. The fill rate fell from ~61% of plan entries to ~21% the day the
   sweep ran, and that is the accepted trade, not a regression to fix by loosening a rule.

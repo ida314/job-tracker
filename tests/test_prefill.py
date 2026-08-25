@@ -929,6 +929,78 @@ def test_forget_learned_reopens_the_gap_and_re_queues_the_plans(answers):
     conn.close()
 
 
+def test_forget_learned_takes_the_values_out_of_the_stored_plans(answers):
+    """Blanking `answers_hash` is not enough, and the gap it leaves is permanent.
+
+    `forget_question` relies on the blank to put a posting back in
+    `matches_needing_prefill` so the plan is rebuilt without the bad key. That works for a
+    posting still in the queue and not for one that has left it — applied, deferred,
+    closed, or with its score dropped. Measured on the live database: 13 of 64 plans were
+    in that state and no `prefill` run would ever touch them again, while `apply-to` reads
+    `get_plan` directly and `browser._plan_index` lets a stored plan value beat a fresh
+    `resolve_field`. Opening one would still type what the model guessed, out of a sweep
+    that had reported forgetting it.
+    """
+    conn = store.connect(":memory:")
+    plan = [{"form_key": "q9", "label": "Protected Veteran Status*", "type": "text",
+             "required": True, "value": "New York University",
+             "question_key": "current_employer", "source": "model", "options": []}]
+    store.record_plan(conn, "Twilio", "1", json.dumps(plan), 1, 0, answers.hash, TODAY)
+    # Deliberately no `form_fields` row: a later DOM visit NULLs `question_key` when a
+    # write is refused, so the field that carries the value can have nothing left in
+    # `form_fields` naming it. Keying the sweep off that join left 7 of 37 wrong values
+    # in place at Twilio, all in exactly this state.
+    conn.commit()
+
+    store.forget_learned(conn, prefill.derivable_key(answers), write=True)
+
+    entry = json.loads(store.get_plan(conn, "Twilio", "1")["plan"])[0]
+    assert entry["value"] is None
+    assert entry["question_key"] is None and entry["source"] == "gap"
+    assert store.get_plan(conn, "Twilio", "1")["gaps"] == 1
+    conn.close()
+
+
+def test_forget_learned_never_detaches_the_resume(answers):
+    """A file entry is placed from a path, not from an answer, and a DOM file input can
+    be keyed anything at all — `attach`, `resume_upload`, a slug of "Attach". Running the
+    predicate over one would take the single most valuable field off the form."""
+    conn = store.connect(":memory:")
+    plan = [{"form_key": "attach_file_9", "label": "Attach", "type": "file",
+             "required": True, "value": "/tmp/cv.pdf", "question_key": "resume",
+             "source": "file", "options": []}]
+    store.record_plan(conn, "Twilio", "1", json.dumps(plan), 1, 0, answers.hash, TODAY)
+    conn.commit()
+
+    store.forget_learned(conn, prefill.derivable_key(answers), write=True)
+
+    entry = json.loads(store.get_plan(conn, "Twilio", "1")["plan"])[0]
+    assert entry["value"] == "/tmp/cv.pdf" and entry["source"] == "file"
+    conn.close()
+
+
+def test_forget_learned_keeps_a_stored_value_the_rules_would_produce(answers):
+    """The sweep is "nothing can account for this", not "the label says model".
+
+    Eight entries in the live database were labelled `source: "model"` and kept, because
+    `LABEL_ALIASES` gained their wording in the same change — "LinkedIn Profile URL",
+    "What is your degree in?". Demoting on the source label would have made the user
+    retype answers the rules now produce unprompted.
+    """
+    conn = store.connect(":memory:")
+    plan = [{"form_key": "q3", "label": "LinkedIn Profile URL", "type": "text",
+             "required": False, "value": "https://linkedin.com/in/x",
+             "question_key": "linkedin", "source": "model", "options": []}]
+    store.record_plan(conn, "Twilio", "1", json.dumps(plan), 1, 0, answers.hash, TODAY)
+    conn.commit()
+
+    store.forget_learned(conn, prefill.derivable_key(answers), write=True)
+
+    entry = json.loads(store.get_plan(conn, "Twilio", "1")["plan"])[0]
+    assert entry["value"] == "https://linkedin.com/in/x"
+    conn.close()
+
+
 def test_forget_learned_without_write_changes_nothing(answers):
     """Dry by default — `repair`'s contract, and for its reason: this rewrites what a
     run decided, and 122 lines of it is worth reading first."""

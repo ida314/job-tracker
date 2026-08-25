@@ -1722,7 +1722,12 @@ def cmd_forget_learned(args: argparse.Namespace) -> int:
             conn, prefill_mod.derivable_key(answers), write=args.write
         )
         if not rows:
+            # A `--write` with no `form_fields` rows to clear is still not a no-op: the
+            # stored plans are swept too, and a database can hold guessed values with
+            # nothing left in `form_fields` naming them.
             print("nothing learned that the rules and your aliases cannot account for.")
+            if args.write:
+                print("  (stored plans were swept as well — see docs/prefill.md.)")
             return 0
 
         by_key = collections.defaultdict(list)

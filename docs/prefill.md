@@ -266,8 +266,32 @@ thing that could ever have varied them.
 A row is kept when a canonical ATS name, a label in `LABEL_ALIASES`, a file field, or an
 alias **you wrote** produces the key. Everything else goes, along with the gap it had
 closed and the `answers_hash` of every plan at that company — the same three tables
-`forget-question` moves, for the same reason: a stored plan value beats a fresh
-`resolve_field` in `browser._plan_index`, so a plan built on a guess keeps carrying it.
+`forget-question` moves.
+
+**And the values come out of the stored plans, which blanking the hash does not do.**
+`forget-question` relies on the blank to put a posting back in `matches_needing_prefill`
+so the plan is rebuilt clean. That works for a posting still in the queue and not for one
+that has left it — applied, deferred, closed, or with its score dropped. On the live
+database 13 of 64 plans were in that state, built a week earlier, and no `prefill` run
+would ever touch them again; `apply-to` reads `get_plan` directly and
+`browser._plan_index` lets a stored plan value beat a fresh `resolve_field`, so opening
+one would still have typed the guess. Three rules in that sweep, each learned by getting
+it wrong first:
+
+- **Judged from the plan entry, not from a join to `form_fields`.** They are two records
+  of one decision and either can outlive the other — a later DOM visit NULLs
+  `form_fields.question_key` when a write is refused, so a field carrying a guessed value
+  can have nothing left in `form_fields` naming it. The join left 7 of 37 wrong values in
+  place at Twilio, all in exactly that state. For the same reason the sweep runs even
+  when `form_fields` has nothing to clear.
+- **`file` and `alternative` entries are exempt.** A resume is placed from a path, not
+  from an answer, and a DOM file input can be keyed anything at all — `attach`,
+  `resume_upload` — so running the predicate over one would detach the most valuable
+  field on the form.
+- **It is "nothing accounts for this", not "the label says model".** Eight entries were
+  labelled `source: "model"` and kept, because `LABEL_ALIASES` gained their wording in
+  the same change: "LinkedIn Profile URL", "What is your degree in?". Demoting on the
+  label would have made you retype answers the rules now produce unprompted.
 
 It is a one-shot for a database that ran the model pass, and it stays afterwards as the
 bulk form of `forget-question` for a bad *human* alias, which is now the only kind there
