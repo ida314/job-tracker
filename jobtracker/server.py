@@ -269,7 +269,7 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     The gap list is the machine's half of the conversation: every question an
     application form asked that nothing in `answers.yaml` could answer, deduplicated
     across the companies that asked it. Answering one here writes it into the file and
-    invalidates the prefill plans that needed it, so the next `work --task prefill` run
+    invalidates the prefill plans that needed it, so the next `jobtracker prefill` run
     fills that field everywhere.
     """
     gaps = store.open_gaps(conn)

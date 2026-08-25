@@ -1,7 +1,7 @@
 # Slug repair
 
-`jobtracker repair` — the third and last of the model's bounded roles (DESIGN.md §8),
-and the only one where the model is a fallback rather than the mechanism.
+`jobtracker repair` — the second of the model's four bounded roles (DESIGN.md §8), and
+the only one where the model is a fallback rather than the mechanism.
 
 Boards move. Mercury and Vercel migrated Ashby → Greenhouse and left dead Ashby boards
 behind; HubSpot's live board is `hubspotjobs`, not `hubspot`. `health.py` already detects

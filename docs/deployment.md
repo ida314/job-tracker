@@ -109,7 +109,7 @@ is a fact about the company.
 | `JOBTRACKER_LLM_URL` | For `work`/`rank` | `http://HOST:PORT` of the inference router. The model tag is discovered from `/v1/models`. Absent → `work` is a no-op; `rank` still re-scores from stored judgments |
 | `SIR_BASE_URL` / `SIR_ENDPOINTS` | Alternative | The SDK's own variables, honoured so a host already pointing services at the router need not repeat itself |
 | `JOBTRACKER_PROFILE` | No | Defaults to the copy baked into the image. Mount it to tune the ranking without rebuilding |
-| `JOBTRACKER_ANSWERS` | For `prefill`/`apply-to` | Your answer bank. Not in the image — it is personal data. Absent → the `prefill` task reports itself unavailable and nothing else notices |
+| `JOBTRACKER_ANSWERS` | For `prefill`/`apply-to` | Your answer bank. Not in the image — it is personal data. Absent → `jobtracker prefill` refuses and says so, `prepare` says it cannot prefill, and nothing else notices |
 | `JOBTRACKER_BROWSER_PROFILE` | For `apply-to` | Persistent browser profile. Put it on a volume or every run starts logged out |
 | `DISPLAY` | For `apply-to`/`serve`'s button | Not ours, but load-bearing: Playwright draws a real window on the host running the command. A headless host needs an X display (`Xvfb :100`) or the launch fails. Nobody looks at it — `/apply` is where you type — but it still has to exist |
 | `JOBTRACKER_RESUMES` | No | Where per-posting resumes are stored. Defaults to `./data/resumes`, so a mounted `/data` already covers it |
@@ -135,9 +135,13 @@ one-shot commands against the same `$JOBTRACKER_DB`, in order:
 ```sh
 jobtracker check              # fetch → health → store → match → cache descriptions → report
 jobtracker work               # the next model task; repeat until it reports nothing to do
-jobtracker prepare            # make tomorrow's picks ready to apply to
+jobtracker prepare            # rescore, then prefill tomorrow's picks. No model needed.
 jobtracker dashboard          # render state.db → a static HTML file
 ```
+
+`jobtracker prefill` is not in that list, because `prepare` runs it over exactly the
+postings tomorrow will surface — which is the set that matters, and a much smaller one
+than "every open match". Run it standalone when you want plans for more than the picks.
 
 `rank` is deliberately not in that list any more. `work` refreshes scores after every run
 and `prepare` refreshes them before choosing the picks, so the nightly path no longer
@@ -152,9 +156,11 @@ re-sort the queue now" — which costs no model calls at all.
 - **`work` is the automated drain, and it picks its own task.** `check` leaves every
   no-level-token title `uncertain`; the `level` task reads the description and settles
   what it can (→ match/reject), leaving only the genuinely ambiguous. When that queue is
-  empty it moves to `judge`, then to `prefill` — the pipeline's dependency order, so one
-  command keeps every stage drained. Run it several times per night to drain more than
-  one stage. Without `JOBTRACKER_LLM_URL` it is a safe no-op that prints the queue, so it
+  empty it moves to `judge` — the pipeline's dependency order, so one command keeps
+  every stage drained. Run it several times per night to drain more than one stage.
+  (A third task, `prefill`, was in that chain until 2026-08-25. It needs no model, so it
+  left the queue and `prepare` calls it directly — which is why `prepare` now does useful
+  work on a host with no GPU, where it used to build nothing.) Without `JOBTRACKER_LLM_URL` it is a safe no-op that prints the queue, so it
   is always fine to include in the sequence. Every failure path leaves a posting where it
   was, so a down router never corrupts a verdict — and each unit commits on its own, so a
   container killed mid-run keeps everything that already landed.
@@ -194,7 +200,7 @@ that something else may want.
 |---|---|---|
 | new descriptions cached | 400 (the `--max-descriptions` cap) | ~30–40 |
 | `level` units | a few hundred | ~30–40 |
-| `judge` + `prefill` units | tens | single digits |
+| `judge` units | tens | single digits |
 | model time | ~30–60 min | ~5–10 min |
 
 The backlog is the only reason the first week is long, and it is bounded by the
@@ -234,7 +240,6 @@ what is actually queued. So:
 ExecStart=/usr/local/bin/jobtracker check
 ExecStart=/usr/local/bin/jobtracker work --budget 400 --concurrency 8
 ExecStart=/usr/local/bin/jobtracker work --budget 400 --concurrency 8
-ExecStart=/usr/local/bin/jobtracker work --budget 400 --concurrency 8
 SuccessExitStatus=0 2
 ```
 
@@ -245,10 +250,15 @@ ExecStart=/usr/local/bin/jobtracker prepare
 ExecStart=/usr/local/bin/jobtracker dashboard
 ```
 
-Three `work` lines rather than a loop because each drains one stage: `level`, then
-`judge`, then `prefill`. `systemd` runs `ExecStart=` lines in order and stops on failure,
-which is the behaviour you want — and `work` exits 0 even with no router, so a down GPU
-skips the model work without failing the unit.
+Repeated `work` lines rather than a loop because each drains one stage: `level`, then
+`judge`. `systemd` runs `ExecStart=` lines in order and stops on failure, which is the
+behaviour you want — and `work` exits 0 even with no router, so a down GPU skips the model
+work without failing the unit.
+
+**A host that ran the pre-2026-08-25 shape needs one fewer of these**, not one more:
+prefill was the third stage and is inside `prepare` now. A host that also ran the model
+pass wants a single `jobtracker forget-learned --write` before the next `prepare`, or it
+keeps filling forms from what that pass guessed — see docs/prefill.md.
 
 They are separate units for one reason: **`prepare` is the one whose failure means
 something to you.** Bundled together, a red unit could mean anything from "a board 500'd"

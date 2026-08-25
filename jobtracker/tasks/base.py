@@ -14,8 +14,8 @@ Why a unit and not just a posting
 ---------------------------------
 `unit_key` identifies the *question*, not the row. `judge` asks "how does this posting
 fit the candidate described by prose hash X" — change the prose and it is a different
-question about the same posting, so it is a different unit. `prefill` does the same with
-the answers hash. That is not bookkeeping: it is what makes re-asking cheap and correct,
+question about the same posting, so it is a different unit. That is not bookkeeping: it
+is what makes re-asking cheap and correct,
 and it is what stops a failure against an old question from being held against a new one.
 
 The failure contract, inherited whole from `llm/client.py`: **a unit that cannot be

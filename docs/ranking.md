@@ -176,7 +176,7 @@ usually the description backfill still draining, not the model.
 
 ```bash
 jobtracker check                                    # caches descriptions
-jobtracker work --llm-url http://localhost:8000     # drains level, then judge, then prefill
+jobtracker work --llm-url http://localhost:8000     # drains level, then judge
 jobtracker rank --llm-url http://localhost:8000     # judge what is left, then score
 jobtracker dashboard && jobtracker today
 ```

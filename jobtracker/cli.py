@@ -1,7 +1,8 @@
 """Command-line entry point.
 
-The nightly sequence is  check -> work -> rank -> dashboard,  and only `check` touches
-an ATS. Everything after it reads state.db and, at most, the local inference router.
+The nightly sequence is  check -> work -> prepare -> dashboard,  and only `check`
+touches an ATS. `work` is the model's half; `prepare` rescores and prefills and needs no
+model at all. Everything after `check` reads state.db and, at most, the local router.
 
 Subcommands:
   check         the daily pipeline: fetch -> health -> store -> match -> report,
@@ -830,9 +831,10 @@ def cmd_work(args: argparse.Namespace) -> int:
     """Run the next available model task, or the one you name.
 
     Selection is by priority, and priority is the pipeline's dependency chain: `level`
-    turns uncertain postings into matches, `judge` scores matches, `prefill` works down
-    scored matches. Draining the earliest stage that has work is therefore the same
-    instruction as never starving a later one.
+    turns uncertain postings into matches and `judge` scores them. Draining the earliest
+    stage that has work is therefore the same instruction as never starving a later one.
+    (`prefill` was the third link until 2026-08-25. It needs no model, and this command
+    refuses to run at all without one, so it is `jobtracker prefill` now.)
 
     Never fails for want of a model. With none configured or reachable it reports the
     queue and changes nothing, which makes it safe to run before the router is up.
@@ -1212,9 +1214,11 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
 
         plan = store.get_plan(conn, args.company, args.job_id)
         if plan is None:
-            # Not fatal. The browser re-derives every rules-resolvable field itself, so
-            # a plan is a head start rather than a prerequisite; without one you simply
-            # lose the model's question-matching for this form.
+            # Not fatal, and since 2026-08-25 barely even a downgrade. The browser
+            # re-derives every field through the same `resolve_field`, so a plan is a
+            # head start rather than a prerequisite. What a stored plan still carries
+            # that a live pass does not is the option list each value was checked
+            # against — see `PlanEntry.as_dict`.
             log.info("no prefill plan stored — filling from the rules alone")
 
         plan_json = plan["plan"] if plan else None
@@ -1223,7 +1227,7 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
         # disagree about which file goes out under your name.
         override = resumes.override_for(conn, args.company, args.job_id)
         if override is not None:
-            from .tasks.prefill import retarget_resume
+            from .prefill import retarget_resume
 
             answers = replace(answers, resume=override)
             plan_json = retarget_resume(plan_json, str(override))
@@ -1917,7 +1921,7 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--criteria", default=str(config.CRITERIA_YAML))
     w.add_argument("--profile", default=str(config.PROFILE_YAML))
     w.add_argument("--answers", default=None,
-                   help=f"answer bank for prefill (default: {config.ANSWERS_YAML})")
+                   help=f"answer bank (default: {config.ANSWERS_YAML})")
     w.add_argument("--db", default=None)
     w.add_argument("--since", default=None)
     w.add_argument("--budget", type=int, default=None,

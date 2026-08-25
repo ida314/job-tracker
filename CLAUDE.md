@@ -438,8 +438,8 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   what shipped.
 - **`serve` has a third page, `/settings`** — who you are, your resume, the answer bank,
   and every question prefill could not answer. `render_settings` is
-  connection-in/string-out like `render_tuning`, and `POST /api/answer`, `/api/identity`
-  and `/api/resume` all write through `safewrite`. `POST /api/apply-to` starts the
+  connection-in/string-out like `render_tuning`, and `POST /api/answer`, `/api/attach`,
+  `/api/identity` and `/api/resume` all write through `safewrite`. `POST /api/apply-to` starts the
   browser **on a daemon thread**: `server.py` is `HTTPServer`, not `ThreadingHTTPServer`,
   so driving it inline would freeze the page for as long as the window stayed open.
 - **Nothing on that daemon thread can answer the click that started it,** so everything
@@ -549,9 +549,10 @@ is the reading, the history, and manual entry.
 ## Reading the mailbox
 
 `jobtracker mail`, the `inbox` task, and a review list on `/applications`. Full guide in
-`docs/mail.md`. Added 2026-08-16, and it is the **fifth** bounded model role (DESIGN.md
-§8) — the first thing other than the user to touch the outer loop, which is why it may
-only propose.
+`docs/mail.md`. Added 2026-08-16, and it is the **fourth** bounded model role (DESIGN.md
+§8 — it was the fifth of five until question matching was removed on 2026-08-25) — the
+first thing other than the user to touch the outer loop, which is why it may only
+propose.
 
 - **`mail` is to `inbox` what `check` is to `level`.** The deterministic pass does the I/O
   and caches into `mail_candidates`; the task is a pure read of `state.db` whose only
@@ -758,7 +759,8 @@ provider.
   `test_request_constrains_output_and_is_deterministic` pins the request shape, but only
   a live call proves the server honours it. Demonstrated again 2026-08-13 against the
   router's *mock* backend, which ignores the schema: every prefill question-match came
-  back unparseable and every field became a gap. Right answer, and a good reminder.
+  back unparseable and every field became a gap. Right answer, and a good reminder. (That
+  pass no longer exists — see DESIGN.md §8.1 — so reproduce this against `level` now.)
 - **The `level` task is a pure read** (2026-08-02). `check` caches the description for every
   match/uncertain posting, so this pass opens no ATS connection at all — it lost its
   `fetcher`/`store_mod`/`conn` parameters and its lazy fetch-and-cache block. A throttled

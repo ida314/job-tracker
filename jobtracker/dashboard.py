@@ -981,7 +981,7 @@ def _prefill_line(parts, row, plans) -> None:
     if plan is None:
         parts.append(
             '<div class="prefill none">no prefill yet — '
-            "<code>jobtracker work --task prefill</code></div>"
+            "<code>jobtracker prefill</code></div>"
         )
         return
     filled = plan["fields"] - plan["gaps"]

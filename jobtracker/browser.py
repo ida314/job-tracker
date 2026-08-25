@@ -483,8 +483,9 @@ def _with_known_options(fields: list[FormField], known: dict) -> list[FormField]
     `?questions=true`, keyed by exactly the names the DOM reports (`question_65614029`,
     `question_65614028[]`) — and `store.upsert_form_field` keeps whatever it learned.
 
-    Without this the page renders a text box where a menu belongs and the model is asked
-    about a vocabulary nobody can check. With it, one prefill run teaches every dropdown
+    Without this the page renders a text box where a menu belongs, and `match_option` has
+    nothing to check an answer against — which is how identity `location` came to be
+    written into a phone-number country selector. With it, one prefill run teaches every dropdown
     on that form what it accepts, permanently.
     """
     if not known:

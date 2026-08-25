@@ -1,6 +1,7 @@
 """Task: read one email and say which application stage it is evidence of.
 
-The fifth bounded model role (DESIGN.md §8), and it is bounded twice over. The
+The fourth bounded model role (DESIGN.md §8 — fifth of five until question matching
+was removed on 2026-08-25), and it is bounded twice over. The
 deterministic narrower in `mail.py` has already decided *that* the message is about
 something you applied to; this only decides *what it means*. And what it may say is an
 enum — one of the seven statuses or `none`, plus one of the applications it was offered,

@@ -11,9 +11,10 @@ unit in flight. The passes this replaced held everything in memory until a singl
 at the end, so a run interrupted at 95% wrote nothing at all.
 
 **Selection is the pipeline order.** Tasks are considered by ascending priority, and the
-first with pending work wins. `level` produces the matches `judge` scores, and `judge`
-produces the scores `prefill` works down, so "always work the earliest stage that has
-work" is also "never let a downstream stage starve".
+first with pending work wins. `level` produces the matches `judge` scores, so "always
+work the earliest stage that has work" is also "never let a downstream stage starve".
+(`judge`'s scores were consumed by a third task, `prefill`, until 2026-08-25; it needs no
+model, so it is `jobtracker prefill` now.)
 
 **Failure stays absence.** A unit that raises, times out, or comes back unparseable
 writes nothing and is counted. It never produces a partial or a guessed answer. The

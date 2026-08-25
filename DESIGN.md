@@ -492,12 +492,17 @@ gave.
    rendered-image newsletter, an agency sending from a domain you never applied at, a
    forwarded thread whose context is below the fold.
 
-   The general principle across all five: the model is allowed to *read*, never to
+   The general principle across all four: the model is allowed to *read*, never to
    *decide*. Level extraction reads a description for a fact the title omitted; ranking
-   reads it for a fit judgment no rule could encode; question matching reads a label and
-   points at an answer already written; inbox reading reads a reply and proposes what it
-   meant. In every case deterministic code holds the verdict, the ordering, the text, and
-   the reason.
+   reads it for a fit judgment no rule could encode; inbox reading reads a reply and
+   proposes what it meant. In every case deterministic code holds the verdict, the
+   ordering, the text, and the reason.
+
+   The role removed in §8.1 is the one that did not fit this sentence, and it took until
+   after it shipped to notice. *Question matching* read a label and **pointed at an
+   answer** — which is not reading, and the value it selected went straight into a form
+   with no deterministic code between the two. The principle was sound; the role had been
+   filed under the wrong half of it.
 
 ---
 

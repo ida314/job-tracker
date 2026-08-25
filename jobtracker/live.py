@@ -21,10 +21,16 @@ next snapshot. Nothing here blocks on a browser.
 
 **A command points, it does not write.** The vocabulary is five names, and a command
 carries a field *handle* — an opaque token minted by the discovery pass — never a
-selector, never an expression, never anything the browser thread evaluates. That is the
-same bound the prefill model is held to, for the same reason: there must be no path by
-which text from outside becomes code running on somebody's application form. Nothing in
-this vocabulary can activate anything.
+selector, never an expression, never anything the browser thread evaluates. That is
+`browser.py`'s no-click rule carried across this channel, for the same reason: there must
+be no path by which text from outside becomes code running on somebody's application
+form. Nothing in this vocabulary can activate anything.
+
+(It was also the bound the prefill model was held to, until that pass was removed on
+2026-08-25 — see DESIGN.md §8.1. Worth knowing which way that evidence runs: the model's
+bound held perfectly and its *answers* were wrong anyway. A bound on what something may
+say is not a bound on what a wrong answer does, and the reason this one is worth keeping
+is narrower — it is about code execution, not about judgment.)
 
 **Submitting is therefore not a command.** It activates, which is the one thing the
 sentence above says a command cannot do — so it is a gate on the session rather than a
