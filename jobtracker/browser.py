@@ -51,7 +51,7 @@ from typing import Optional
 from . import live, store
 from .answers import normalize_label, slugify
 from .models import FormField
-from .tasks.prefill import resolve_field
+from .prefill import resolve_field
 
 log = logging.getLogger("jobtracker.browser")
 

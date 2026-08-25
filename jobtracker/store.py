@@ -1501,6 +1501,65 @@ def known_options(conn: sqlite3.Connection, company: str) -> dict[str, list]:
     return out
 
 
+def forget_learned(
+    conn: sqlite3.Connection, derivable, write: bool = False
+) -> list[dict]:
+    """Un-learn every resolved label that no rule and no human alias can account for.
+
+    `forget_question` one label at a time; this is the sweep, and it exists because of
+    what was found when the model pass was removed on 2026-08-25. Deleting the code that
+    made those matches removes nothing: `apply` wrote each one onto
+    `form_fields.question_key`, and `known_question_keys` replays it as a deterministic,
+    model-free alias at every company forever. 229 of 383 resolved rows in the live
+    database were explicable only that way, and they included *"Protected Veteran
+    Status"* pointing at `are_you_a_current_mongodb_employee` and every *"do you require
+    sponsorship?"* pointing at a work-authorization answer, whose stored value means the
+    opposite. Removing the model while keeping those would have frozen the worst reading
+    in place and taken away the only thing that could have changed its mind.
+
+    `derivable(label, form_key) -> bool` decides what to keep, and it is supplied by the
+    caller rather than written here: it is a question about `prefill`'s rules and the
+    user's own aliases, and `store` may not import either. Kept means "some rule or some
+    alias a person wrote produces this key" — everything else goes.
+
+    Also the tool for undoing a bad *human* alias in bulk, which is the only kind left.
+    Dry by default; the same three tables move together as in `forget_question`.
+    """
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT company, form_key, label, question_key FROM form_fields "
+            "WHERE question_key IS NOT NULL"
+        )
+        if not derivable(r["label"], r["form_key"])
+    ]
+    if not rows or not write:
+        return rows
+
+    for row in rows:
+        conn.execute(
+            "UPDATE form_fields SET question_key=NULL WHERE company=? AND form_key=?",
+            (row["company"], row["form_key"]),
+        )
+    for company in {r["company"] for r in rows}:
+        conn.execute(
+            "UPDATE prefill_plans SET answers_hash='' WHERE company=?", (company,)
+        )
+    # Reopened by the question, never by the key it was pointed at — `forget_question`'s
+    # rule, and for its reason: a gap is filed under a slug of the question text, so
+    # clearing by key would reopen whatever legitimately resolved to that key and leave
+    # the bad question closed.
+    wanted = {normalize_label(r["label"]) for r in rows}
+    for gap in conn.execute("SELECT question_key, ask FROM prefill_gaps").fetchall():
+        if normalize_label(gap["ask"]) in wanted:
+            conn.execute(
+                "UPDATE prefill_gaps SET resolved_at=NULL WHERE question_key=?",
+                (gap["question_key"],),
+            )
+    conn.commit()
+    return rows
+
+
 def forget_question(
     conn: sqlite3.Connection, target: str, write: bool = False
 ) -> list[dict]:

@@ -230,11 +230,11 @@ def _resolve_file(value: Any, yaml_path: Path, label: str) -> Optional[Path]:
 def _ordered_gaps(gaps) -> list:
     """Generic questions first, then each company's own — the Settings page's order.
 
-    Imported lazily because `tasks/prefill` imports this module: at module scope the two
+    Imported lazily because `prefill` imports this module: at module scope the two
     would be a cycle. It is one function call on a file write, so the cost is nothing and
     the alternative is a third definition of "generic" living here.
     """
-    from .tasks.prefill import split_gaps
+    from .prefill import split_gaps
 
     generic, per_company = split_gaps(list(gaps))
     ordered = list(generic)

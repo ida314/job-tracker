@@ -295,7 +295,7 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     p.extend(_identity_card(answers))
     p.extend(_resume_card(answers))
 
-    from .tasks.prefill import gap_ask_count, split_gaps
+    from .prefill import gap_ask_count, split_gaps
 
     p.append(f"<h2>Unanswered questions ({len(gaps)})</h2>")
     if not gaps:
@@ -2126,18 +2126,17 @@ class Handler(BaseHTTPRequestHandler):
         the page for every other tab. So this pass is CPU and SQLite only, and it refuses
         rather than fetching when a form has never been learned.
 
-        That is much less of a downgrade than it sounds. Every key the model has ever
-        matched was written onto `form_fields.question_key`, and `known_question_keys`
-        replays those as alias hits — the same mechanism `browser.fill_application`
-        already relies on. The only thing a full run can still do is ask about a field
-        the model has *never seen*, so this pass's gap count can only be equal or higher
-        than the nightly one. It can understate readiness; it can never overstate it.
+        It is no longer a downgrade at all. While prefill had a model pass this button
+        ran a strict subset of it — rules only — so its gap count could be equal or
+        higher than the nightly one, never lower. With the model gone (2026-08-25) the
+        two are the same resolution over the same inputs, and the only thing this still
+        refuses to do is *fetch* a form it has never seen.
 
-        `PrefillTask.apply` does the writing, so the button and the nightly run cannot
+        `prefill.record` does the writing, so the button and the nightly run cannot
         drift about what a plan is.
         """
-        from .tasks.base import TaskContext, TaskUnit
-        from .tasks.prefill import PrefillTask, _field_of, plan_from_fields
+        from . import prefill as prefill_mod
+        from .prefill import PrefillUnit, _field_of, plan_from_fields
 
         row = conn.execute(
             "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
@@ -2159,26 +2158,26 @@ class Handler(BaseHTTPRequestHandler):
                     "error": f"no application form learned for {company} yet — press "
                              f"Open prefilled once and this fills in"}
 
-        base_hash = answers.hash
         answers, override = resumes.effective(conn, answers, company, ats_job_id)
-        # `known_question_keys` is what makes a rules-only rebuild worth doing: every
-        # key the model has ever matched was written onto `form_fields.question_key`,
-        # so its past decisions replay here as alias hits with no call at all.
+        # Every question key resolved on any company's form replays here as an alias
+        # hit, which is what lets one answer cover the same wording everywhere. Since
+        # 2026-08-25 those keys only ever come from a canonical name or an alias a
+        # person attached — `forget-learned` cleared out the ones a model guessed.
         alias_map = dict(answers.by_alias)
         alias_map.update(store.known_question_keys(conn))
 
         result = plan_from_fields(
             [_field_of(r) for r in cached], answers, alias_map, cached[0]["source"]
         )
-        unit = TaskUnit(
-            task="prefill", company=company, ats_job_id=ats_job_id,
-            unit_key=base_hash, title=row["title"],
-            payload={"resume_override": override.name if override else None},
+        unit = PrefillUnit(
+            company=company, ats_job_id=ats_job_id, title=row["title"],
+            resume_override=override.name if override else None,
         )
-        # `ctx.answers` must be the BANK, not the copy: `apply` stores its hash, and the
-        # copy's differs by the override's basename.
+        # `ctx.answers` must be the BANK, not the copy: `record` stores its hash, and
+        # the copy's differs by the override's basename.
         bank, _ = _load_answers_quietly(Path(self.server.answers_path))
-        PrefillTask().apply(conn, unit, result, TaskContext(today=_today(), answers=bank))
+        prefill_mod.record(conn, unit, result,
+                           prefill_mod.PlanContext(today=_today(), answers=bank))
         conn.commit()
         return {
             "ok": True,
@@ -2478,7 +2477,7 @@ class Handler(BaseHTTPRequestHandler):
         if override is not None:
             from dataclasses import replace as _replace
 
-            from .tasks.prefill import retarget_resume
+            from .prefill import retarget_resume
 
             answers = _replace(answers, resume=override)
             plan_json = retarget_resume(plan_json, str(override))

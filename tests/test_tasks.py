@@ -2,8 +2,9 @@
 
 Three properties are load-bearing and each has a test here:
 
-* **Selection is the pipeline order.** level before judge before prefill, because each
-  produces what the next consumes.
+* **Selection is the pipeline order.** level before judge, because each produces what
+  the next consumes. `prefill` used to end that chain; it left the queue on 2026-08-25
+  when it stopped asking a model anything, and `jobtracker prefill` runs it now.
 * **Containment.** Every unit commits by itself, so an interrupted run keeps everything
   that already landed. The passes this replaced lost a whole batch to one ^C.
 * **Failure stays absence.** A unit that answers nothing, or raises, writes nothing —
@@ -94,7 +95,7 @@ class _Exploding:
 
 # -- selection ---------------------------------------------------------------------
 def test_priority_is_the_pipeline_dependency_order():
-    """level -> judge -> prefill. Each stage produces what the next one consumes.
+    """level -> judge. Each stage produces what the next one consumes.
 
     Draining the earliest stage with work is therefore the same instruction as never
     letting a downstream stage starve; if this order is ever changed, that stops being
@@ -103,8 +104,22 @@ def test_priority_is_the_pipeline_dependency_order():
     `inbox` is deliberately outside that chain and deliberately last — see the test
     below.
     """
-    assert task_names()[:3] == ["level", "judge", "prefill"]
+    assert task_names()[:2] == ["level", "judge"]
     assert [t.priority for t in all_tasks()] == sorted(t.priority for t in all_tasks())
+
+
+def test_prefill_is_not_a_task():
+    """It asks a model nothing, and this package is for work that needs one.
+
+    Not a naming preference. `cmd_work` returns early when no router is configured, and
+    `_work` bails on a failed `probe()`, so a task is only ever run when a model is
+    reachable — correct for `level` and `judge`, and silently wrong for a pass that
+    resolves a form against a YAML file. Leaving it registered would mean a night with
+    the GPU down built no plans at all, which is the same argument that has always kept
+    scoring out of the queue.
+    """
+    assert "prefill" not in task_names()
+    assert get_task("prefill") is None
 
 
 def test_inbox_runs_last_so_a_busy_mailbox_cannot_starve_the_pipeline():
@@ -112,7 +127,7 @@ def test_inbox_runs_last_so_a_busy_mailbox_cannot_starve_the_pipeline():
     controls. Ahead of `level` a chatty inbox would keep the pipeline's own stages
     permanently waiting for a queue that never drains."""
     assert task_names()[-1] == "inbox"
-    assert get_task("inbox").priority > get_task("prefill").priority
+    assert get_task("inbox").priority > get_task("judge").priority
 
 
 def test_the_first_task_with_work_wins(criteria, profile):
@@ -142,8 +157,12 @@ def test_a_task_missing_its_configuration_is_unavailable_not_broken(criteria):
     ctx = _ctx(criteria, profile=None)     # no profile loaded, no answers loaded
     by_name = {c.task.name: c for c in survey(conn, ctx)}
     assert by_name["judge"].unavailable and "profile" in by_name["judge"].unavailable
-    assert by_name["prefill"].unavailable and "answers" in by_name["prefill"].unavailable
     assert by_name["level"].unavailable is None
+    # The same distinction outside the queue: `prefill` reports it too, and `cmd_prefill`
+    # refuses on it rather than planning nothing and exiting 0.
+    from jobtracker import prefill
+
+    assert "answers" in prefill.unavailable_reason(ctx)
     conn.close()
 
 
@@ -334,16 +353,24 @@ def test_an_llm_verdict_never_displaces_a_human_ruling(criteria):
 
 
 # -- the chain actually connects ----------------------------------------------------
-def test_work_alone_carries_a_posting_from_uncertain_to_prefilled(tmp_path, criteria, profile):
+def test_the_chain_carries_a_posting_from_uncertain_to_prefilled(tmp_path, criteria,
+                                                                 profile):
     """The stages have to compose, not just each work.
 
-    `judge` writes a ranking with a NULL score and `prefill` only queues postings that
-    have one, so before scores were refreshed between runs a `work` loop drained level,
-    drained judge, and then reported "prefill: nothing to do" forever — a stall that
-    looked exactly like an empty queue. This walks one posting the whole way.
+    `judge` writes a ranking with a NULL score and `prefill` only considers postings
+    that have one, so before scores were refreshed between runs a `work` loop drained
+    level, drained judge, and then reported "prefill: nothing to do" forever — a stall
+    that looked exactly like an empty queue. This walks one posting the whole way.
+
+    Since 2026-08-25 the walk crosses a boundary: `work` ends at `judge`, and the last
+    step is `jobtracker prefill`, which takes **no client at all**. That is the join
+    worth testing — the handoff is now between two commands rather than two priorities,
+    and a rescore still has to happen in between or the plan pass sees a NULL score and
+    reports an empty queue. `_rescore` is what `cmd_work` runs for exactly that reason.
     """
     import json
 
+    from jobtracker import prefill
     from jobtracker.answers import load_answers
     from jobtracker.cli import _rescore
     from jobtracker.models import Company
@@ -370,7 +397,7 @@ def test_work_alone_carries_a_posting_from_uncertain_to_prefilled(tmp_path, crit
             if schema_name == "ranking":
                 return json.dumps({"backend_fit": "strong", "growth": "strong",
                                    "entry_risk": "low", "why": "w"})
-            return json.dumps({"question_key": "none"})
+            raise AssertionError(f"nothing else may ask a model: {schema_name!r}")
 
     class _Form:
         def fetch_application_form(self, company, job_id):
@@ -396,9 +423,15 @@ def test_work_alone_carries_a_posting_from_uncertain_to_prefilled(tmp_path, crit
         ran.append(report.task)
         _rescore(conn, c.profile, c.criteria, c.tiers, TODAY)   # what cmd_work does
 
-    assert ran == ["level", "judge", "prefill"]        # in dependency order, no stall
+    assert ran == ["level", "judge"]                   # in dependency order, no stall
     assert conn.execute("SELECT verdict FROM verdicts").fetchone()[0] == "match"
     assert conn.execute("SELECT score FROM rankings").fetchone()[0] is not None
+
+    # And the step outside the queue picks it up from there, with no client in scope.
+    c = ctx()
+    assert len(prefill.pending(conn, c)) == 1
+    report = prefill.build_plans(conn, c, fetcher=_Form())
+    assert report.applied == 1
     assert store.get_plan(conn, "Acme", "1")["fields"] == 2
     conn.close()
 

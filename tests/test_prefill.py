@@ -7,33 +7,29 @@ without opening a browser, and it is the one ATS that offers it.
 
 What the tests are protecting:
 
-* three resolution passes, only the last of which costs a model call;
+* two resolution passes, neither of which opens a socket to anything;
 * a dropdown whose options do not include our answer is a gap, not a wrong fill;
-* the model can only ever point at an answer the user wrote — it cannot produce text;
+* an unresolvable question is a gap, never a guess — there is no third arm any more;
 * answering a gap re-queues the plans that needed it, and nothing else.
 """
 
-import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 
-from jobtracker import store
+from jobtracker import prefill, store
 from jobtracker.answers import load_answers
 from jobtracker.models import Company, Decision, FormField, Posting, Verdict
-from jobtracker.sources.greenhouse import Greenhouse
-from jobtracker.tasks import TaskContext, get_task, run_task
-from jobtracker.tasks.judge import RankJudgment
-from jobtracker.tasks import prefill
-from jobtracker.tasks.prefill import (
+from jobtracker.prefill import (
+    PlanContext,
     PlanEntry,
     mark_alternatives,
     match_option,
-    match_schema,
-    parse_match,
     resolve_field,
 )
+from jobtracker.sources.greenhouse import Greenhouse
+from jobtracker.tasks.judge import RankJudgment
 
 TODAY = "2026-08-13"
 
@@ -84,7 +80,7 @@ answers:
 
 @pytest.fixture
 def unaliased(tmp_path):
-    """The same bank with no aliases — every opaque question falls to the model."""
+    """The same bank with no aliases — every opaque question is therefore a gap."""
     (tmp_path / "resume.pdf").write_bytes(b"%PDF-1.4")
     path = tmp_path / "answers.yaml"
     path.write_text("""\
@@ -173,7 +169,7 @@ def test_a_missing_resume_makes_the_file_field_a_gap(tmp_path):
     assert entry.value is None and entry.source == "gap"
 
 
-def test_an_unknown_question_is_left_for_the_model(answers):
+def test_an_unknown_question_is_a_gap(answers):
     entry = _resolve(answers, FormField("question_9", "Why do you want to work here?",
                                         "textarea", True))
     assert entry.value is None and entry.source == "gap"
@@ -217,47 +213,7 @@ def test_a_satisfied_question_does_not_report_its_alternative_as_a_gap():
     assert entries[1].source == "alternative"
 
 
-# -- the model pass ------------------------------------------------------------------
-def test_the_model_can_only_point_at_an_answer_that_exists(answers):
-    """The schema is an enum of keys plus "none". It cannot return prose.
-
-    This is the boundary that keeps prefill inside "the model reads, never decides":
-    there is no code path by which a sentence the model composed reaches a form field.
-    """
-    schema = match_schema(answers.answerable)
-    allowed = schema["properties"]["question_key"]["enum"]
-    assert "none" in allowed
-    assert set(allowed) - {"none"} == set(answers.answerable)
-    assert schema["additionalProperties"] is False
-
-
-@pytest.mark.parametrize("text", [
-    None, "", "current_employer", "[]",
-    '{"question_key": "something_i_invented"}',
-    '{"question_key": "none"}',
-    "It looks like current_employer to me.",
-])
-def test_anything_but_a_known_key_is_no_match(text):
-    assert parse_match(text, {"current_employer", "email"}) is None
-
-
-def test_a_known_key_is_accepted():
-    assert parse_match('{"question_key": "email"}', {"email"}) == "email"
-
-
 # -- end to end -----------------------------------------------------------------------
-class _Stub:
-    """A client that answers every question-match with the key it was constructed with."""
-
-    def __init__(self, key="none"):
-        self.key = key
-        self.asked = []
-
-    async def complete(self, system, user, schema, schema_name="", **_k):
-        self.asked.append(user)
-        return json.dumps({"question_key": self.key})
-
-
 def _seed(conn, answers):
     store.sync_postings(
         conn, "Stripe",
@@ -283,23 +239,20 @@ class _FormFetcher:
         return Greenhouse().parse_application_form(GREENHOUSE_QUESTIONS)
 
 
-def _ctx(answers, fetcher=None):
-    return TaskContext(
+def _ctx(answers):
+    return PlanContext(
         today=TODAY,
         answers=answers,
-        answers_path=answers.path,
         companies={"Stripe": Company(name="Stripe", ats="greenhouse", slug="stripe",
                                      tier=1)},
-        fetcher=fetcher or _FormFetcher(),
     )
 
 
 def test_a_plan_names_what_it_filled_and_what_it_could_not(answers):
     conn = store.connect(":memory:")
     _seed(conn, answers)
-    client = _Stub("none")
 
-    report = asyncio.run(run_task(conn, get_task("prefill"), client, _ctx(answers)))
+    report = prefill.build_plans(conn, _ctx(answers), fetcher=_FormFetcher())
     assert report.applied == 1
 
     plan = store.get_plan(conn, "Stripe", "8077887")
@@ -310,9 +263,47 @@ def test_a_plan_names_what_it_filled_and_what_it_could_not(answers):
     assert entries["resume"]["value"].endswith("resume.pdf")
     assert entries["resume_text"]["source"] == "alternative"
     assert plan["fields"] == 6 and plan["gaps"] == 0
-    # Every field resolved by rule, so the model was never asked anything.
-    assert client.asked == []
     conn.close()
+
+
+def test_a_plan_is_built_with_no_model_anywhere_in_reach(answers, monkeypatch):
+    """The regression the old shape hid, and the reason prefill left `work`.
+
+    Until 2026-08-25 this ran as a task, and both doors into it — `cmd_work` and
+    `prepare`'s `_prefill_picks` — built an `LlmClient` and bailed on a failed `probe()`.
+    So a box with no router prepared nothing and every pick reported "no plan": the
+    failure `prepare` exists to catch, manufactured by `prepare` itself. Constructing a
+    client here is made an error outright, because "it happens not to be called today" is
+    what quietly stops being true.
+    """
+    import jobtracker.llm as llm_pkg
+
+    def _boom(*a, **k):
+        raise AssertionError("prefill must never construct a model client")
+
+    monkeypatch.setattr(llm_pkg, "LlmClient", _boom)
+
+    conn = store.connect(":memory:")
+    _seed(conn, answers)
+    report = prefill.build_plans(conn, _ctx(answers), fetcher=_FormFetcher())
+    assert report.applied == 1
+    assert store.get_plan(conn, "Stripe", "8077887") is not None
+    conn.close()
+
+
+def test_the_module_opens_no_socket_and_asks_nothing():
+    """Read off the source, the way `browser.py`'s no-click rule is.
+
+    A plan decides what text goes into a real job application. The property worth pinning
+    is not "the model call was deleted" but "there is nowhere in here for one to come
+    back", which an import-graph assertion states and a behavioural test cannot.
+    """
+    import inspect
+
+    src = inspect.getsource(prefill)
+    for banned in ("import httpx", "import requests", "from ..llm", "from .llm",
+                   "LlmClient", "response_format", "schema_name", "await "):
+        assert banned not in src, banned
 
 
 def test_an_unanswerable_question_becomes_a_gap_once_per_question(answers):
@@ -330,69 +321,53 @@ def test_an_unanswerable_question_becomes_a_gap_once_per_question(answers):
         def fetch_application_form(self, company, job_id):
             return Greenhouse().parse_application_form(extra)
 
-    client = _Stub("none")
-    asyncio.run(run_task(conn, get_task("prefill"), client, _ctx(answers, _Extra())))
+    prefill.build_plans(conn, _ctx(answers), fetcher=_Extra())
 
     gaps = store.open_gaps(conn)
     assert [g["question_key"] for g in gaps] == ["why_do_you_want_to_work_here"]
     assert gaps[0]["ask"] == "Why do you want to work here?"
     assert gaps[0]["seen_on"] == "Stripe"
-    # And the model was asked about exactly the one field the rules could not place.
-    assert len(client.asked) == 1
-    assert "Why do you want to work here?" in client.asked[0]
     conn.close()
 
 
-def test_the_model_places_a_question_the_rules_could_not(unaliased):
-    """With no alias written down, the model is what connects question to answer.
+def test_an_opaque_question_with_no_alias_stays_a_gap(unaliased):
+    """What the model used to do, and why nothing does it now.
 
-    And what it returns is a key — the value still comes from the file, so the text on
-    the application is text the candidate wrote.
+    The bank holds `country_of_residence` and the form asks "Please select the country
+    where you currently reside." — the same question in different words, and with no
+    alias written down nothing here connects them. That is deliberate. The model that
+    used to make this exact match also matched "Protected Veteran Status" to
+    `are_you_a_current_mongodb_employee` and every "do you require sponsorship?" to a
+    work-authorization answer whose stored value means the opposite. A gap costs one
+    line typed once; a wrong match goes out under your name and is not recallable.
     """
     conn = store.connect(":memory:")
     _seed(conn, unaliased)
-    client = _Stub("country_of_residence")
 
-    asyncio.run(run_task(conn, get_task("prefill"), client, _ctx(unaliased)))
+    prefill.build_plans(conn, _ctx(unaliased), fetcher=_FormFetcher())
     entries = {
         e["form_key"]: e
         for e in json.loads(store.get_plan(conn, "Stripe", "8077887")["plan"])
     }
     country = entries["question_68184538"]
-    assert country["source"] == "model"
-    assert country["question_key"] == "country_of_residence"
-    assert country["value"] == "United States"      # from answers.yaml, not the model
-    conn.close()
-
-
-def test_a_model_match_still_has_to_fit_the_dropdown(unaliased):
-    """The model names a key; the option list still decides whether it can be used."""
-    conn = store.connect(":memory:")
-    _seed(conn, unaliased)
-    # It points at an answer whose text is not one of this dropdown's options.
-    client = _Stub("first_name")
-
-    asyncio.run(run_task(conn, get_task("prefill"), client, _ctx(unaliased)))
-    entries = {
-        e["form_key"]: e
-        for e in json.loads(store.get_plan(conn, "Stripe", "8077887")["plan"])
+    assert country["value"] is None and country["source"] == "gap"
+    assert "please select the country where you currently reside" in {
+        g["question_key"].replace("_", " ") for g in store.open_gaps(conn)
     }
-    assert entries["question_68184538"]["value"] is None
-    assert entries["question_68184538"]["source"] == "gap"
     conn.close()
 
 
 def test_a_company_whose_form_we_cannot_read_is_not_queued_work(answers):
-    """Waiting on a browser visit is not a backlog a model could drain.
+    """Waiting on a browser visit is not a backlog this pass could drain.
 
-    Ashby publishes no form, so until `apply-to` has visited once there is nothing for
-    this task to do — and saying "1 pending" would be a lie about what `work` can fix.
+    Ashby publishes no form, so until `apply-to` has visited once there is nothing to
+    do here — and saying "1 pending" would be a lie about what `prefill` can fix.
     """
     conn = store.connect(":memory:")
     _seed(conn, answers)
     ctx = _ctx(answers)
     ctx.companies["Stripe"] = Company(name="Stripe", ats="ashby", slug="stripe", tier=1)
-    assert get_task("prefill").pending_count(conn, ctx) == 0
+    assert len(prefill.pending(conn, ctx)) == 0
     conn.close()
 
 
@@ -401,18 +376,17 @@ def test_answering_a_gap_rebuilds_the_plans_that_needed_it(answers, tmp_path):
 
     conn = store.connect(":memory:")
     _seed(conn, answers)
-    fetcher = _FormFetcher()
-    ctx = _ctx(answers, fetcher)
+    ctx = _ctx(answers)
 
-    asyncio.run(run_task(conn, get_task("prefill"), _Stub(), ctx))
-    assert get_task("prefill").pending_count(conn, ctx) == 0     # nothing to redo
+    prefill.build_plans(conn, ctx, fetcher=_FormFetcher())
+    assert len(prefill.pending(conn, ctx)) == 0                  # nothing to redo
 
     path = answers.path
     path.write_text(insert_answer(path.read_text(), "why_us", "Because of the platform."))
     ctx.answers = load_answers(path)
-    assert get_task("prefill").pending_count(conn, ctx) == 1     # the question changed
+    assert len(prefill.pending(conn, ctx)) == 1                  # the question changed
 
-    asyncio.run(run_task(conn, get_task("prefill"), _Stub(), ctx))
+    prefill.build_plans(conn, ctx, fetcher=_FormFetcher())
     assert store.get_plan(conn, "Stripe", "8077887")["answers_hash"] == ctx.answers.hash
     conn.close()
 
@@ -422,14 +396,14 @@ def test_a_form_we_already_hold_is_not_refetched(answers):
     conn = store.connect(":memory:")
     _seed(conn, answers)
     fetcher = _FormFetcher()
-    ctx = _ctx(answers, fetcher)
+    ctx = _ctx(answers)
 
-    asyncio.run(run_task(conn, get_task("prefill"), _Stub(), ctx))
+    prefill.build_plans(conn, ctx, fetcher=fetcher)
     assert fetcher.calls == 1
 
     store.record_plan(conn, "Stripe", "8077887", "[]", 0, 0, "stale", TODAY)
     conn.commit()
-    asyncio.run(run_task(conn, get_task("prefill"), _Stub(), ctx))
+    prefill.build_plans(conn, ctx, fetcher=fetcher)
     assert fetcher.calls == 1        # served from form_fields the second time
     conn.close()
 
@@ -438,12 +412,12 @@ def test_an_applied_posting_is_never_prefilled_again(answers):
     conn = store.connect(":memory:")
     _seed(conn, answers)
     ctx = _ctx(answers)
-    assert get_task("prefill").pending_count(conn, ctx) == 1
+    assert len(prefill.pending(conn, ctx)) == 1
 
     store.record_application(conn, "Stripe", "8077887", "Backend Engineer", "applied",
                              TODAY, note=None)
     conn.commit()
-    assert get_task("prefill").pending_count(conn, ctx) == 0
+    assert len(prefill.pending(conn, ctx)) == 0
     conn.close()
 
 
@@ -453,13 +427,33 @@ def test_an_unscored_match_is_not_at_the_front_of_the_application_queue(answers)
     _seed(conn, answers)
     conn.execute("UPDATE rankings SET score=NULL")
     conn.commit()
-    assert get_task("prefill").pending_count(conn, _ctx(answers)) == 0
+    assert len(prefill.pending(conn, _ctx(answers))) == 0
     conn.close()
 
 
 # -- `jobtracker prepare` ------------------------------------------------------------
 # The "is tomorrow morning actually useful?" check. Its exit code is the only thing an
 # unattended scheduler sees, so what it does and does not treat as a failure matters.
+@pytest.fixture
+def form(monkeypatch):
+    """Serve the recorded Greenhouse form to anything `prepare` builds a Fetcher for.
+
+    Required, not tidy. Until 2026-08-25 `prepare` built an `LlmClient`, failed its
+    `probe()` on a test box, and returned before reaching the ATS — so these tests
+    passed *because* prefill was router-gated, and the first one below asserted exit 2
+    on the strength of it. With the gate gone the same code path reaches
+    `boards-api.greenhouse.io` for real. Returning `[]` from this is how a test says
+    "this company's form cannot be read", which is now the only way to be planless.
+    """
+    from jobtracker.fetch import Fetcher
+
+    served = SimpleNamespace(fields=Greenhouse().parse_application_form(
+        GREENHOUSE_QUESTIONS))
+    monkeypatch.setattr(Fetcher, "fetch_application_form",
+                        lambda self, company, job_id: served.fields)
+    return served
+
+
 def _prepare(db, answers, tmp_path, count=3):
     from jobtracker.cli import main
 
@@ -467,7 +461,7 @@ def _prepare(db, answers, tmp_path, count=3):
                  "--since", TODAY, "--count", str(count)])
 
 
-def test_prepare_reports_ready_when_every_pick_has_a_plan(answers, tmp_path, capsys):
+def test_prepare_reports_ready_when_every_pick_has_a_plan(form, answers, tmp_path, capsys):
     db = tmp_path / "s.db"
     conn = store.connect(db)
     _seed(conn, answers)
@@ -482,7 +476,7 @@ def test_prepare_reports_ready_when_every_pick_has_a_plan(answers, tmp_path, cap
     assert "nothing left to type" in out
 
 
-def test_gaps_never_make_it_fail(answers, tmp_path, capsys):
+def test_gaps_never_make_it_fail(form, answers, tmp_path, capsys):
     """A form with questions you have not answered is the normal state, not a fault.
 
     Failing on gaps would leave the nightly job permanently red for a condition only
@@ -500,14 +494,16 @@ def test_gaps_never_make_it_fail(answers, tmp_path, capsys):
     assert "9 need you" in capsys.readouterr().out
 
 
-def test_a_pick_with_no_plan_at_all_is_not_ready(answers, tmp_path, capsys):
+def test_a_pick_with_no_plan_at_all_is_not_ready(form, answers, tmp_path, capsys):
     """That is the one state that leaves you opening a blank form in the morning."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
     _seed(conn, answers)
     conn.close()
 
-    # No router configured, so nothing can be built and the pick stays planless.
+    # The form cannot be read, so nothing can be planned and the pick stays planless.
+    # Zero fields is "we could not read this form", never "0/0, nothing left to do".
+    form.fields = []
     assert _prepare(db, answers, tmp_path) == 2
     out = capsys.readouterr().out
     assert "0/1 ready" in out
@@ -542,7 +538,7 @@ def test_it_names_the_reason_a_pick_could_not_be_prepared(answers, tmp_path, cap
     assert "apply-to Stripe 8077887" in out
 
 
-def test_prepare_with_nothing_queued_is_not_a_failure(answers, tmp_path, capsys):
+def test_prepare_with_nothing_queued_is_not_a_failure(form, answers, tmp_path, capsys):
     db = tmp_path / "s.db"
     store.connect(db).close()
     assert _prepare(db, answers, tmp_path) == 0
@@ -671,25 +667,28 @@ def test_a_changed_posting_resume_puts_that_posting_back_in_the_queue(answers):
 
 
 # -- what the model is not allowed to point at -----------------------------------------
-def test_the_model_is_not_asked_about_a_menu_whose_options_nobody_published():
-    """A dropdown we cannot check an answer against is a gap, not a guess.
+def test_a_dropdown_whose_options_nobody_published_still_cannot_be_guessed_at():
+    """The rule `vocabulary_known` used to carry, now carried by there being no guesser.
 
-    `match_option` waves any string through when there are no options, which is right for
-    a text box and, for a menu, is a statement that we could not check. Greenhouse's
-    dropdowns are react-select comboboxes whose menus render on demand, so a DOM reading
-    sees no options at all — and that is how identity `location`, "New York, New York",
-    was written into a phone-number country selector labelled "Country*".
+    A combobox renders its menu in JavaScript, so a DOM reading finds no options and
+    `match_option` waves any string through — which is how identity `location` ("New
+    York, New York") was written into a phone-number country selector labelled
+    "Country*". `vocabulary_known` refused to let the *model* point at such a field; it
+    went with the model pass, because the only writers left are a canonical name and an
+    alias a person attached on purpose, and holding those to it would make every
+    combobox permanently unanswerable.
+
+    So the guard is now structural: with no alias, an unrecognized label is a gap
+    whatever its type, and nothing is in a position to guess at the vocabulary.
     """
-    known = prefill.PlanEntry(form_key="q1", label="Work auth?", type="select",
-                              required=True, options=("Yes", "No"))
-    unknown = prefill.PlanEntry(form_key="country", label="Country*", type="combobox",
-                                required=True)
-    free = prefill.PlanEntry(form_key="q2", label="Why us?", type="textarea",
-                             required=False)
-
-    assert prefill.vocabulary_known(known)
-    assert prefill.vocabulary_known(free)
-    assert not prefill.vocabulary_known(unknown)
+    answers = SimpleNamespace(
+        get=lambda k: None, by_alias={},
+        identity={}, answers={},
+    )
+    entry = resolve_field(
+        FormField("country", "Country*", "combobox", True), answers, {})
+    assert entry.value is None and entry.source == "gap"
+    assert not hasattr(prefill, "vocabulary_known")
 
 
 def test_a_match_the_rules_refused_is_not_taught_as_an_alias(tmp_path):
@@ -697,7 +696,7 @@ def test_a_match_the_rules_refused_is_not_taught_as_an_alias(tmp_path):
     at every company, so a guess that was then rejected became permanent and model-free.
 
     `resolve_field` leaves `question_key` on an entry whose value it went on to refuse —
-    the right answer in the wrong vocabulary — and `apply` used to store that.
+    the right answer in the wrong vocabulary — and `record` used to store that.
     """
     conn = store.connect(tmp_path / "state.db")
     entry = prefill.PlanEntry(
@@ -708,10 +707,9 @@ def test_a_match_the_rules_refused_is_not_taught_as_an_alias(tmp_path):
     result = prefill.PrefillResult(entries=[entry], form_source="dom")
     ctx = SimpleNamespace(today="2026-08-23",
                           answers=SimpleNamespace(hash="h"))
-    unit = SimpleNamespace(company="Twilio", ats_job_id="1", label="Twilio — x",
-                           payload={})
+    unit = prefill.PrefillUnit(company="Twilio", ats_job_id="1", title="x")
 
-    prefill.PrefillTask().apply(conn, unit, result, ctx)
+    prefill.record(conn, unit, result, ctx)
 
     row = conn.execute("SELECT question_key FROM form_fields").fetchone()
     assert row["question_key"] is None
