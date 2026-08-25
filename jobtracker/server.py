@@ -317,7 +317,17 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     if generic:
         p.append(f"<h3>Asked everywhere <span class=count>{len(generic)}</span></h3>")
         p.append("<p class=note>Answer one of these once and every employer that asks "
-                 "it is filled in from then on. Most-asked first.</p>")
+                 "it <em>in those words</em> is filled in from then on. Most-asked "
+                 "first.</p>")
+        # Said plainly, because otherwise the repeat reads as a bug. Matching is by the
+        # exact question text, and `question_key` caps at eight words — so five real
+        # wordings of "are you legally authorized to work in the United States" share one
+        # row here. Attaching one fills that employer's form and reopens the row carrying
+        # the next wording, which looks almost identical and is not.
+        p.append("<p class=note>A question can come back looking almost the same. "
+                 "Employers word the same question differently and each wording is "
+                 "attached once — the row returns carrying whichever is still "
+                 "unanswered, so answering it again is progress, not a loop.</p>")
         for gap in generic:
             p.extend(_gap_card(gap, gap_ask_count(gap)))
     for company, rows in per_company:

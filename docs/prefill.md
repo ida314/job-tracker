@@ -188,6 +188,34 @@ wording all left the question on the page forever. Measured right after the firs
 `forget-learned` run: 11 of 200 open gaps were already answerable, and "Phone", "LinkedIn
 Profile" and "Website" were near the top of the most-asked list.
 
+**One row can be several questions, and it says so** (2026-08-25). `question_key` is
+`slugify(ask)`, which caps at eight words, so these five share a row:
+
+```
+Are you legally authorized to work in the United States?
+Are you legally authorized to work in the United States for LaunchDarkly?
+Are you legally authorized to work in the United States for our Company?
+Are you legally authorized to work in the country in which you are applying?
+Are you legally authorized to work in the country where this position is located?
+```
+
+Matching is by the **full** normalized label, so an alias attached to the first fills
+Twilio's form and none of the other four. The row used to be marked resolved and never
+come back: the question vanished from Settings while four employers kept a blank required
+field and the page had said it saved — failure-as-absence, in the loop that exists to
+prevent it, and newly load-bearing because the model pass had been matching the other four
+unasked.
+
+A resolved gap now **reopens carrying whichever wording is still unanswered**. Only the
+caller knows a field is still empty — `record` calls `record_gap` for `result.gaps` and
+nothing else — so re-sighting is the signal, and the stored `ask` is refreshed to the open
+wording rather than the answered one. Settings says this out loud, because a question
+coming back looking almost identical otherwise reads as a bug.
+
+Keeping them in one row is still right: they are one thing to think about, they share a
+count and a sort position, and each needs its own alias because that is what exact-label
+matching means.
+
 ## Answering a question once
 
 There are two shapes of answer and the difference matters, because for most of a bank's

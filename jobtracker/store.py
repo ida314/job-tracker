@@ -1702,10 +1702,38 @@ def record_gap(
     now: str,
     options: Optional[str] = None,
 ) -> bool:
-    """Note a question we have no answer for. True if this is the first sighting.
+    """Note a question we have no answer for. True if it is newly on your list.
 
     Re-seeing a gap appends the company to `seen_on` rather than creating a second row:
     the same question asked by six employers is one thing for you to answer, not six.
+
+    **A resolved gap reopens, carrying the wording that is still unanswered** (added
+    2026-08-25). `question_key` is `slugify(ask)`, which caps at eight words, so several
+    genuinely different questions share one row — measured on the live database, these
+    five did:
+
+        Are you legally authorized to work in the United States?
+        Are you legally authorized to work in the United States for LaunchDarkly?
+        Are you legally authorized to work in the United States for our Company?
+        Are you legally authorized to work in the country in which you are applying?
+        Are you legally authorized to work in the country where this position is located?
+
+    Matching is by the *full* normalized label, so an alias attached to the first fills
+    Twilio's form and none of the other four. Before this, the row was marked resolved
+    and never came back: the question vanished from Settings while four employers' forms
+    kept a blank required field, with the page having said it saved. Failure-as-absence,
+    inside the loop that exists to prevent it — and newly load-bearing, because the model
+    pass used to match the other four without being asked.
+
+    Only the caller knows a field is still unfilled — `record` calls this for
+    `result.gaps` and nothing else — so re-sighting *is* the signal, and `ask` is
+    refreshed to the wording that is still open rather than the one that was answered.
+    That also keeps it out of `close_answered_gaps`' way: the stored wording is by
+    construction one nothing can currently fill, so the two cannot fight over the row.
+
+    Collapsing the five into one row stays right. They are one thing to think about, they
+    share a count and a sort position, and each still needs its own alias because that is
+    what exact-label matching means.
     """
     row = conn.execute(
         "SELECT seen_on, resolved_at FROM prefill_gaps WHERE question_key=?",
@@ -1728,6 +1756,13 @@ def record_gap(
             "UPDATE prefill_gaps SET seen_on=? WHERE question_key=?",
             (",".join(seen), question_key),
         )
+    if row["resolved_at"] is not None:
+        conn.execute(
+            "UPDATE prefill_gaps SET resolved_at=NULL, ask=?, type=?, "
+            "options=COALESCE(?, options) WHERE question_key=?",
+            (ask, field_type, options, question_key),
+        )
+        return True
     return False
 
 

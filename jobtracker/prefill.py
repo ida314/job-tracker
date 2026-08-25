@@ -630,6 +630,13 @@ def close_answered_gaps(conn, ctx) -> list[str]:
 
     The options go through too. A dropdown whose menu does not offer our answer is a gap,
     and asking without them would close it on a value `match_option` would then refuse.
+
+    The gap's **key** goes through as the field name, not only its label. A file field is
+    answered from `answers.resume` by key, so a label-only reading would leave "Resume/CV"
+    on the list forever after you had attached one. It is also why this cannot cycle
+    against `record_gap`'s reopen: a reopen needs the same `question_key`, which is
+    `slugify(ask)`, so the two wordings share their first eight words and the bank answers
+    both or neither.
     """
     if ctx.answers is None:
         return []

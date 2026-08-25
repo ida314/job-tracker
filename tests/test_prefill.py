@@ -717,6 +717,99 @@ def test_a_match_the_rules_refused_is_not_taught_as_an_alias(tmp_path):
     conn.close()
 
 
+def test_a_resolved_gap_reopens_carrying_the_wording_still_unanswered():
+    """One row, five real questions, and attaching an answer to one used to hide four.
+
+    `question_key` is `slugify(ask)`, which caps at eight words, so these all share a row:
+
+        Are you legally authorized to work in the United States?
+        Are you legally authorized to work in the United States for LaunchDarkly?
+        Are you legally authorized to work in the country in which you are applying?
+
+    Matching is by the *full* normalized label, so an alias attached to the first fills
+    one employer's form and none of the others. Before 2026-08-25 the row was marked
+    resolved and never came back: the question vanished from Settings while four
+    employers kept a blank required field and the page had said it saved. That is
+    failure-as-absence inside the loop built to prevent it, and it was newly load-bearing
+    because the model pass had been matching the other four unasked.
+
+    `record` calls `record_gap` only for fields that are still gaps, so re-sighting *is*
+    the signal that this question is not finished.
+    """
+    conn = store.connect(":memory:")
+    key = "are_you_legally_authorized_to_work_in_the"
+    assert store.record_gap(conn, question_key=key, field_type="select",
+                            ask="Are you legally authorized to work in the US?",
+                            company="Twilio", now=TODAY)
+    store.resolve_gap(conn, key, TODAY)
+    assert store.open_gaps(conn) == []
+
+    reopened = store.record_gap(
+        conn, question_key=key, field_type="select",
+        ask="Are you legally authorized to work in the country where this role is?",
+        company="Databricks", now=TODAY)
+    conn.commit()
+
+    assert reopened is True
+    rows = store.open_gaps(conn)
+    assert len(rows) == 1
+    # The wording shown is the one that is still open, not the one already answered —
+    # otherwise the card asks you to attach a question you have attached.
+    assert rows[0]["ask"].endswith("country where this role is?")
+    assert store.gap_companies(rows[0]) == ["Twilio", "Databricks"]
+    conn.close()
+
+
+def test_an_open_gap_seen_again_is_not_reported_as_new():
+    """The reopen path must not turn every re-sighting into a "new question" log line."""
+    conn = store.connect(":memory:")
+    store.record_gap(conn, question_key="q", ask="Q?", field_type="text",
+                     company="Twilio", now=TODAY)
+    assert store.record_gap(conn, question_key="q", ask="Q?", field_type="text",
+                            company="Stripe", now=TODAY) is False
+    conn.close()
+
+
+def test_reopening_and_closing_a_gap_do_not_fight_over_the_row(answers):
+    """The reopen and the sweep run in one pass, so it is worth knowing they converge.
+
+    `record_gap` reopens with a wording nothing could fill, and `close_answered_gaps`
+    runs afterwards and closes anything the bank *can* answer. If both fired on the same
+    row every night the question would never surface and the field would never fill —
+    the failure just fixed, back through the other door.
+
+    They cannot, because a reopen requires the same `question_key`, which is
+    `slugify(ask)` — so the two wordings share their first eight words and the bank
+    answers both or neither.
+    """
+    conn = store.connect(":memory:")
+    key = "are_you_legally_authorized_to_work_in_the"
+    store.record_gap(conn, question_key=key, field_type="text",
+                     ask="Are you legally authorized to work in the US?",
+                     company="Twilio", now=TODAY)
+    store.resolve_gap(conn, key, TODAY)
+    store.record_gap(conn, question_key=key, field_type="text",
+                     ask="Are you legally authorized to work in the country listed?",
+                     company="Databricks", now=TODAY)
+    conn.commit()
+
+    assert prefill.close_answered_gaps(conn, _ctx(answers)) == []
+    assert len(store.open_gaps(conn)) == 1
+    conn.close()
+
+
+def test_the_sweep_can_close_a_file_gap_once_a_resume_is_attached(answers):
+    """Why `close_answered_gaps` hands the gap's *key* to `resolve_field` and not only
+    its label: a file field is answered from `answers.resume` by key, so a label-only
+    reading would leave "Resume/CV" on the list forever after you attached one."""
+    conn = store.connect(":memory:")
+    store.record_gap(conn, question_key="resume", ask="Resume/CV", field_type="file",
+                     company="Twilio", now=TODAY)
+    conn.commit()
+    assert prefill.close_answered_gaps(conn, _ctx(answers)) == ["resume"]
+    conn.close()
+
+
 def test_a_question_you_have_since_answered_stops_being_listed(answers):
     """A gap is only ever written, and until 2026-08-25 nothing re-examined one.
 

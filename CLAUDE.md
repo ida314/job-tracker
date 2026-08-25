@@ -1113,6 +1113,20 @@ guide in `docs/prefill.md`.
   with a different answer, and reading it as one is how a nickname reaches a legal-name
   field. A wording that needs the employer, the surrounding question, or a choice between
   two readings belongs in the user's own alias list, attached while looking at the form.
+- **A resolved gap reopens carrying the wording still unanswered.** `question_key` is
+  `slugify(ask)` and caps at eight words, so five real questions can share one row —
+  measured: *"Are you legally authorized to work in the United States?"* and four variants
+  naming a company or a country. Matching is by the **full** normalized label, so
+  attaching an alias to one fills that employer's form and none of the others. The row
+  used to be marked resolved and never come back: the question vanished from Settings
+  while four employers kept a blank required field and the page said it saved.
+  Failure-as-absence inside the loop built to prevent it, and newly load-bearing because
+  the model pass had been matching the other four unasked. `record_gap` reopens on
+  re-sighting — only the caller knows a field is still empty, since `record` calls it for
+  `result.gaps` and nothing else — and refreshes `ask` to the open wording, which also
+  keeps it out of `close_answered_gaps`' way: the stored wording is by construction one
+  nothing can fill, so the two cannot cycle. Settings says this out loud, because a
+  question returning nearly identical otherwise reads as a bug.
 - **Settings orders by how many employers ask, and that was already true** —
   `split_gaps` sorts the generic list by `-len(gap_companies(gap))`. What changed is that
   the per-company list stopped hardcoding "1 employer" about gaps with no company
