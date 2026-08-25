@@ -295,6 +295,13 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     p.extend(_identity_card(answers))
     p.extend(_resume_card(answers))
 
+    # Offered to every "answer it with" box below. One list for the page; see the note
+    # on the same element in `render_apply` for why it is a datalist and not a select.
+    p.append('<datalist id="bankkeys">')
+    for key in (answers.answerable if answers else []):
+        p.append(f'<option value="{html.escape(key, quote=True)}">')
+    p.append("</datalist>")
+
     from .prefill import gap_ask_count, split_gaps
 
     p.append(f"<h2>Unanswered questions ({len(gaps)})</h2>")
@@ -317,7 +324,11 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
         p.append(f"<h3>Only {html.escape(company)} asks "
                  f"<span class=count>{len(rows)}</span></h3>")
         for gap in rows:
-            p.extend(_gap_card(gap, 1))
+            # The real count, not a hardcoded 1. `split_gaps` files a question here when
+            # *one* company asks it, so the two agreed by construction — until a gap with
+            # no company recorded at all reached this branch, where it read "1 employer"
+            # about nobody. Ask the same function the other list asks.
+            p.extend(_gap_card(gap, gap_ask_count(gap)))
 
     if answers is not None:
         # Editable, because `/api/answer` is an upsert now. It was a read-only table
@@ -583,7 +594,7 @@ def _tracked_companies(conn: sqlite3.Connection, companies) -> list:
         p.append("</tbody></table>")
     return p
 
-def render_apply(conn: sqlite3.Connection, session) -> str:
+def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
     """The live application form, mirrored into fields you can actually type in.
 
     Pure read — it never writes to `conn`, and it never touches the browser. Everything
@@ -697,6 +708,21 @@ def render_apply(conn: sqlite3.Connection, session) -> str:
         '<div class="phead">Fields '
         '<button id="reread">Read the form again</button></div>'
     )
+    # Every key you already hold, offered to every "save as" box on the page. This is
+    # what the model's enum became: it chose one of these per unplaceable question, and
+    # now you do. One list for the whole page rather than one per row — a form has
+    # thirty fields and the options are the same for all of them.
+    #
+    # `<datalist>` rather than a `<select>` on purpose: minting a new key by typing has
+    # to stay as easy as picking an old one, or the first answer to a genuinely new
+    # question becomes a fight with the control.
+    bank = None
+    if answers_path is not None:
+        bank, _ = _load_answers_quietly(Path(answers_path))
+    p.append('<datalist id="bankkeys">')
+    for key in (bank.answerable if bank else []):
+        p.append(f'<option value="{html.escape(key, quote=True)}">')
+    p.append("</datalist>")
     if not snap["discovered"]:
         # Zero is a finding, not a finished job. Said the same way `FillReport` says it.
         p.append(
@@ -976,26 +1002,49 @@ def _bank_block(row: dict, off: str) -> list:
     field holding "New York, New York" under the label "Country" looked like something
     the form had done rather than something the bank held.
 
-    Both controls post to `/api/answer`, the same writer Settings uses, which is now a
-    true upsert. No second path into the bank.
+    Both controls post to `/api/answer`, the same writer Settings uses, which is a true
+    upsert. No second path into the bank.
+
+    **Ticked by default since 2026-08-25**, and offering the keys you already hold. Both
+    halves are the replacement for the model pass that used to attach a question to a
+    key on its own, and neither works without the other:
+
+    - The tick is what grows the bank at the moment you know the answer, instead of
+      leaving it to a Settings visit you make once a month. It does **not** write on the
+      typing debounce — see `_APPLY_JS.bank` — because a save on the first pause stores
+      half a sentence.
+    - The `<datalist>` is what stops that filling the bank with rubbish. The key box
+      defaults to a slug of the employer's label, so with a tick and no picker Twilio's
+      demographic-consent sentence becomes a ninety-character key that answers exactly
+      one question at exactly one company. Picking `work_authorization` from the list
+      instead is the same choice the model was making, made by someone who knows.
+
+    `data-alias` carries the label verbatim so `/api/answer` can record it as an alias of
+    whichever key you land on. Without it, attaching a question to an existing key writes
+    nothing that would recognize the question next time.
     """
     if row["type"] == "file" or row["option"]:
         # A file is answered by the `resume:` key, not by a sentence; a member of a set
         # is a choice within a question, and the question's own head carries the block.
         return []
-    key = row.get("question_key") or answers_mod.slugify(row["label"] or row["key"])
+    label = row["label"] or row["key"]
+    key = row.get("question_key") or answers_mod.slugify(label)
     safe = html.escape(key, quote=True)
+    alias = html.escape(label, quote=True)
     if row.get("question_key"):
         value = html.escape(row["value"] or "", quote=True)
         return [
             '<div class="bank"><span class=note>from your answer bank as '
             f'<code>{html.escape(key)}</code></span> '
             f'<input class="bankval" type="text" value="{value}"{off}> '
-            f'<button class="savebank" data-key="{safe}"{off}>Save</button></div>'
+            f'<button class="savebank" data-key="{safe}" data-alias="{alias}"{off}>'
+            'Save</button></div>'
         ]
+    gap = html.escape(answers_mod.slugify(label), quote=True)
     return [
-        '<label class="bank"><input type="checkbox" class="tobank"> also save to my '
-        f'answer bank as <input class="bankkey" type="text" value="{safe}"></label>'
+        '<label class="bank"><input type="checkbox" class="tobank" checked> also save '
+        'to my answer bank as <input class="bankkey" list="bankkeys" '
+        f'data-alias="{alias}" data-gap="{gap}" value="{safe}"></label>'
     ]
 
 
@@ -1253,6 +1302,12 @@ def _identity_card(answers) -> list:
     return p
 
 
+# How many employers to name before a gap's note stops listing them. Once a question is
+# asked by thirty companies the list has stopped being information and started being the
+# reason you cannot see the next question; the count carries the meaning by then.
+_NAME_AT_MOST = 5
+
+
 def _gap_card(gap, asked_by: int) -> list:
     """One unanswered question, with the box you answer it in.
 
@@ -1260,10 +1315,22 @@ def _gap_card(gap, asked_by: int) -> list:
     nothing else, so `div.gap`, `.answer[data-key]` and `button.save[data-key]` are
     the same everywhere — which is why `_JS`'s save branch needed no change at all: it
     looks the input up by key, and `question_key` is the table's primary key.
+
+    The **"or answer it with"** box is the Settings half of what the model pass used to
+    do (removed 2026-08-25): this employer's wording attached to an answer you already
+    wrote. Typing in the box above mints a new key from the question's own slug, which is
+    right for a question genuinely nobody has asked before and wrong for the ninth
+    rewording of "are you authorized to work in the US". `gap_key` is what closes *this*
+    row when the answer lands under a different key — without it the gap you were looking
+    at stays open and the page tells you it saved.
     """
     p = ["<div class=gap>"]
     p.append(f"<div class=ask>{html.escape(gap['ask'])}</div>")
-    note = (f"asked by {html.escape(gap['seen_on'])} · type {html.escape(gap['type'])}"
+    seen = store.gap_companies(gap)
+    named = ", ".join(seen[:_NAME_AT_MOST])
+    if len(seen) > _NAME_AT_MOST:
+        named += f" and {len(seen) - _NAME_AT_MOST} more"
+    note = (f"asked by {html.escape(named)} · type {html.escape(gap['type'])}"
             f" · first seen {html.escape(gap['first_seen'])}")
     if asked_by > 1:
         note += f" · <strong>{asked_by} employers</strong>"
@@ -1271,6 +1338,7 @@ def _gap_card(gap, asked_by: int) -> list:
     # The key travels in a data attribute rather than being interpolated into a
     # handler — the question text comes from a third-party ATS.
     key = html.escape(gap["question_key"], quote=True)
+    ask = html.escape(gap["ask"], quote=True)
     options = [o.strip() for o in (gap["options"] or "").split("|") if o.strip()]
     if options and gap["type"] in ("select", "multiselect", "combobox"):
         # A menu, so a menu. Typing a word the form does not offer is refused by
@@ -1287,7 +1355,14 @@ def _gap_card(gap, asked_by: int) -> list:
         control = [f"<input class=answer type=text placeholder='Your answer' "
                    f'data-key="{key}">']
     p.append("<div class=row>" + "".join(control)
-             + f'<button class=save data-key="{key}">Save</button></div>')
+             + f'<button class=save data-key="{key}" data-alias="{ask}">Save</button>'
+             + "</div>")
+    p.append(
+        '<div class="row attach"><span class=note>or answer it with</span> '
+        f'<input class=attachkey list="bankkeys" placeholder="an answer you already '
+        f'wrote" data-gap="{key}" data-alias="{ask}"> '
+        f'<button class=attach data-gap="{key}">Attach</button></div>'
+    )
     p.append("</div>")
     return p
 
@@ -1467,7 +1542,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/apply":
                 conn = self._conn()
                 try:
-                    page = render_apply(conn, live.current())
+                    page = render_apply(conn, live.current(),
+                                       self.server.answers_path)
                 finally:
                     conn.close()
                 self._send(page)
@@ -1499,6 +1575,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_rematch())
             elif path == "/api/answer":
                 self._send_json(self._api_answer(payload))
+            elif path == "/api/attach":
+                self._send_json(self._api_attach(payload))
             elif path == "/api/identity":
                 self._send_json(self._api_identity(payload))
             elif path == "/api/resume":
@@ -1970,16 +2048,29 @@ class Handler(BaseHTTPRequestHandler):
         The insertion is text surgery rather than a YAML round trip. A round trip would
         delete every comment in the file, including the stubs you are working through.
 
-        It is an **upsert**, in both blocks. `/apply` now offers this on every field
-        rather than only on ones it could not answer, so "save" mostly means "change what
-        you told me last time" — and an identity key has to reach `identity:`, because
+        It is an **upsert**, in both blocks. `/apply` offers this on every field rather
+        than only on ones it could not answer, so "save" mostly means "change what you
+        told me last time" — and an identity key has to reach `identity:`, because
         `Answers.get` reads that first and an `answers:` entry of the same name would be
         a write nothing ever loads.
+
+        **`alias` and `gap_key` are what make attaching work** (2026-08-25). Answering a
+        question has two shapes and only one of them used to be expressible. Typing a new
+        answer under the gap's own key is the easy one: the alias could be read back out
+        of `prefill_gaps.ask`, since the gap is filed under that key. Attaching this
+        employer's wording to an answer you *already* wrote is the other, and it breaks
+        both halves of that — no gap row exists under `work_authorization`, so no alias
+        was recorded, and `resolve_gap(key)` closed a row that was never open while the
+        one you were looking at stayed. Which is to say: the question came back tomorrow
+        and the page said it had saved. With the model gone this is the main path, not a
+        corner, so both travel in the payload now. Absent, the old behaviour stands.
         """
         from .answers import IDENTITY_KEYS, insert_answer, load_answers, upsert_identity
 
         key = str(payload.get("question_key") or "").strip()
         value = str(payload.get("value") or "").strip()
+        alias = str(payload.get("alias") or "").strip()
+        gap_key = str(payload.get("gap_key") or "").strip() or key
         if not key:
             return {"ok": False, "error": "no question_key"}
         if not value:
@@ -1991,13 +2082,23 @@ class Handler(BaseHTTPRequestHandler):
 
         conn = self._conn()
         try:
-            gap = conn.execute(
-                "SELECT ask FROM prefill_gaps WHERE question_key=?", (key,)
-            ).fetchone()
-            aliases = [gap["ask"]] if gap else []
+            # The caller's alias first — it is the label off the form in front of you,
+            # and it is the only one available when attaching to an existing key. The
+            # gap's own `ask` is the fallback, for a save with no form in view.
+            aliases = [alias] if alias else []
+            if not aliases:
+                gap = conn.execute(
+                    "SELECT ask FROM prefill_gaps WHERE question_key=?", (gap_key,)
+                ).fetchone()
+                if gap:
+                    aliases = [gap["ask"]]
 
             if key in IDENTITY_KEYS:
                 body = upsert_identity(path.read_text(), {key: value})
+                # An identity key holds no aliases — `by_alias` is built from the
+                # `answers:` block alone — so attaching a wording to one has to be
+                # recorded where something reads it. `form_fields.question_key` is that
+                # place, and `learn_question_key` below is the write.
             else:
                 body = insert_answer(path.read_text(), key, value, aliases)
             try:
@@ -2005,15 +2106,86 @@ class Handler(BaseHTTPRequestHandler):
             except safewrite.RefusedWrite as exc:
                 return {"ok": False, "error": f"refused invalid answers.yaml: {exc}"}
 
-            store.resolve_gap(conn, key, _today())
+            if alias and key in IDENTITY_KEYS:
+                store.learn_question_key(conn, alias, key)
+            store.resolve_gap(conn, gap_key, _today())
             conn.commit()
             remaining = len(store.open_gaps(conn))
         finally:
             conn.close()
 
         log.info("answered %r", key)
-        # Every stored plan was an answer to "what do I know today", and today changed.
-        # They rebuild on the next prefill run, mostly without any model call.
+        # Every stored plan was an answer to "what do I know today", and today changed —
+        # aliases are in `Answers.hash` for exactly this. They rebuild on the next
+        # `jobtracker prefill`, or on the Rebuild button, and nothing asks a model.
+        return {"ok": True, "question_key": key, "remaining": remaining}
+
+    def _api_attach(self, payload: dict) -> dict:
+        """Say that a question is one you have already answered, and close its gap.
+
+        The other half of `_api_answer`, and the deliberate half of what the prefill
+        model pass did automatically until 2026-08-25. It matched a question to a key on
+        its own; this is the same match made by the person who wrote the answer. It
+        carries **no value** — the value is already in the bank, and accepting one here
+        would make "attach" a second way to edit an answer, which is `_api_answer`'s job.
+
+        Three refusals, and each is a state that would otherwise look like success:
+
+        - an unknown key attaches the question to nothing, and the gap would close;
+        - a key holding no answer is the same thing one step later — `Answers.get`
+          returns None for a commented-out identity field, and the alias would point at
+          an absence;
+        - no gap under `gap_key` means the row you were looking at is not the row that
+          would close.
+        """
+        from .answers import IDENTITY_KEYS, insert_answer, load_answers
+
+        key = str(payload.get("question_key") or "").strip()
+        gap_key = str(payload.get("gap_key") or "").strip()
+        alias = str(payload.get("alias") or "").strip()
+        if not key or not gap_key:
+            return {"ok": False, "error": "question_key and gap_key are required"}
+        if not alias:
+            return {"ok": False, "error": "no question text to attach"}
+
+        path = Path(self.server.answers_path)
+        if not path.exists():
+            return {"ok": False, "error": f"no answer bank at {path}"}
+        bank, error = _load_answers_quietly(path)
+        if bank is None:
+            return {"ok": False, "error": error or "the answer bank did not load"}
+        value = bank.get(key)
+        if value is None:
+            return {"ok": False,
+                    "error": f"{key!r} is not an answer you have written — pick one from "
+                             f"the list, or type the answer above instead"}
+
+        conn = self._conn()
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM prefill_gaps WHERE question_key=?", (gap_key,)
+            ).fetchone():
+                return {"ok": False, "error": f"no open question {gap_key!r}"}
+
+            if key in IDENTITY_KEYS:
+                # An identity key holds no alias list — `by_alias` is built from the
+                # `answers:` block alone — so the attachment has to live where something
+                # reads it, which is `form_fields.question_key`.
+                store.learn_question_key(conn, alias, key)
+            else:
+                body = insert_answer(path.read_text(), key, value, [alias])
+                try:
+                    safewrite.write_text(path, body, load_answers)
+                except safewrite.RefusedWrite as exc:
+                    return {"ok": False,
+                            "error": f"refused invalid answers.yaml: {exc}"}
+            store.resolve_gap(conn, gap_key, _today())
+            conn.commit()
+            remaining = len(store.open_gaps(conn))
+        finally:
+            conn.close()
+
+        log.info("attached %r to %r", alias[:60], key)
         return {"ok": True, "question_key": key, "remaining": remaining}
 
     def _api_resume_name(self, payload: dict) -> dict:
@@ -3009,14 +3181,31 @@ _APPLY_JS = """
     st.textContent = word;
   }
 
-  // Also answer it everywhere, if you said so. Same endpoint the Settings tab writes
-  // through — there is no second way into the answer bank.
+  // Also answer it everywhere. Same endpoint the Settings tab writes through — there is
+  // no second way into the answer bank — and the box is ticked by default now, because
+  // this is where the bank grows: the moment you know the answer is while you are typing
+  // it into a form, not on a Settings visit you make once a month.
+  //
+  // **Never called from the debounce**, and that is what "ticked by default" costs. The
+  // old flow saved from the 400ms timer and then unticked itself, which was harmless
+  // while you did the ticking — you ticked when you had finished typing. Ticked from the
+  // start it would store whatever you had reached at the first pause and disarm, so the
+  // finished sentence never lands and the bank quietly holds half of one. It stays armed
+  // for the same reason: `/api/answer` is an upsert, so correcting a value overwrites,
+  // and disarming after the first save would make the correction the one thing that does
+  // not stick.
+  //
+  // `alias` is the employer's own wording for this question. Without it, attaching an
+  // answer to a key records nothing that would recognize the question at the next
+  // company — which is most of what this feature is for.
   function bank(card, value) {
     var tick = card.querySelector('.tobank');
     if (!tick || !tick.checked || !value) return;
     var key = card.querySelector('.bankkey');
-    post('/api/answer', {question_key: key ? key.value : '', value: value})
-      .then(function (res) { if (res.ok) tick.checked = false; });
+    if (!key || !key.value) return;
+    post('/api/answer', {question_key: key.value, value: value,
+                         alias: key.dataset.alias || '',
+                         gap_key: key.dataset.gap || ''});
   }
 
   var timers = {};
@@ -3025,7 +3214,7 @@ _APPLY_JS = """
     if (timers[handle]) clearTimeout(timers[handle]);
     timers[handle] = setTimeout(function () {
       delete timers[handle];
-      push(card, value).then(function () { bank(card, value); });
+      push(card, value);            // and not `bank` — see its note
     }, DEBOUNCE_MS);
   }
 
@@ -3110,7 +3299,8 @@ _APPLY_JS = """
     if (!box) return;
     var value = box.value;
     btn.disabled = true;
-    post('/api/answer', {question_key: btn.dataset.key, value: value})
+    post('/api/answer', {question_key: btn.dataset.key, value: value,
+                         alias: btn.dataset.alias || ''})
       .then(function (res) {
         btn.disabled = false;
         if (!res.ok) { alert(res.error || 'could not save that'); return; }
@@ -3430,11 +3620,29 @@ document.addEventListener('click', async (e) => {
     // Within the button's own row first. The same key can appear twice on this page —
     // once as a gap card, once in the table of answers already written — and a global
     // lookup would save whichever the document happened to hold first.
-    const near = save.closest('tr, .card, article');
+    const near = save.closest('.gap, tr, .card, article');
     const sel = '.answer[data-key="' + save.dataset.key + '"]';
     const box = (near && near.querySelector(sel)) || document.querySelector(sel);
     const res = await post('/api/answer', {question_key: save.dataset.key,
-                                           value: box ? box.value : ''});
+                                           value: box ? box.value : '',
+                                           alias: save.dataset.alias || ''});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  // "This question is one I have already answered." What the model pass used to decide,
+  // decided by the person who wrote the answer. It sends no value — the value is already
+  // in the bank — so `/api/answer` reads the one it holds, records this employer's
+  // wording as an alias of that key, and closes *this* gap via `gap_key`.
+  const att = e.target.closest('button.attach');
+  if (att) {
+    const row = att.closest('.gap');
+    const box = row && row.querySelector('.attachkey');
+    const key = box ? box.value.trim() : '';
+    if (!key) { alert('pick an answer to attach this question to'); return; }
+    const res = await post('/api/attach', {question_key: key,
+                                           gap_key: att.dataset.gap,
+                                           alias: box.dataset.alias || ''});
     if (!res.ok) { alert(res.error); return; }
     location.reload();
     return;

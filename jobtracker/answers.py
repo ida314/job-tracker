@@ -119,23 +119,39 @@ class Answers:
 
     @property
     def answerable(self) -> list[str]:
-        """Every key that currently holds an answer. The model chooses from this list."""
+        """Every key that currently holds an answer.
+
+        The list a question can be attached to — offered on `/apply` and on the Settings
+        gap cards. It was the model's enum until 2026-08-25; it is now a datalist, and
+        the choice is made by someone who knows the answer.
+        """
         return sorted([*self.identity.keys(), *self.answers.keys()])
 
     @property
     def hash(self) -> str:
-        """Covers the answers only — not comments, not the gap block.
+        """Covers the answers and their aliases — not comments, not the gap block.
 
         Same mechanism as `Profile.prose_hash`: a plan is an answer to "what do I know
         right now", so it stays valid until what we know changes.
+
+        **Aliases are in it, and that is load-bearing** (2026-08-25). An alias is how a
+        question gets attached to an answer, and attaching one changes no *value* — so
+        with aliases out of the hash, `matches_needing_prefill`'s `answers_hash != ?`
+        test never fired, the plan was never rebuilt, and the field you had just
+        explained stayed a gap forever. That was survivable only while the model pass
+        would have matched the question anyway. Now that attaching is the whole
+        mechanism, leaving them out would make the main path a silent dead end.
+
+        `resume_name` is still deliberately absent: it changes which name the *upload*
+        carries, not which answer goes in any field, so a plan built before it was set
+        is still a correct plan. Folding it in would re-plan every posting for a
+        cosmetic rename.
         """
         parts = [f"{k}={v}" for k, v in sorted(self.identity.items())]
-        parts += [f"{k}={a.value}" for k, a in sorted(self.answers.items())]
+        for k, a in sorted(self.answers.items()):
+            parts.append(f"{k}={a.value}")
+            parts.append(f"{k}~{','.join(sorted(a.aliases))}")
         parts.append(f"resume={self.resume.name if self.resume else ''}")
-        # `resume_name` is deliberately absent: it changes which name the *upload*
-        # carries, not which answer goes in any field, so a plan built before it was set
-        # is still a correct plan. Folding it in would re-plan every posting for a
-        # cosmetic rename.
         return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from jobtracker import prefill, store
-from jobtracker.answers import load_answers
+from jobtracker.answers import load_answers, normalize_label
 from jobtracker.models import Company, Decision, FormField, Posting, Verdict
 from jobtracker.prefill import (
     PlanContext,
@@ -715,6 +715,161 @@ def test_a_match_the_rules_refused_is_not_taught_as_an_alias(tmp_path):
     assert row["question_key"] is None
     assert store.known_question_keys(conn) == {}
     conn.close()
+
+
+def test_a_question_you_have_since_answered_stops_being_listed(answers):
+    """A gap is only ever written, and until 2026-08-25 nothing re-examined one.
+
+    `_api_answer` closes the key you just wrote, which covers the common path and misses
+    every other route to the same place: an identity field filled in Settings, a value
+    edited in the file by hand, an alias attached to a different key, or `LABEL_ALIASES`
+    gaining the wording. Measured on the live database straight after `forget-learned`:
+    11 of 200 open gaps were already answerable, and "Phone", "LinkedIn Profile" and
+    "Website" were near the top of the most-asked list — which is the first thing you see
+    and now the main place you work.
+    """
+    conn = store.connect(":memory:")
+    store.record_gap(conn, question_key="phone", ask="Phone", field_type="text",
+                     company="Stripe", now=TODAY)
+    store.record_gap(conn, question_key="why_stripe", ask="Why Stripe?",
+                     field_type="textarea", company="Stripe", now=TODAY)
+    conn.commit()
+
+    closed = prefill.close_answered_gaps(conn, _ctx(answers))
+    assert closed == ["phone"]
+    assert [g["question_key"] for g in store.open_gaps(conn)] == ["why_stripe"]
+    conn.close()
+
+
+def test_a_dropdown_that_does_not_offer_the_answer_stays_listed(answers):
+    """The options travel with the question, or a gap closes on a value the form would
+    refuse — "the right answer in the wrong vocabulary", closed instead of asked."""
+    conn = store.connect(":memory:")
+    store.record_gap(conn, question_key="country_of_residence",
+                     ask="Please select the country where you currently reside.",
+                     field_type="select", company="Stripe", now=TODAY,
+                     options="Canada | Mexico")
+    conn.commit()
+
+    assert prefill.close_answered_gaps(conn, _ctx(answers)) == []
+    assert len(store.open_gaps(conn)) == 1
+    conn.close()
+
+
+def test_the_label_table_holds_only_labels_that_name_their_own_field():
+    """The admission test for `LABEL_ALIASES`, stated because it was nearly widened past
+    it. Eleven entries were harvested on 2026-08-25 from what `forget-learned` swept —
+    wordings the model had matched correctly, which would otherwise be questions to
+    retype. The temptation is to take the near-misses with them.
+
+    "Preferred First Name" is not `first_name` — it is a different question with a
+    different answer, and reading it as one is what put a nickname in a legal-name field.
+    A wording that needs the employer, the surrounding question, or a choice between two
+    readings belongs in the user's own alias list, attached while looking at the form.
+    """
+    from jobtracker.prefill import LABEL_ALIASES
+
+    for label, key in LABEL_ALIASES.items():
+        assert label == normalize_label(label), label
+    assert LABEL_ALIASES["linkedin profile url"] == "linkedin"
+    assert LABEL_ALIASES["what is your degree in"] == "degree"
+    for near_miss in ("preferred first name", "preferred last name",
+                      "home address city", "present location"):
+        assert near_miss not in LABEL_ALIASES, near_miss
+
+
+# -- forget-learned ------------------------------------------------------------------
+# The sweep for a database that ran the model pass. Deleting `_ask` removed nothing it
+# had already decided: `record` wrote every match onto `form_fields.question_key`, which
+# `known_question_keys` replays as a deterministic alias at every company forever.
+def _resolved(conn, company, form_key, label, key):
+    store.upsert_form_field(conn, company=company, form_key=form_key, label=label,
+                            field_type="text", now=TODAY, required=True, options=None,
+                            question_key=key, source="dom")
+
+
+def test_forget_learned_keeps_the_rules_and_drops_the_guesses(answers):
+    """Three rows, one of each provenance, and only the third can have been a guess."""
+    conn = store.connect(":memory:")
+    # A canonical ATS field name — `CANONICAL_FIELDS` produces this with no help.
+    _resolved(conn, "Stripe", "first_name", "First Name", "first_name")
+    # A wording the user attached themselves, in answers.yaml's alias list.
+    _resolved(conn, "Stripe", "q1", "Who is your current or previous employer?",
+              "current_employer")
+    # Nothing connects this question to this answer but a guess. It is also a real one:
+    # the live database had "Protected Veteran Status" pointing at a current-employer
+    # question, and every "do you require sponsorship?" at a work-authorization answer.
+    _resolved(conn, "Twilio", "q9", "Protected Veteran Status*", "current_employer")
+    conn.commit()
+
+    rows = store.forget_learned(conn, prefill.derivable_key(answers), write=True)
+    assert [(r["company"], r["form_key"]) for r in rows] == [("Twilio", "q9")]
+    assert set(store.known_question_keys(conn).values()) == {
+        "first_name", "current_employer"}
+    conn.close()
+
+
+def test_forget_learned_reopens_the_gap_and_re_queues_the_plans(answers):
+    """All three tables move together, or it only looks fixed.
+
+    `known_question_keys` is the alias, `prefill_gaps` is the question you were never
+    asked because the guess was believed, and a stored plan beats a fresh
+    `resolve_field` in `browser._plan_index` — so a plan built on the guess keeps
+    carrying it until its hash is blanked.
+    """
+    conn = store.connect(":memory:")
+    _resolved(conn, "Twilio", "q9", "Protected Veteran Status*", "current_employer")
+    store.record_gap(conn, question_key="protected_veteran_status",
+                     ask="Protected Veteran Status*", field_type="text",
+                     company="Twilio", now=TODAY)
+    store.resolve_gap(conn, "protected_veteran_status", TODAY)
+    store.record_plan(conn, "Twilio", "1", "[]", 1, 0, answers.hash, TODAY)
+    conn.commit()
+
+    store.forget_learned(conn, prefill.derivable_key(answers), write=True)
+
+    assert store.known_question_keys(conn) == {}
+    assert [g["question_key"] for g in store.open_gaps(conn)] == [
+        "protected_veteran_status"]
+    assert conn.execute(
+        "SELECT answers_hash FROM prefill_plans").fetchone()[0] == ""
+    conn.close()
+
+
+def test_forget_learned_without_write_changes_nothing(answers):
+    """Dry by default — `repair`'s contract, and for its reason: this rewrites what a
+    run decided, and 122 lines of it is worth reading first."""
+    conn = store.connect(":memory:")
+    _resolved(conn, "Twilio", "q9", "Protected Veteran Status*", "current_employer")
+    conn.commit()
+
+    rows = store.forget_learned(conn, prefill.derivable_key(answers))
+    assert len(rows) == 1
+    assert store.known_question_keys(conn) == {
+        "protected veteran status": "current_employer"}
+    conn.close()
+
+
+def test_a_bank_with_no_aliases_does_not_make_every_key_a_guess(answers, tmp_path):
+    """`derivable_key` reads the *user's* aliases, so running it against the wrong bank
+    would sweep rows a person had attached on purpose. The CLI refuses a missing bank
+    outright for this reason; the predicate itself just has to be honest about what it
+    was given."""
+    keep = prefill.derivable_key(answers)
+    assert keep("Who is your current or previous employer?", "q1")
+    assert keep("First Name", "first_name")
+    assert not keep("Protected Veteran Status*", "q9")
+
+    blank = load_answers(_bare_bank(tmp_path))
+    assert not prefill.derivable_key(blank)(
+        "Who is your current or previous employer?", "q1")
+    assert prefill.derivable_key(blank)("First Name", "first_name")   # still a rule
+
+
+def _bare_bank(tmp_path):
+    path = tmp_path / "bare.yaml"
+    path.write_text("identity:\n  first_name: D\n  last_name: D\n  email: e@x.edu\n")
+    return path
 
 
 def test_a_checkbox_set_is_one_gap_not_one_per_box():

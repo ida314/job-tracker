@@ -1280,7 +1280,170 @@ def test_every_gap_keeps_its_answer_box_and_save_button_in_both_lists(tmp_path):
     conn.close()
     for key in ("how_did_you_hear", "why_stripe"):
         assert f'<input class=answer type=text placeholder=\'Your answer\' data-key="{key}"' in page
-        assert f'<button class=save data-key="{key}">' in page
+        assert f'<button class=save data-key="{key}"' in page
+        # And the second way to answer one, which has to be in both lists for the same
+        # reason: a question only Stripe asks is as likely to be one you have already
+        # answered as a question four employers ask.
+        assert f'<button class=attach data-gap="{key}">' in page
+
+
+# -- attaching a question to an answer you already wrote --------------------------
+# The deliberate half of what the prefill model pass did on its own until 2026-08-25.
+def _attach_bank(tmp_path):
+    path = tmp_path / "answers.yaml"
+    path.write_text("identity:\n  first_name: D\n  last_name: D\n  email: e@x.edu\n"
+                    "answers:\n  work_authorization: \"Yes\"\n")
+    return path
+
+
+def test_attaching_records_the_wording_and_closes_that_gap(tmp_path):
+    """Both halves, and neither is optional.
+
+    The alias is what recognizes this question at the next employer; `gap_key` is what
+    closes the row you were actually looking at. Closing by answer key would have shut
+    `work_authorization`'s row — which was never open — and left this one on the page
+    while the page said it saved.
+    """
+    db = _fresh(tmp_path)
+    path = _attach_bank(tmp_path)
+    h = _handler_for(db, config.CRITERIA_YAML, answers_path=path)
+    conn = store.connect(db)
+    _gaps_at(conn, "are_you_authorized_to_work", "Are you authorized to work in the US?",
+             ["Stripe"])
+    conn.commit()
+    conn.close()
+
+    res = h._api_attach({"question_key": "work_authorization",
+                         "gap_key": "are_you_authorized_to_work",
+                         "alias": "Are you authorized to work in the US?"})
+    assert res["ok"] and res["remaining"] == 0
+
+    from jobtracker.answers import load_answers
+
+    bank = load_answers(path)
+    assert bank.by_alias["are you authorized to work in the us"] == "work_authorization"
+    assert bank.get("work_authorization") == "Yes"       # the value is untouched
+
+
+def test_attaching_to_an_answer_that_does_not_exist_is_refused(tmp_path):
+    """Otherwise the question is attached to nothing and its gap closes anyway — the
+    answer silently becomes blank on every form that asks it."""
+    db = _fresh(tmp_path)
+    path = _attach_bank(tmp_path)
+    h = _handler_for(db, config.CRITERIA_YAML, answers_path=path)
+    conn = store.connect(db)
+    _gaps_at(conn, "q", "Some question?", ["Stripe"])
+    conn.commit()
+    conn.close()
+
+    before = path.read_text()
+    res = h._api_attach({"question_key": "no_such_answer", "gap_key": "q",
+                         "alias": "Some question?"})
+    assert not res["ok"] and "not an answer you have written" in res["error"]
+    assert path.read_text() == before
+
+    conn = store.connect(db)
+    assert len(store.open_gaps(conn)) == 1
+    conn.close()
+
+
+def test_attaching_carries_no_value_and_cannot_edit_an_answer(tmp_path):
+    """`/api/answer` edits; this only ever points. A value accepted here would be a
+    second writer of the same field, and the two would disagree the first time one of
+    them grew a validation rule."""
+    import inspect
+
+    src = inspect.getsource(server.Handler._api_attach)
+    assert 'payload.get("value")' not in src
+
+
+def test_attaching_an_identity_key_is_recorded_where_something_reads_it(tmp_path):
+    """`Answers.by_alias` is built from the `answers:` block alone, so an alias of
+    `email` has nowhere to live in the file. `form_fields.question_key` is the record,
+    and it is what `known_question_keys` replays at every other company."""
+    db = _fresh(tmp_path)
+    path = _attach_bank(tmp_path)
+    h = _handler_for(db, config.CRITERIA_YAML, answers_path=path)
+    conn = store.connect(db)
+    store.upsert_form_field(conn, company="Stripe", form_key="q7",
+                            label="What is your e-mail address?", field_type="text",
+                            now="2026-08-25", required=True, options=None,
+                            question_key=None, source="dom")
+    _gaps_at(conn, "what_is_your_e_mail_address", "What is your e-mail address?",
+             ["Stripe"])
+    conn.commit()
+    conn.close()
+
+    res = h._api_attach({"question_key": "email",
+                         "gap_key": "what_is_your_e_mail_address",
+                         "alias": "What is your e-mail address?"})
+    assert res["ok"]
+
+    conn = store.connect(db)
+    assert store.known_question_keys(conn)["what is your e mail address"] == "email"
+    conn.close()
+
+
+def test_every_control_on_the_settings_page_has_a_handler_in_its_own_script(tmp_path):
+    """The button-and-handler-in-the-same-file rule, which /settings never had one for.
+
+    `/apply`, `/applications` and `/companies` each grew this test after a control was
+    shipped whose handler lived on a page that never loaded it — a click that does
+    nothing at all, silently. Settings gained `button.attach` on 2026-08-25 and would
+    have been the fourth.
+    """
+    import re
+
+    path = tmp_path / "answers.yaml"
+    path.write_text("identity:\n  first_name: D\n  last_name: D\n  email: e@x.edu\n"
+                    "answers:\n  work_authorization: \"Yes\"\n")
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "how_did_you_hear", "How did you hear about us?", ["Stripe"])
+    conn.commit()
+    page = server.render_settings(conn, path)
+    conn.close()
+
+    script = page[page.rindex("<script>"):]
+    classes = set(re.findall(r"class=(save|attach|save-identity|save-resume-name)[ >]",
+                             page))
+    assert classes == {"save", "attach", "save-identity", "save-resume-name"}
+    for cls in classes:
+        assert f"button.{cls}" in script, cls
+    for endpoint in ("/api/answer", "/api/attach", "/api/identity", "/api/resume"):
+        assert endpoint in script, endpoint
+    # And the picker the attach box reads from, which is useless without its options.
+    assert 'list="bankkeys"' in page
+    assert '<datalist id="bankkeys">' in page
+    assert '<option value="work_authorization">' in page
+
+
+def test_a_gap_carries_the_question_verbatim_for_the_alias(tmp_path):
+    """Saving or attaching has to record the *employer's wording*, not the slug.
+
+    `known_question_keys` and `Answers.by_alias` are both keyed on normalized label, so
+    an alias of "how_did_you_hear" would match a form asking literally that and nothing
+    else. Since the model pass went, this is the only thing that makes one answer cover
+    the same question at the next company.
+    """
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "how_did_you_hear", "How did you hear about us?", ["Stripe"])
+    conn.commit()
+    page = server.render_settings(conn, tmp_path / "answers.yaml")
+    conn.close()
+    assert 'data-alias="How did you hear about us?"' in page
+
+
+def test_a_gap_asked_by_many_names_a_few_and_counts_the_rest(tmp_path):
+    """Thirty company names is the reason you cannot see the next question."""
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "work_authorization", "Authorized to work?",
+             [f"Co{i}" for i in range(9)])
+    conn.commit()
+    page = server.render_settings(conn, tmp_path / "answers.yaml")
+    conn.close()
+    assert "Co0, Co1, Co2, Co3, Co4 and 4 more" in page
+    assert "Co8," not in page
+    assert "9 employers" in page
 
 
 # -- the mirrored form ----------------------------------------------------------------
@@ -1363,10 +1526,64 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     for hook in ("lf-file", "lf-detach", "tobank", "bankkey", "savebank", "bankval",
                  ".lv"):
         assert hook in script, hook
+    # The picker's options come from the answer bank, so an empty list is legitimate
+    # here — but the element the key box points at has to exist either way, or the
+    # control silently degrades to a plain text box.
+    assert 'list="bankkeys"' in page and '<datalist id="bankkeys">' in page
     for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
                      "/api/session/highlight", "/api/session/rediscover",
                      "/api/session/file", "/api/session/close", "/api/answer"):
         assert endpoint in script, endpoint
+
+
+def test_saving_to_the_bank_is_offered_by_default(tmp_path):
+    """Ticked from the start, because this is where the bank grows.
+
+    The moment you know the answer to "how did you hear about us" is while you are
+    typing it into a form, not on a Settings visit you make once a month. Before the
+    model pass was removed the bank could afford to grow slowly, because a model was
+    guessing at the questions it did not cover; now nothing is.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    assert 'class="tobank" checked' in page
+
+
+def test_the_bank_is_never_written_from_the_typing_debounce(tmp_path):
+    """Ticked-by-default and save-on-debounce cannot both be true.
+
+    `bank()` used to run from the 400ms timer and untick itself after the first success.
+    That was harmless while *you* did the ticking — you ticked when you had finished
+    typing. Ticked from the start it stores whatever you had reached at the first pause
+    and disarms, so the finished sentence never lands and the bank holds half of one.
+    Blur and dropdown-change still call it: both mean "done with this field".
+
+    Read off the source because the alternative is a browser test of a race.
+    """
+    js = server._APPLY_JS
+    body = js[js.index("function schedule("):]
+    body = body[:body.index("\n  }")]
+    assert "push(card, value)" in body
+    assert "bank(" not in body, "the debounce must not reach the answer bank"
+
+    for commit in ("focusout", "change"):
+        at = js.index("'" + commit + "'")
+        assert "bank(" in js[at:at + 1400], commit
+
+
+def test_the_bank_write_carries_the_employer_wording(tmp_path):
+    """An alias keyed on our slug would match a form asking literally "how_did_you_hear".
+
+    `Answers.by_alias` and `known_question_keys` are both keyed on the normalized label,
+    so the verbatim question is the only thing that makes one answer cover the same
+    question at the next company. It is what the model used to work out.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    assert "data-alias=" in page
+    assert "alias: key.dataset.alias" in server._APPLY_JS
 
 
 def test_the_only_way_to_submit_is_armed_and_one_shot(tmp_path):

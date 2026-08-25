@@ -1705,9 +1705,10 @@ def cmd_forget_learned(args: argparse.Namespace) -> int:
 
     conn = store.connect(args.db or config.DB_PATH)
     try:
-        answers = _load_answers(Path(args.answers) if args.answers else None)
+        answers, answers_path = _load_answers(
+            Path(args.answers) if args.answers else None)
         if answers is None and not args.force:
-            print(f"error: no answer bank at {args.answers or config.ANSWERS_YAML} — "
+            print(f"error: no answer bank at {answers_path} — "
                   "without it every alias you wrote looks like a guess and would be "
                   "swept. Pass --force if that is really what you want.",
                   file=sys.stderr)

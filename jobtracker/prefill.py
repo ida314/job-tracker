@@ -81,17 +81,40 @@ LABEL_ALIASES = {
     "linkedin": "linkedin",
     "linkedin profile": "linkedin",
     "linkedin url": "linkedin",
+    "linkedin profile url": "linkedin",
     "github": "github",
     "github profile": "github",
     "github url": "github",
+    "github profile url": "github",
     "website": "website",
     "personal website": "website",
+    "personal website url": "website",
     "portfolio": "website",
     "pronouns": "pronouns",
+    "preferred pronouns": "pronouns",
     "school": "school",
     "university": "school",
+    "college university": "school",
+    "what college university did do you attend": "school",
     "degree": "degree",
+    "what is your degree in": "degree",
 }
+
+# Every entry above is a label that names its own field and nothing else. That is the
+# whole admission test, and it is worth stating because eleven of them were added on
+# 2026-08-25 out of the sweep `forget-learned` performed — wordings the model had matched
+# correctly, which would otherwise have become questions to retype. The ones deliberately
+# left out of that harvest are the reason the test exists:
+#
+#   "Preferred First Name"   is not `first_name`; it is a different question with a
+#                            different answer, and the model called it one.
+#   "Home Address City"      is one component of an address, not where you live.
+#   "Present Location:"      is, but only in context — a label this terse is exactly
+#                            what a person should confirm once rather than a table guess.
+#
+# A wording that needs to know the employer, the surrounding question, or which of two
+# readings was meant belongs in *your* alias list, attached on `/apply` while you are
+# looking at the form. This table is for what is true everywhere.
 
 # File inputs, by canonical name. A file field is filled from a path in answers.yaml
 # rather than from an answer, and only a real browser can act on it.
@@ -432,10 +455,14 @@ class Report:
     no_form: int = 0
     errors: int = 0
     gaps: int = 0
+    closed: int = 0
 
     def summary(self) -> str:
-        return (f"prefill: {self.attempted} attempted · {self.applied} planned · "
-                f"{self.no_form} no form · {self.errors} error · {self.gaps} gap(s)")
+        out = (f"prefill: {self.attempted} attempted · {self.applied} planned · "
+               f"{self.no_form} no form · {self.errors} error · {self.gaps} gap(s)")
+        if self.closed:
+            out += f" · {self.closed} question(s) already answered"
+        return out
 
 
 def unavailable_reason(ctx) -> Optional[str]:
@@ -584,6 +611,51 @@ def record(conn, unit: PrefillUnit, result: PrefillResult, ctx) -> str:
     return result.summary
 
 
+def close_answered_gaps(conn, ctx) -> list[str]:
+    """Resolve every open gap the bank can now answer. Returns the keys it closed.
+
+    A gap is a question *the bank could not answer at the time it was asked*, and nothing
+    re-examined that. `_api_answer` closes the one key you just wrote, which covers the
+    common path and misses every other route to the same place: an identity field filled
+    in Settings, an answer edited in the file by hand, an alias attached to a different
+    key, or `LABEL_ALIASES` gaining the wording. Measured on the live database right
+    after `forget-learned`: 11 of 200 open gaps were already answerable, and three of
+    them — "Phone", "LinkedIn Profile", "Website" — sat in the top of the most-asked
+    list, which is the first thing you see and now the main place you work.
+
+    That is the ordinary failure of this project in its most ordinary form: a derived
+    state that is only ever written, never re-derived. Cheap to fix here because
+    `resolve_field` is the same function the plan uses, so a gap closes on exactly the
+    condition that would have filled the field.
+
+    The options go through too. A dropdown whose menu does not offer our answer is a gap,
+    and asking without them would close it on a value `match_option` would then refuse.
+    """
+    if ctx.answers is None:
+        return []
+    alias_map = dict(ctx.answers.by_alias)
+    alias_map.update(store.known_question_keys(conn))
+
+    closed = []
+    for gap in store.open_gaps(conn):
+        options = tuple(
+            o.strip() for o in (gap["options"] or "").split("|") if o.strip()
+        )
+        entry = resolve_field(
+            FormField(key=gap["question_key"], label=gap["ask"], type=gap["type"],
+                      required=True, options=options),
+            ctx.answers, alias_map,
+        )
+        if entry.value is not None:
+            store.resolve_gap(conn, gap["question_key"], ctx.today)
+            closed.append(gap["question_key"])
+    if closed:
+        conn.commit()
+        log.info("%d question(s) you had already answered are no longer listed",
+                 len(closed))
+    return closed
+
+
 def build_plans(conn, ctx, fetcher=None, only=None, limit=None) -> Report:
     """Plan every posting that needs it. `only` restricts to (company, job) pairs.
 
@@ -620,6 +692,9 @@ def build_plans(conn, ctx, fetcher=None, only=None, limit=None) -> Report:
         report.applied += 1
         report.gaps += len(result.gaps)
         log.info("prefilled %s  %s", unit.label, summary)
+
+    # Last, so it sees the gaps this run recorded as well as the ones already there.
+    report.closed = len(close_answered_gaps(conn, ctx))
     return report
 
 

@@ -1627,6 +1627,45 @@ def known_question_keys(conn: sqlite3.Connection) -> dict[str, str]:
     return {normalize_label(r["label"]): r["question_key"] for r in rows}
 
 
+def learn_question_key(
+    conn: sqlite3.Connection, label: str, question_key: str
+) -> int:
+    """Teach every form that asks `label` that the answer is `question_key`.
+
+    The write behind "this question is my `email`" on `/apply`. For an answer in the
+    `answers:` block the durable record is the alias list in answers.yaml — the user's
+    own file, which `Answers.by_alias` reads — and this would be redundant. For an
+    **identity** key it is the only record there can be: `by_alias` is built from the
+    `answers:` block alone, so a wording attached to `first_name` has nowhere else to
+    live, and without this the same question comes back at the next employer.
+
+    Rows only. It never invents a `form_fields` row, because a label nothing has asked
+    is not a question — and a row minted here would name a company that never asked it.
+    """
+    wanted = normalize_label(label)
+    hit = [
+        r["rowid"]
+        for r in conn.execute("SELECT rowid, label FROM form_fields")
+        if normalize_label(r["label"]) == wanted
+    ]
+    for rowid in hit:
+        conn.execute(
+            "UPDATE form_fields SET question_key=? WHERE rowid=?", (question_key, rowid)
+        )
+    # The plans holding this field were built before the attachment, so they still carry
+    # it as a gap. Blanking the hash is `forget_question`'s move and puts them back in
+    # `matches_needing_prefill`; without it a stored plan beats a fresh `resolve_field`
+    # in `browser._plan_index` and the field stays empty on the page.
+    if hit:
+        conn.execute(
+            "UPDATE prefill_plans SET answers_hash='' WHERE company IN "
+            "(SELECT company FROM form_fields WHERE rowid IN (%s))"
+            % ",".join("?" * len(hit)),
+            hit,
+        )
+    return len(hit)
+
+
 def normalize_label(label: str) -> str:
     """Fold a form label to a comparison key.
 
