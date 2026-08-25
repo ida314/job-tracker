@@ -242,11 +242,15 @@ on an operations title. This is the `Finance Associate` bug through a different 
 it with the tuning loop and a regression check, not with a bare YAML edit.
 
 **The model passes became tasks (2026-08-13).** `resolve` and `rank`'s judging phase are
-now `level` and `judge` in the queue behind `jobtracker work`, joined by a third task,
-`prefill`. Both old commands still exist and still work — `resolve` is literally
+now `level` and `judge` in the queue behind `jobtracker work`, joined by `inbox`
+(2026-08-16). Both old commands still exist and still work — `resolve` is literally
 `work --task level`. Transport moved to the `sir-client` SDK and the `Provider` registry
 was deleted. See `docs/tasks.md` and `docs/prefill.md`; the schema gained
 `task_attempts`, `form_fields`, `prefill_gaps` and `prefill_plans`.
+
+`prefill` was a fourth task from 2026-08-13 to **2026-08-25**, when its model pass was
+deleted and it left the queue for `jobtracker prefill`. What it had been deciding is in
+DESIGN.md §8.1; what a database that ran it needs is `jobtracker forget-learned`.
 
 **Not yet done:**
 
@@ -661,44 +665,59 @@ in `docs/tuning.md`; the rules that matter here:
 ## The task queue
 
 `jobtracker work`, documented in `docs/tasks.md`. Added 2026-08-13, and it is where all
-model work now lives: `level` (was `resolve`), `judge` (was `rank`'s first phase), and
-`prefill` — joined by `inbox` on 2026-08-16. The scheduler polls tasks by priority and
-runs the first with work.
+model work lives: `level` (was `resolve`), `judge` (was `rank`'s first phase), and
+`inbox` (2026-08-16). The scheduler polls tasks by priority and runs the first with work.
+
+**`prefill` was here too, at priority 30, and left on 2026-08-25** when its model pass was
+deleted. That is not a rename. `cmd_work` returns early when no router is configured and
+`_work` bails on a failed `probe()`, so a task only ever runs when a model is reachable —
+correct for the three above, silently wrong for a pass that resolves a form against a YAML
+file. `prepare` had exactly that bug already: on a box with no GPU it built nothing and
+every pick reported "no plan", which is the failure `prepare` exists to catch, produced by
+`prepare` itself. It is `jobtracker prefill` now. Same argument that has always kept
+scoring out of the queue: no model, must always run.
 
 - **`work` rescores after every run, and that is load-bearing.** `judge` writes a ranking
-  with a NULL score and `prefill` only queues postings that have one, so without it a
-  `work` loop drains level, drains judge, then reports "prefill: nothing to do" forever —
-  a stall that looks exactly like an empty queue. Scoring stays out of the queue (no
-  model, must always run) but it is still a link in the chain, so the runner closes it.
-  There is a test that walks one posting from uncertain to prefilled using only `work`.
+  with a NULL score, and both `today` and `prefill` only consider postings that have one,
+  so without it a `work` loop drains level, drains judge, and leaves the score NULL until
+  something else happens to rescore. Scoring stays out of the queue (no model, must always
+  run) but it is still a link in the chain, so the runner closes it. There is a test that
+  walks one posting from uncertain to scored with `work` and then to prefilled with
+  `prefill`, which is now where the join is.
 - **`jobtracker prepare` is the nightly "is tomorrow useful?" check.** Rescore, take the
   postings `today` will surface, prefill exactly those, exit 2 if any has no plan.
   **Gaps never cause exit 2** — an unanswered question is the normal state and failing on
   it would make the unit permanently red for something only the user can clear, the same
-  trap as flagging dbt Labs' empty board.
-- **Priority is the pipeline's dependency chain, not a preference.** level → judge →
-  prefill, because each produces what the next consumes. Reorder it and "work the next
-  available task" stops meaning "keep every stage drained", which is the entire reason
-  the scheduler exists. There is a test. **`inbox` (40) is outside that chain and says
-  so**: it consumes nothing the others produce, and it is last on a starvation argument —
-  its queue refills from an external stream, so anywhere earlier a chatty mailbox would
-  keep the pipeline's own stages waiting. There is a test for that too.
+  trap as flagging dbt Labs' empty board. Verified again after the model came out, when
+  the gap count went from 200 to 1,900: still exit 0.
+- **Priority is the pipeline's dependency chain, not a preference.** level → judge,
+  because each produces what the next consumes. Reorder it and "work the next available
+  task" stops meaning "keep every stage drained", which is the entire reason the scheduler
+  exists. There is a test. **`inbox` (40) is outside that chain and says so**: it consumes
+  nothing the others produce, and it is last on a starvation argument — its queue refills
+  from an external stream, so anywhere earlier a chatty mailbox would keep the pipeline's
+  own stages waiting. There is a test for that too.
 - **The queue is derived, never stored.** Each task's `pending()` is a SQL read over
   tables that already exist, so there is nothing to reconcile — a posting that closes
   overnight simply stops appearing. `task_attempts` is a *failure ledger*, not a queue:
   three consecutive failures set a unit aside so it stops eating the budget while the
-  rest of the queue starves. Do not turn it into a work table.
+  rest of the queue starves. Do not turn it into a work table. (`prefill` lost its ledger
+  when it left. Acceptable: its only remaining failure is a form fetch, which is transient
+  and retried nightly, and `fetch.py` already burns `MAX_RETRIES` inside the run.)
 - **Every unit commits on its own.** That is the fix for a real defect — the old passes
   held everything until one commit at the end, so an interrupted run wrote nothing. A
   task that raises while writing is rolled back to the last committed unit.
+  `prefill.build_plans` kept this when it left the queue; it is the one thing from the
+  runner worth carrying out by hand.
 - **`unit_key` is the question, not the posting.** `judge` carries the profile prose
-  hash, `prefill` the answers hash. Change the question and every unit is new, with its
-  retry count reset — correct, because a failure answering the old question says nothing
-  about the new one. It is also the router's idempotency key.
+  hash. Change the question and every unit is new, with its retry count reset — correct,
+  because a failure answering the old question says nothing about the new one. It is also
+  the router's idempotency key.
 - **`pending()` must only return work the task can actually do.** `level` excludes
-  postings with no cached description; `prefill` excludes companies whose form it has
-  never seen. Counting those overstates a backlog no model could drain, and sends a
-  budgeted run to guaranteed no-ops.
+  postings with no cached description. Counting what it cannot reach overstates a backlog
+  no model could drain, and sends a budgeted run to guaranteed no-ops. `prefill.pending`
+  keeps the same rule outside the queue: a company whose form is neither held nor
+  fetchable is waiting on a browser visit, not on this pass.
 - Adding a task is one module plus one import line, same as an ATS. **Task modules are
   pure** — prompts, parsers, and a description of what to write; `runner.py` owns every
   socket, transaction, and clock.
@@ -832,9 +851,28 @@ already wrote. Keep it in `cmd_rank`.
 
 ## Prefilled applications
 
-`jobtracker work --task prefill` and `jobtracker apply-to`, documented in
-`docs/prefill.md`. Added 2026-08-13. Two halves: an offline task that builds a plan and
-names what is missing, and an on-demand browser that carries the plan to the page.
+`jobtracker prefill` and `jobtracker apply-to`, documented in `docs/prefill.md`. Added
+2026-08-13. Two halves: an offline pass that builds a plan and names what is missing, and
+an on-demand browser that carries the plan to the page.
+
+**It asks a model nothing** (2026-08-25). `jobtracker/prefill.py` is deterministic and
+opens no socket except the ATS form fetch; there is a test reading that off the source.
+It was `work --task prefill` until then — see "The task queue" for why leaving the queue
+was required rather than cosmetic, and DESIGN.md §8.1 for what the model had actually
+been deciding. Two rules follow from the removal and both are load-bearing:
+
+- **A deleted model does not delete its decisions.** `record` writes every resolved key
+  onto `form_fields.question_key`, and `known_question_keys` replays it as a
+  deterministic alias at every company forever. 229 of 383 resolved fields in the live
+  database were explicable only as model output, and they included *"Protected Veteran
+  Status"* → `are_you_a_current_mongodb_employee` and every *"do you require
+  sponsorship?"* → a work-**authorization** answer, whose stored value means the
+  opposite. **`jobtracker forget-learned`** is the sweep: everything no rule and no alias
+  the user wrote can account for, dry by default, grouped by key. It is also the bulk
+  form of `forget-question` for a bad *human* alias, which is the only kind left.
+- **The bank now only grows by hand, so both doors have to work.** See "Growing the
+  answer bank" below. The fill rate fell from ~61% of plan entries to ~21% the day the
+  sweep ran, and that is the accepted trade, not a regression to fix by loosening a rule.
 
 - **A cookie cannot carry prefill state, and neither can a URL.** Greenhouse, Ashby and
   Lever hold no server-side draft for an anonymous candidate, only Lever honours
@@ -846,19 +884,24 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   (Superseded twice: `_submit` gained the one gated click on 2026-08-22, and `_press`
   gained the widget click on 2026-08-23 — see "Reading a form as it actually is" below.
   The ban on `requestSubmit`/`form.submit`/`dispatchEvent`/`keyboard.press` never moved.)
-- **The model may only point, never write.** Its schema is an enum of answer keys the
-  user already wrote plus `none`. There must be no code path by which a sentence the
-  model composed reaches a form field — free text with no stored answer is a gap, the
-  same as an unanswered dropdown. It is the fourth bounded role in DESIGN.md §8, and the
-  narrowest.
+- **Nothing may put a value in a field the user did not give for it.** This was "the
+  model may only point, never write" — an enum of answer keys plus `none`, with no code
+  path by which a sentence it composed could reach a form field. Every part of that bound
+  held and the feature was still removed, because pointing at the wrong key puts the wrong
+  text on a real application exactly as surely as writing it. The rule that survives is
+  the general one, and it now has no exception: a value reaches a field because a canonical
+  ATS name matched, or because *the user attached this wording to this answer*.
 - **A dropdown that does not offer our answer is a gap, not a fill.** Picking the nearest
-  option puts an answer the candidate did not give onto a submitted application. Extended
-  2026-08-23: a dropdown whose options we cannot *see* is also not something the model may
-  point at (`prefill.vocabulary_known`). `match_option` waves any string through when
-  `options` is empty, which is right for a text box and, for a menu, is a statement that
-  nothing checked it — and that is how identity `location` ("New York, New York") ended
-  up in a phone-number country selector. An `exact` canonical match or an alias the *user*
-  wrote is still allowed through; only the model is held to it.
+  option puts an answer the candidate did not give onto a submitted application.
+  `match_option` waves any string through when `options` is empty, which is right for a
+  text box and, for a menu, is a statement that nothing checked it — and that is how
+  identity `location` ("New York, New York") ended up in a phone-number country selector.
+  `prefill.vocabulary_known` used to carry the menu half of that, refusing to let the
+  *model* point at a field whose options nobody had published; it went with the model
+  pass, because the only writers left are a canonical name and an alias a person attached
+  on purpose, and holding those to it would make every combobox permanently unanswerable.
+  The guard is structural now: with no alias, an unrecognized label is a gap whatever its
+  type, and there is a test saying so by name.
 - **A resolved `question_key` is only stored when it actually placed a value.**
   `known_question_keys` replays it as a deterministic alias at every company, so storing
   one the rules then refused turned a guess into a rule nothing would reconsider.
@@ -870,6 +913,12 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   the answer bank is what a person at the other end opens, defaulting to `resume<ext>`.
   The suffix always comes from the real file. It is **not** in `Answers.hash` — it changes
   no answer in any field, and folding it in would re-plan every posting for a rename.
+- **Aliases *are* in `Answers.hash`** (2026-08-25), and the same test decides both: does
+  this change what goes in a field. An alias does. Attaching a question to an answer edits
+  no value, so with aliases out of the hash `matches_needing_prefill`'s
+  `answers_hash != ?` never fired, the plan was never rebuilt, and the field you had just
+  explained stayed a gap forever while the page said it saved. That was survivable only
+  while the model pass would have matched the question anyway.
 - **Gaps are split generic vs company-specific** (2026-08-16). `prefill.split_gaps`:
   generic = a key in `GENERIC_KEYS` *or* asked by 2+ employers, sorted by ask count
   descending; everything else groups under its one company. No new state and no
@@ -882,7 +931,7 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   in `Answers.hash`.** `prefill_plans.resume_key` carries it instead; one disjunct in
   `matches_needing_prefill` compares the two stored columns, so attaching a resume
   re-plans that posting and no other. Fold it into the hash and every plan built with one
-  looks permanently stale forever. `PrefillTask.apply` must keep storing
+  looks permanently stale forever. `prefill.record` must keep storing
   `ctx.answers.hash`, never the `dataclasses.replace`d copy's.
 - **Swapping `answers.resume` is not enough to attach the override.**
   `browser._plan_index` lets a stored plan value beat a fresh `resolve_field`, so
@@ -897,12 +946,24 @@ names what is missing, and an on-demand browser that carries the plan to the pag
   — a file route left out of it reads its body as `{}` and reports "no file", a
   correct-looking error for the wrong reason.
 - **"Rebuild prefill" opens no socket.** `server._rebuild_plan` is CPU + SQLite only: the
-  server is single-threaded, so a form fetch or a router call would freeze every tab.
-  `known_question_keys` replays every key the model ever matched, so a rules-only rebuild
-  can understate readiness but never overstate it. No cached form → it **refuses and says
-  so**, never `0/0 · nothing left to type`. The unit is built directly rather than
-  filtered out of `task.pending()`, which returns nothing when the plan is already current
-  — the button would then silently do nothing in exactly the case it exists for.
+  server is single-threaded, so a form fetch would freeze every tab. It used to be a
+  strict subset of the nightly pass — rules only, so its gap count could be equal or
+  higher but never lower — and since the model pass went the two are the same resolution
+  over the same inputs. What it still will not do is *fetch* a form it has never seen: no
+  cached form → it **refuses and says so**, never `0/0 · nothing left to type`. The unit
+  is built directly rather than filtered out of `prefill.pending()`, which returns nothing
+  when the plan is already current — the button would then silently do nothing in exactly
+  the case it exists for.
+- **A gap is re-examined, not only recorded** (2026-08-25). `prefill.close_answered_gaps`
+  runs at the end of `build_plans` and resolves every open gap the bank can now answer,
+  through the same `resolve_field` the plan uses and with the stored options attached, so
+  a dropdown that does not offer the answer stays listed. `_api_answer` closes the one key
+  you just wrote, which covers the common path and misses every other route to the same
+  place — an identity field filled in Settings, a value edited by hand, an alias attached
+  to a different key, `LABEL_ALIASES` gaining the wording. Measured right after the first
+  `forget-learned`: 11 of 200 open gaps were already answerable, and "Phone", "LinkedIn
+  Profile" and "Website" sat near the top of the most-asked list, which is the first
+  thing you see and now the main place you work.
 - **`answers.yaml` is gitignored** — it is personal data. `answers.example.yaml` is the
   tracked file. Everything above the `# ===== unanswered questions` marker is the user's
   and is never parsed or rewritten; the block below it is regenerated wholesale from
@@ -1001,6 +1062,61 @@ Three things learned from live forms; all are handled and none is obvious:
   because a handle minted by one discovery names nothing outside it. Second line of
   defence behind the URL above, and it exists because zero is the one count this project
   never takes at face value.
+## Growing the answer bank
+
+Added 2026-08-25, when the prefill model pass was removed and nothing was left to attach a
+question to an answer on its own. Two doors, and neither works without the other. Full
+guide in `docs/prefill.md`.
+
+- **The enum did not go away; it became a `<datalist>`.** The model chose one key from
+  `Answers.answerable` per unplaceable question. That same list is offered on every
+  `/apply` row's "save as" box and on every Settings gap card, and the choice is made by
+  someone who knows the answer. `<datalist>` rather than `<select>` because minting a new
+  key by typing has to stay as easy as picking an old one, or the first answer to a
+  genuinely new question becomes a fight with the control.
+- **On `/apply` the save box is ticked by default**, because the moment you know the
+  answer to "how did you hear about us" is while you are typing it into a form. Two things
+  had to change for that default to be safe, and both are the same mistake in different
+  clothes:
+  - **`bank()` may not run from the typing debounce.** It used to, then untick itself
+    after the first success — harmless while *you* did the ticking, because you ticked
+    when you had finished typing. Ticked from the start it stores whatever you had reached
+    at the first 400ms pause and disarms, so the finished sentence never lands. Blur and
+    dropdown-change still call it; both mean "done with this field". There is a test that
+    reads the debounce branch and asserts `bank(` is not in it.
+  - **It stays armed.** `/api/answer` is an upsert, so correcting a value overwrites;
+    disarming after the first save would make the correction the one thing that does not
+    stick.
+- **`alias` and `gap_key` travel in the payload, and neither is optional in practice.**
+  `_api_answer` used to read the alias out of `prefill_gaps.ask` and close by answer key,
+  which works only when the answer goes under the gap's own key. Attaching to an *existing*
+  key recorded no alias — so nothing would recognize the question at the next employer —
+  and closed a row that was never open, leaving the one you were looking at on the page.
+  With the model gone that is the main path, not a corner.
+- **`/api/attach` carries no value.** The value is already in the bank; accepting one
+  would make attaching a second way to edit an answer, which is `_api_answer`'s job, and
+  the two would disagree the first time one grew a validation rule. Three refusals, each a
+  state that would otherwise look like success: an unknown key, a key holding no answer,
+  and a `gap_key` with no open row.
+- **An identity key cannot hold an alias**, because `Answers.by_alias` is built from the
+  `answers:` block alone. So attaching a wording to `email` is written to
+  `form_fields.question_key` via `store.learn_question_key`, which is what
+  `known_question_keys` replays. It never mints a `form_fields` row — a label nothing has
+  asked is not a question, and a row minted there would name a company that never asked it.
+- **`LABEL_ALIASES` is for wordings that are true everywhere**, and that is the whole
+  admission test. Eleven entries were harvested on 2026-08-25 out of what `forget-learned`
+  swept — wordings the model had matched correctly, which would otherwise have become
+  questions to retype. The near-misses were deliberately left out and there is a test
+  naming them: *"Preferred First Name"* is not `first_name`, it is a different question
+  with a different answer, and reading it as one is how a nickname reaches a legal-name
+  field. A wording that needs the employer, the surrounding question, or a choice between
+  two readings belongs in the user's own alias list, attached while looking at the form.
+- **Settings orders by how many employers ask, and that was already true** —
+  `split_gaps` sorts the generic list by `-len(gap_companies(gap))`. What changed is that
+  the per-company list stopped hardcoding "1 employer" about gaps with no company
+  recorded, and the note names at most five companies before counting the rest, because
+  thirty names is the reason you cannot see the next question.
+
 ## The mirrored form
 
 `/apply` under `serve`, `jobtracker/live.py`, and the drain in `browser._hold_until_closed`.
@@ -1196,7 +1312,8 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
 
 `jobtracker repair`, documented in `docs/repair.md`. The **second** of the model's four
 bounded roles as DESIGN.md §8 numbers them — the last to be built, though not the last in
-the list; `prefill` is the fourth and narrowest. It is the only one where the model is a
+the list. (It was the second of *five* until 2026-08-25, when question matching was
+removed; the numbering did not move.) It is the only one where the model is a
 *fallback* rather than the mechanism. Deterministic regexes read the careers page first; the model is asked
 only about pages they could not parse.
 
