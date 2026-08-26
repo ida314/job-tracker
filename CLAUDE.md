@@ -1379,6 +1379,30 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   request may do to the *form*, and this does nothing to the form — and **deliberately
   not conditional on the phase**, because a session stuck mid-fill is exactly the one
   holding the lock. The refusal on the dashboard names the job and points at the page.
+- **"Open prefilled" is also the way *back* to a window already open** (2026-08-26).
+  "A window is already open" is three situations and only one is a collision, and
+  refusing all three made the button worse than the constraint it was enforcing: the
+  dashboard button is the only route to `/apply`, so pressing it for the job you were
+  already filling in refused you — with the page holding Done being the page you could no
+  longer reach. `live.Session.holds` answers it: **the same posting** returns
+  `ok:true, href:/apply` and starts nothing, **a different posting** is a swap
+  (`_close_open_window` asks, waits for the browser thread to release `_APPLY_LOCK`, and
+  takes its place), and **the lock held with no readable session** — the moment between
+  acquiring it and `live.start` — is still a refusal, because there is nothing to ask to
+  close. `CLOSED` is deliberately not "held": sending the click back to a page that can
+  only report the window has gone is absence-read-as-success, one control along.
+  - **The lock is the proof, and nothing launches without it.** `_close_open_window`
+    returns it *held*, because the caller's next act is to launch into it. Releasing in
+    between is a gap a second click walks through, and two threads racing for the one
+    Chromium profile directory fail on the worker thread where nobody sees it — so a
+    swap that timed out and launched anyway would turn a visible refusal into that.
+  - **It blocks the request thread, bounded** (`SWAP_TIMEOUT_S`, 15s), which is the same
+    trade `/api/company`'s verification makes on a single-request `HTTPServer`: the
+    answer decides whether the click succeeds, so nothing on another thread can give it.
+    A window still *filling* does not read `closing` until the fill lands — the same
+    latency Done has always had, same flag — so a long form can outrun the timeout, and
+    the refusal says which window and where the button is rather than waiting on a
+    browser indefinitely.
 - **This did not remove `DISPLAY` or Xvfb**, and must not be read as having done so.
   Chromium still draws somewhere and will not launch headful without a display. What it
   removed, as of 2026-08-22, is every reason to look at it: the viewer link is gone, the

@@ -10,6 +10,8 @@ import html
 import inspect
 import json
 import re
+import threading
+import time
 from html.parser import HTMLParser
 
 import pytest
@@ -479,19 +481,154 @@ def test_apply_to_says_so_when_there_is_no_browser_to_drive(tmp_path, monkeypatc
     assert "playwright is not installed" in res["error"]
 
 
-def test_apply_to_refuses_a_second_window_while_one_is_open(tmp_path, monkeypatch):
-    """One browser profile directory, which Chromium locks. Two at once cannot work."""
-    from jobtracker import browser
+def test_apply_to_refuses_a_second_window_while_one_is_still_opening(
+        tmp_path, monkeypatch):
+    """One browser profile directory, which Chromium locks. Two at once cannot work.
+
+    The lock held with no readable session is the half-second between acquiring it and
+    `live.start`, and it is the one case with nothing to ask to close — so it is still a
+    refusal, and a fast one rather than a fifteen-second wait for a window that was
+    never there.
+    """
+    from jobtracker import browser, live
 
     monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
     handler = _apply_handler(tmp_path, monkeypatch)
+    live.CURRENT = None
 
     assert server._APPLY_LOCK.acquire(blocking=False)   # a window is open
     try:
         res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
     finally:
         server._APPLY_LOCK.release()
-    assert res["ok"] is False and "already open" in res["error"]
+    assert res["ok"] is False and "already open" not in res["error"]
+    assert "try again" in res["error"]
+
+
+def test_reopening_the_job_already_open_goes_back_to_it(tmp_path, monkeypatch):
+    """The bug this replaced: the button was the only route to the page holding Done.
+
+    Open a window, navigate back to the dashboard, press the same button again — and be
+    told a window is already open, by the one control that could have taken you to it.
+    The session was then unreachable and unclosable short of restarting `serve`.
+
+    Nothing is launched here: no new session, and the lock is left exactly as it was
+    found, because the window asked for is the window that is already up.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    handler = _apply_handler(tmp_path, monkeypatch)
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    session.set_phase(live.READY)
+
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+    finally:
+        server._APPLY_LOCK.release()
+    assert res["ok"] is True and res["href"] == "/apply"
+    assert "already open" in res["detail"]
+    assert live.current() is session          # not restarted
+    assert session.close_requested() is False  # and not closed on the way past
+
+
+def test_a_closed_session_for_the_same_job_is_not_a_window_to_go_back_to(tmp_path):
+    """`CLOSED` is a page that can only report that it has gone.
+
+    Answering "you are already there" for one would send the click to a dead form
+    instead of opening a real one — absence read as success, one control along.
+    """
+    from jobtracker import live
+
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    assert session.holds("Acme", "1") is True
+    assert session.holds("Acme", "2") is False
+    assert session.holds("Other", "1") is False
+    session.set_phase(live.CLOSED)
+    assert session.holds("Acme", "1") is False
+
+
+def test_opening_another_job_closes_the_window_that_is_open(tmp_path, monkeypatch):
+    """A different job is a swap you asked for, not a collision.
+
+    Closing the open window is what you would have done by hand, so `_api_apply_to`
+    does it: it asks, waits for the browser thread to release the lock — which is the
+    only proof the profile directory is free — and takes its place.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    started = threading.Event()
+    monkeypatch.setattr(browser, "fill_application",
+                        lambda *a, **k: started.set())
+    handler = _apply_handler(tmp_path, monkeypatch)
+
+    old = live.start("Acme", "9", "Some Other Role", "https://x/other")
+    old.set_phase(live.READY)
+    assert server._APPLY_LOCK.acquire(blocking=False)
+
+    # Stands in for the hold loop: it reads `closing` in the tick it is already doing,
+    # then the browser thread releases the lock on its way out.
+    def _hold():
+        while not old.close_requested():
+            time.sleep(0.01)
+        old.set_phase(live.CLOSED)
+        server._APPLY_LOCK.release()
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+        assert started.wait(5), "the new window never launched"
+    finally:
+        holder.join(5)
+        # The worker's own `finally` releases it; waiting for that rather than
+        # releasing here is what keeps this test from racing the code it is testing.
+        for _ in range(200):
+            if not server._APPLY_LOCK.locked():
+                break
+            time.sleep(0.01)
+        else:  # pragma: no cover — only if the swap left the lock held
+            server._APPLY_LOCK.release()
+
+    assert res["ok"] is True and res["href"] == "/apply"
+    assert old.close_requested() is True
+    assert "closed Some Other Role" in res["detail"]
+    # The new session replaced it, and the old one is not what the page will find.
+    assert live.current() is not old
+    assert (live.current().company, live.current().ats_job_id) == ("Acme", "1")
+
+
+def test_a_window_that_will_not_close_is_a_refusal_not_a_second_browser(
+        tmp_path, monkeypatch):
+    """The lock is the proof, and without it nothing may launch.
+
+    Chromium locks the one profile directory, so starting a second browser into it fails
+    on the worker thread where nobody sees it. A swap that timed out and launched anyway
+    would turn a visible refusal into that.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(server, "SWAP_TIMEOUT_S", 0.05)
+    launched = []
+    monkeypatch.setattr(browser, "fill_application",
+                        lambda *a, **k: launched.append(1))
+    handler = _apply_handler(tmp_path, monkeypatch)
+
+    old = live.start("Acme", "9", "Stuck Role", "https://x/other")
+    old.set_phase(live.FILLING)
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+    finally:
+        server._APPLY_LOCK.release()
+
+    assert res["ok"] is False and "did not close" in res["error"]
+    assert "Stuck Role" in res["error"]
+    assert not launched
+    assert live.current() is old
 
 
 # -- the answer bank, collected from the page ---------------------------------------
@@ -2336,11 +2473,25 @@ def test_closing_works_from_any_phase(tmp_path):
     assert h._api_session_close()["ok"] is False
 
 
-def test_a_refused_open_says_where_the_way_out_is(tmp_path):
-    """"Close it first" was advice with no way to take it on a headless host."""
-    source = inspect.getsource(server.Handler._api_apply_to)
-    start = source.index("a prefilled window is already open")
-    assert "Fill in page" in source[start:start + 200]
+def test_a_refused_open_says_where_the_way_out_is(tmp_path, monkeypatch):
+    """"Close it first" was advice with no way to take it on a headless host.
+
+    Read off the refusal itself rather than off the source — the wording moved once and
+    a source-grep is what noticed, which is the wrong thing to be checking. Only one
+    refusal is left here: a window that would not close. The other two became a way
+    through instead, the same job going back to it and a different one taking its place.
+    """
+    from jobtracker import live
+
+    monkeypatch.setattr(server, "SWAP_TIMEOUT_S", 0.05)
+    session = live.start("Acme", "9", "Stuck Role", "https://x/other")
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        note, error = server._close_open_window(session)
+    finally:
+        server._APPLY_LOCK.release()
+    assert note == ""
+    assert "Stuck Role" in error and "Fill in page" in error
 
 
 def test_a_set_with_an_unreadable_epoch_is_refused_rather_than_guessed(tmp_path):

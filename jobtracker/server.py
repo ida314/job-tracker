@@ -804,6 +804,53 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
     return "\n".join(p)
 
 
+# How long to wait for a window we have asked to close, when a different job is taking
+# its place. The hold loop reads `closing` once per `browser.HOLD_POLL_MS` (500ms) and
+# then has a browser context to tear down, so this is many times the expected cost and
+# still short enough to answer a click.
+#
+# It blocks the request thread, which on a single-request `HTTPServer` means the whole
+# server — the same bounded-inline trade `/api/company`'s verification makes, and for the
+# same reason: the answer decides whether the click succeeds, and nothing on another
+# thread can answer the click that started it. Bounded, so a browser that will not go
+# away costs a page a few seconds rather than wedging `serve` forever.
+SWAP_TIMEOUT_S = 15.0
+
+
+def _close_open_window(open_now) -> tuple:
+    """Close the window that is open so a different job can take it.
+
+    Returns `(note, error)`. On success the error is empty **and the lock is held** —
+    the caller's very next act is to launch into it, and releasing it in between is a
+    gap a second click could walk through, leaving two threads racing for the one
+    browser profile directory.
+
+    Asking is all this can do: Playwright objects belong to the thread that made them,
+    so `request_close` sets the flag the hold loop is already reading and the thread
+    releases the lock on its way out. Waiting for the lock is therefore waiting for the
+    window to actually be gone, which is the only proof that matters here — Chromium
+    locks that profile directory and a launch into it while the first browser lives
+    fails on the worker thread, where nobody would see it.
+
+    The flag is read in the hold loop, so a window still *filling* will not see it until
+    the fill lands — the same latency the Done button has always had, since it is the
+    same flag. On a long form that can outrun the timeout, and the refusal says so
+    rather than waiting on the request thread for as long as a browser feels like.
+    """
+    if open_now is None:
+        # The lock is held but no session is readable: the moment between acquiring it
+        # and `live.start`. There is nothing to ask to close, and guessing that it is
+        # closeable would mean waiting 15 seconds to say so.
+        return "", ("a prefilled window is opening — try again in a moment")
+    title = open_now.title[:60] or f"{open_now.company} {open_now.ats_job_id}"
+    log.info("closing the window for %s — another job was asked for", title)
+    open_now.request_close()
+    if not _APPLY_LOCK.acquire(timeout=SWAP_TIMEOUT_S):
+        return "", (f"the window open for {title} did not close — press Done on the "
+                    "Fill in page, then try again")
+    return f"closed {title} · ", ""
+
+
 def record_submission(conn, company: str, ats_job_id: str, title: str, url: str,
                       result: dict, today: str) -> bool:
     """Put a submitted application into the outer loop. Returns whether it wrote.
@@ -2717,17 +2764,31 @@ class Handler(BaseHTTPRequestHandler):
 
         # One window at a time. The browser profile is a single directory and Chromium
         # locks it, so a second launch while the first window is open fails — on the
-        # worker thread, where nobody sees it. Saying so is the honest answer.
+        # worker thread, where nobody sees it.
+        #
+        # But "a window is already open" is three situations and only one of them is a
+        # collision, and refusing all three made the button worse than the constraint:
+        #
+        #   - **The same job.** This click is the way *back* to a window you are already
+        #     filling in. The dashboard button is the only route to `/apply`, so a
+        #     refusal here stranded the session the moment you navigated away — the page
+        #     holding the Done button was the page you could no longer reach, and the
+        #     only ending left was restarting `serve`. Nothing is opened and no new
+        #     session is started; you are sent back to the one that exists.
+        #   - **A different job.** A swap you asked for. Closing the open window is
+        #     exactly what you would have done by hand, so do it and take its place.
+        #   - **Neither** — the lock is held but there is no readable session, which is
+        #     the moment between acquiring it and `live.start`. That one is still a
+        #     refusal, because there is nothing to ask to close.
+        swapped = ""
         if not _APPLY_LOCK.acquire(blocking=False):
-            # Name the job and say where the way out is. The window is on *this* machine,
-            # which on a headless host is nowhere you can click — so "close it first"
-            # used to be advice with no way to take it, and the honest half of the
-            # sentence is the second one.
             open_now = live.current()
-            held = f" for {open_now.title}" if open_now is not None else ""
-            return {"ok": False,
-                    "error": f"a prefilled window is already open{held} — finish it on "
-                             "the Fill in page, or press Done there to close it"}
+            if open_now is not None and open_now.holds(company_name, job_id):
+                return {"ok": True, "href": "/apply",
+                        "detail": f"already open — back to {row['title'][:60]}"}
+            swapped, error = _close_open_window(open_now)
+            if error:
+                return {"ok": False, "error": error}
 
         # The page the click is about to land on reads this, so it exists before the
         # thread does — a session created on the worker would leave `/apply` reporting
@@ -2782,7 +2843,7 @@ class Handler(BaseHTTPRequestHandler):
         # Where to go to fill it in. The button navigates rather than relabelling
         # itself: the form is now typed on that page, not in the window.
         return {"ok": True, "href": "/apply",
-                "detail": f"opening {row['title'][:60]}…"}
+                "detail": f"{swapped}opening {row['title'][:60]}…"}
 
     # -- the live form -------------------------------------------------------------
     #

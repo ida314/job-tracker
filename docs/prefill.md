@@ -786,8 +786,9 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 **Done — close the window** on `/apply` is the way out, and on a headless host it is the
 only one. The browser opens on the machine running `serve`; if you cannot reach that
 machine's screen, you cannot close the window, and until it closes `_APPLY_LOCK` stays
-held and every later "Open prefilled" answers *"a prefilled window is already open"* —
-until `serve` itself is restarted. Observed 2026-08-19.
+held. Observed 2026-08-19; until 2026-08-26 that also meant every later "Open prefilled"
+answered *"a prefilled window is already open"* until `serve` itself was restarted, which
+is no longer true — see "Going back to a window, and swapping one" below.
 
 `POST /api/session/close` sets `Session.closing`; `_hold_until_closed` reads it in the
 tick it was already doing, breaks, and `fill_application` closes the context on the way
@@ -811,6 +812,46 @@ Two things about the endpoint's shape:
   precisely when you want the window gone, and it is also the state most likely to be
   holding the lock. `submit()` refuses commands once the phase is `CLOSED`; this must
   not.
+
+### Going back to a window, and swapping one
+
+Added 2026-08-26. One window at a time is a real constraint — Chromium locks the single
+browser-profile directory — but *"a prefilled window is already open"* was the answer to
+three different situations, and only one of them is a collision.
+
+- **The same posting.** Not a second window: the one you asked for is the one that is up.
+  `_api_apply_to` returns `ok:true, href:/apply` and starts nothing at all — no session,
+  and the lock left exactly as it was found. This is the case that was actually broken.
+  The dashboard button is the only route to `/apply`, so opening a job, navigating back
+  to the dashboard and pressing the same button refused you, and the page holding **Done
+  — close the window** was the page the refusal had just made unreachable. The only
+  ending left was restarting `serve`.
+- **A different posting.** A swap you asked for, and closing the open window is exactly
+  what you would have done by hand. `_close_open_window` calls `request_close`, waits for
+  the browser thread to release `_APPLY_LOCK`, and hands the lock — *held* — to the
+  launch. Held, because the caller's next act is to launch into that profile directory
+  and a gap between the two is a second click's way in.
+- **Neither.** The lock held with nothing readable in `live.current()` is the moment
+  between acquiring it and `live.start`. Still a refusal, and a fast one: there is
+  nothing to ask to close, so waiting would be fifteen seconds spent to say so.
+
+`live.Session.holds(company, ats_job_id)` decides the first of those, and `CLOSED` is
+deliberately not held. A session whose window has gone is a page that can do nothing but
+report that it has gone, so reading it as "you are already there" would send the click to
+a dead form instead of opening a real one — absence read as success, one control along.
+
+Two things about the wait. It **blocks the request thread**, which on a single-request
+`HTTPServer` is the whole server; that is the bounded-inline trade `/api/company`'s
+verification already makes, and for the same reason — the answer decides whether the
+click succeeds, and nothing on a daemon thread can answer the click that started it. And
+the flag is read in the hold loop, so a window still *filling* will not see it until the
+fill lands. That is the latency **Done** has always had, since it is the same flag; on a
+long form it can outrun `SWAP_TIMEOUT_S` (15s), and the refusal then names the window and
+points at the button rather than waiting on a browser for as long as it likes.
+
+Nothing may launch without the lock. A swap that timed out and started a browser anyway
+would put two Chromiums into one profile directory, and the second one fails on the
+worker thread — turning a refusal you can read into a button stuck on "Opening…".
 
 None of this removes the need for `DISPLAY` or `Xvfb`: Chromium still has to draw
 somewhere, and it will not launch headful without a display. What it removes is any reason

@@ -387,6 +387,21 @@ class Session:
         with self.lock:
             return self.closing
 
+    def holds(self, company: str, ats_job_id: str) -> bool:
+        """Whether this session is the live window for that posting.
+
+        `CLOSED` is not held, and the distinction is the whole point of asking. A session
+        whose window has gone is a page that can do nothing but say so, so reading it as
+        "you are already there" would send the click to a dead form instead of opening a
+        real one. Everything else — opening, filling, ready, submitted — is a window you
+        can still go back to, which is what the dashboard button needs to know: reopening
+        the job that is already open is the way back to it, not a collision with it.
+        """
+        with self.lock:
+            return (self.phase != CLOSED
+                    and self.company == company
+                    and self.ats_job_id == ats_job_id)
+
     # -- sending it ------------------------------------------------------------------
     def set_submit_control(self, control: Optional[dict]) -> None:
         """What the browser thread found to click, or None. Written on every re-reading.
