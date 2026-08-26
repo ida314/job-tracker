@@ -70,6 +70,14 @@ MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
 _UPLOAD_ROUTES = {"/api/resume", "/api/posting-resume", "/api/session/file"}
 MAX_UPLOAD = resumes.MAX_UPLOAD
 
+# What the *body* carrying an upload may be, which is not what the file may be. Base64 is
+# ~4/3 of the bytes it encodes, so a body capped at `MAX_UPLOAD` rejects every file over
+# about three quarters of the documented limit — and rejects it as an empty payload, so
+# `validate_upload`'s own limit, the one the message quotes, could never be the thing that
+# fired. The cap that bounds memory is this one; the cap that describes a resume is
+# `resumes.MAX_UPLOAD`, checked after the decode where the real size is known.
+MAX_UPLOAD_BODY = MAX_UPLOAD * 4 // 3 + 4096
+
 # No external anything, matching the static dashboard's guarantee.
 #
 # `connect-src 'self'` is required, not optional: every write on this server goes out as
@@ -1572,8 +1580,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         # The cap is per-route rather than global: only the upload carries a file, and
-        # leaving 6 MB open on every endpoint would let a decision POST buffer one.
-        payload = self._read_json(MAX_UPLOAD if path in _UPLOAD_ROUTES else MAX_BODY)
+        # leaving 8 MB open on every endpoint would let a decision POST buffer one.
+        limit = MAX_UPLOAD_BODY if path in _UPLOAD_ROUTES else MAX_BODY
+        # Said out loud, rather than left to `_read_json`'s empty dict. An over-length
+        # body read as `{}` reaches the endpoint as a payload with no fields in it, and
+        # comes back "no file" — which is true of the request and false about the
+        # problem, and points at the picker rather than at the file's size. It is also
+        # the one refusal that happens with the body still arriving, so the client sees
+        # the connection close mid-upload: without an answer of its own it reads as a
+        # request that never finished.
+        if int(self.headers.get("Content-Length") or 0) > limit:
+            self._send_json(
+                {"ok": False,
+                 "error": f"that is larger than the {limit // (1024 * 1024)} MB "
+                          "this accepts"},
+                413,
+            )
+            return
+        payload = self._read_json(limit)
         try:
             if path == "/api/decision":
                 self._send_json(self._api_decision(payload))
@@ -3147,6 +3171,9 @@ _APPLY_JS = """
 
   var POLL_MS = 2000;
   var DEBOUNCE_MS = 400;
+  // The file, not the body: the body is base64 and ~4/3 of it. Kept in step with
+  // `resumes.MAX_UPLOAD` by a test rather than by hand.
+  var MAX_UPLOAD_BYTES = __MAX_UPLOAD_BYTES__;
   var epoch = parseInt(root.dataset.epoch, 10);
   var paused = false;
   var moved = document.getElementById('moved');
@@ -3281,17 +3308,51 @@ _APPLY_JS = """
     // The browser's file picker shows the *server's* disk, not yours. So the file
     // travels as base64 through the one JSON POST path this server has, exactly like
     // the per-posting resume does.
+    //
+    // Every ending goes through `done`, and that is the whole shape of this branch.
+    // Before it, only a refusal answered by the server moved the pill: a file the reader
+    // could not open, a body the server hung up on, or a request that simply never came
+    // back all left it reading "uploading…" for the rest of the session — the word for a
+    // request in flight, over one that had already failed. And `.busy` is what keeps the
+    // poll from painting over the row while that is happening, so a branch that never
+    // took it off froze the card in place, which is what "cannot touch other fields"
+    // looked like from a row that had also gone quiet.
     if (e.target.classList.contains('lf-file') && e.target.files.length) {
       var file = e.target.files[0];
+      var picker = e.target;
       var st = card.querySelector('.st');
+      // The picker is emptied on every ending, not just a refusal. A file input fires
+      // `change` on the file it is *holding*, so one that goes on naming the last file
+      // is silent when you pick that same file again — which is exactly what you do
+      // after a failure, and what you do to re-attach after a detach.
+      var done = function (kind, word) {
+        card.classList.remove('busy');
+        picker.value = '';
+        setStatus(st, kind, word);
+      };
+      if (file.size > MAX_UPLOAD_BYTES) {
+        // Answered here rather than by the 413, because the body is ~4/3 of the file and
+        // there is no reason to send eight megabytes to be told so.
+        done('refused', Math.round(file.size / 1048576) + ' MB is too large');
+        return;
+      }
       setStatus(st, 'pending', 'uploading…');
+      card.classList.add('busy');
       var reader = new FileReader();
+      reader.onerror = function () { done('refused', 'could not read that file'); };
       reader.onload = function () {
         post('/api/session/file', {
           handle: card.dataset.handle, epoch: epoch, filename: file.name,
           content: String(reader.result).split(',')[1] || ''
         }).then(function (res) {
-          if (!res.ok) setStatus(st, 'refused', res.error || 'refused');
+          // Not "filled": the upload only queued the command. The browser thread
+          // attaches it on its next tick and `paint` is what says it happened — the
+          // same rule the submit button follows about never claiming an outcome it
+          // cannot see.
+          done(res.ok ? 'pending' : 'refused', res.ok ? 'attaching…'
+                                                      : (res.error || 'refused'));
+        }).catch(function () {
+          done('refused', 'the server did not answer');
         });
       };
       reader.readAsDataURL(file);
@@ -3473,6 +3534,20 @@ _APPLY_JS = """
     ago.textContent = 'the window is closed';
   }
 
+  // Is anything of yours in flight or half-typed. Both are reasons not to reload under
+  // you: focus is a sentence you have not finished, and `.busy` is a value whose outcome
+  // has not come back yet. Neither survives a navigation, and the reload can wait — the
+  // banner is showing, and the next poll comes round in two seconds.
+  function busyNow() {
+    var here = document.activeElement;
+    // Only a control you type into. A file picker holds nothing half-finished, and it
+    // is the row that most reliably moves the epoch — counting it would make the one
+    // case this recovery exists for the one case that takes a second poll to recover.
+    if (here && here.closest && here.closest('.lf') &&
+        here.classList.contains('lv')) return true;
+    return document.querySelector('.lf.busy') !== null;
+  }
+
   function age(then) {
     if (!then) return '';
     var secs = Math.max(0, Math.round(Date.now() / 1000 - then));
@@ -3501,9 +3576,23 @@ _APPLY_JS = """
       if (counts) counts.textContent = line;
 
       // The form was read again and the handles moved, so every field on this page now
-      // points at the wrong input. Say so and stop — silently pushing into whatever is
-      // there now is the one outcome this whole mechanism exists to prevent.
+      // points at the wrong input. Say so and stop pushing — silently writing into
+      // whatever is there now is the one outcome this whole mechanism exists to prevent.
+      //
+      // But stopping is not an ending, and treating it as one is what made attaching a
+      // resume look like a hang: Greenhouse's file row re-renders into a filename and a
+      // remove control the moment it takes a file, which is a shape change, which is a
+      // correct epoch bump — and the page then disabled every field on it and waited for
+      // a Reload nobody had a reason to press. The fields it is holding are stale; the
+      // *server's* rendering of them is not, and re-reading it is exactly what a reload
+      // does. So it reloads itself, and only asks when it cannot: a reload while you are
+      // typing would discard the sentence you are in the middle of, and one with a push
+      // in flight would land before its outcome does.
       if (s.epoch !== epoch) {
+        // Asked before anything is disabled, because disabling the field you are in
+        // blurs it — the guard would then be reading a page it had just cleared, and
+        // would reload one tick later having lost the typing it exists to protect.
+        if (!busyNow()) { stopped = true; location.reload(); return; }
         moved.hidden = false;
         document.querySelectorAll('.lf .lv, .lf .lf-file').forEach(function (el) {
           el.disabled = true;
@@ -3575,7 +3664,7 @@ _APPLY_JS = """
 
   tick();
 })();
-"""
+""".replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD))
 
 
 # Values come from data-* attributes rather than being interpolated into onclick

@@ -1592,6 +1592,104 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
         assert endpoint in script, endpoint
 
 
+def test_a_resume_at_the_documented_limit_actually_fits_in_the_body(tmp_path):
+    """The two caps are about two different things and only one of them bounds memory.
+
+    `validate_upload` refuses a *file* over `resumes.MAX_UPLOAD`, and quotes that number
+    in the message. The body carrying it is base64, so ~4/3 of it — and while the body
+    was capped at the same number, every file over about three quarters of the documented
+    limit was refused before the decode, as an empty payload reported as "no file". The
+    limit the message names could never be the thing that fired.
+    """
+    import base64
+
+    from jobtracker import resumes as resumes_mod
+
+    biggest = base64.b64encode(b"x" * resumes_mod.MAX_UPLOAD)
+    body = json.dumps({"filename": "cv.pdf", "content": biggest.decode()})
+    assert len(body) <= server.MAX_UPLOAD_BODY
+
+    # And it is still a bound, not an opening: a decision POST cannot buffer one.
+    assert server.MAX_BODY < server.MAX_UPLOAD_BODY < 2 * resumes_mod.MAX_UPLOAD
+
+
+def test_the_page_knows_the_limit_the_server_enforces(tmp_path):
+    """Duplicated numbers drift, and this pair drifts into a silent failure: a client
+    that thinks the cap is larger sends a body the server hangs up on mid-upload, which
+    on the other side is a request that never comes back rather than a refusal."""
+    from jobtracker import resumes as resumes_mod
+
+    assert f"var MAX_UPLOAD_BYTES = {resumes_mod.MAX_UPLOAD};" in server._APPLY_JS
+
+
+def test_every_ending_of_an_upload_reaches_the_status_pill(tmp_path):
+    """"uploading…" is the word for a request in flight, and it was also the word for
+    one that had already failed.
+
+    A file the reader could not open, a body the server hung up on, and a request that
+    never came back all left the pill reading it for the rest of the session — over a
+    card still wearing `.busy`, which is what keeps the poll from painting the row. A row
+    that has gone quiet next to a page that will not repaint it is what "it hangs and I
+    cannot touch anything else" looks like from here.
+    """
+    js = server._APPLY_JS
+    branch = js[js.index("classList.contains('lf-file')"):]
+    branch = branch[:branch.index("\n    }")]
+
+    # Every ending, and every one of them takes `.busy` off with it.
+    assert "reader.onerror" in branch
+    assert ".catch(" in branch
+    assert branch.count("done(") >= 4
+    assert "card.classList.remove('busy')" in branch
+    # Never "filled": the upload queued a command, and only the poll can see it land.
+    assert "'filled'" not in branch
+
+
+def test_an_over_length_body_is_refused_in_words_rather_than_read_as_empty(tmp_path):
+    """The one refusal that happens with the body still arriving.
+
+    Read as `{}` it reached the endpoint as a payload with no fields in it and came back
+    "no file" — true of the request, false about the problem, and pointing at the picker
+    rather than at the file. And the connection closes mid-upload either way, so without
+    an answer of its own the client sees a request that never finished.
+    """
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    h.path = "/api/session/file"
+    h.headers = {"Content-Length": str(server.MAX_UPLOAD_BODY + 1)}
+    sent = {}
+    h._send_json = lambda payload, status=200: sent.update(payload=payload, status=status)
+
+    h.do_POST()
+
+    assert sent["status"] == 413
+    assert sent["payload"]["ok"] is False
+    assert "larger than" in sent["payload"]["error"]
+
+
+def test_a_form_that_moved_is_read_again_rather_than_left_inert(tmp_path):
+    """Stopping is not an ending, and treating it as one is what made a resume look
+    like a hang.
+
+    Greenhouse's file row re-renders into a filename and a remove control the moment it
+    takes a file. That is a shape change, which is a correct epoch bump — and the page
+    then disabled every field on it and waited for a Reload nobody had a reason to
+    press, over a browser that was working perfectly. The handles are stale; the
+    server's rendering of them is not, and re-reading it is exactly what a reload does.
+
+    The guard is asked *before* anything is disabled: disabling the field you are in
+    blurs it, so a guard read afterwards is reading a page it has just cleared.
+    """
+    js = server._APPLY_JS
+    branch = js[js.index("if (s.epoch !== epoch) {"):]
+    branch = branch[:branch.index("\n      }")]
+
+    assert "location.reload()" in branch
+    assert branch.index("busyNow()") < branch.index("el.disabled = true")
+    # And it stops polling on the way out, or the reload races a tick that would run
+    # this branch again.
+    assert "stopped = true" in branch
+
+
 def test_saving_to_the_bank_is_offered_by_default(tmp_path):
     """Ticked from the start, because this is where the bank grows.
 

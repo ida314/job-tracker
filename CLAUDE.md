@@ -1207,6 +1207,17 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   neighbour. Commands carry the `epoch` they were written against and are dropped on a
   mismatch, in the drain, where nothing can bypass it. This is the one way this feature
   could put an answer you did not give into a field you cannot see.
+- **But stopping is not an ending** (2026-08-26). The page held the epoch check and then
+  disabled every field and waited for a Reload nobody had a reason to press — which is
+  what attaching a resume looked like, because Greenhouse's file row re-renders into a
+  filename and a remove control the moment it takes a file. A correct bump, and a dead
+  page: *"it hangs and I cannot touch anything else"*. The handles the page holds are
+  stale; the **server's** rendering of them is not, and re-reading it is exactly what a
+  reload does, so the page reloads itself. It asks only when it cannot — a reload while
+  you are typing discards the sentence you are in, and one with a push in flight lands
+  before its outcome does. The guard is read **before** anything is disabled, or it is
+  reading a page it has just blurred; a file picker deliberately does not count as
+  typing, since it is the row that most reliably moves the epoch.
 - **But the epoch moves only when the handles actually moved.** A successful write
   re-reads the form (questions get revealed by answers). Bumping every time would mean the
   second field you typed is refused because the first one succeeded — every edit poisoning
@@ -1321,6 +1332,22 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   shows the *server's* disk, so this upload is the file transfer, and a file route left
   out of that set reads its body as `{}` and reports "no file". Validation, naming and the
   atomic write are `resumes`', unchanged — there is no second way a file reaches this box.
+- **The cap on the body is not the cap on the file** (2026-08-26). Base64 is ~4/3 of what
+  it encodes, so a body capped at `resumes.MAX_UPLOAD` refused every file over about three
+  quarters of the documented limit — and refused it *as an empty payload*, so the message
+  quoting that limit could never be the thing that fired, and the reply pointed at the
+  picker instead of at the size. `MAX_UPLOAD_BODY` bounds memory; `resumes.MAX_UPLOAD`
+  describes a resume and is checked after the decode. Over-length is answered **413 in
+  words**, not read as `{}`: it is the one refusal that happens with the body still
+  arriving, so without an answer of its own the client sees a connection closing
+  mid-upload — a request that never finished rather than one that was refused.
+- **Every ending of an upload has to reach the status pill and take `.busy` off.** Only a
+  refusal the server answered used to move it, so a file the reader could not open, a body
+  hung up on, or a request that never came back all left the row reading *"uploading…"* —
+  the word for a request in flight — over a card still wearing `.busy`, which is what
+  stops the poll repainting it. A row frozen mid-word beside a page that will not repaint
+  it is what "the upload hangs" looks like from the outside. Success is `attaching…`,
+  never `filled`: the upload queued a command, and only the poll can see it land.
 - **Handlers live in `server._APPLY_JS`**, emitted only by `render_apply` — the
   button-and-handler-in-the-same-file rule, applied up front. There is a parity test.
 - **"Done — close the window" is the only ending a headless host can reach** (added

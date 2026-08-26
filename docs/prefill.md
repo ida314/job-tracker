@@ -745,8 +745,18 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
   never imply the list is the whole form. Zero fields is still *"no application form
   found"*, never "nothing left to type".
 - **A form that rewrites itself while you are in it.** Re-reading after each write narrows
-  the window; when the shape does change, the page says so and stops rather than pushing
-  into whatever is there now. "Read the form again" is one click.
+  the window; when the shape does change, the page stops pushing rather than pushing into
+  whatever is there now.
+
+  But **stopping is not an ending**, and treating it as one is what made attaching a
+  resume look like a hang. Greenhouse's file row re-renders into a filename and a remove
+  control the moment it takes a file — a shape change, so a correct epoch bump — and the
+  page then disabled every field on it and waited for a Reload nobody had a reason to
+  press. The handles are stale; the *server's* rendering of them is not, and re-reading
+  it is exactly what a reload does. So the page reloads itself, and asks only when it
+  cannot: a reload while you are typing would discard the sentence you are in, and one
+  with a push in flight would land before its outcome does. The guard is read **before**
+  anything is disabled, because disabling the field you are in blurs it.
 
 ### Ending a session
 
