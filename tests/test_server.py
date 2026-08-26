@@ -1576,8 +1576,10 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
 
     script = page[page.rindex("<script>"):]
     ids = set(re.findall(r'id="([a-z]+)"', page))
-    assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone"} <= ids
-    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone"):
+    assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone",
+            "resetform", "resetmsg"} <= ids
+    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone",
+                    "resetform", "resetmsg"):
         assert f"getElementById('{element}')" in script, element
     for hook in ("lf-file", "lf-detach", "tobank", "bankkey", "savebank", "bankval",
                  ".lv"):
@@ -1588,7 +1590,8 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     assert 'list="bankkeys"' in page and '<datalist id="bankkeys">' in page
     for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
                      "/api/session/highlight", "/api/session/rediscover",
-                     "/api/session/file", "/api/session/close", "/api/answer"):
+                     "/api/session/reset", "/api/session/file", "/api/session/close",
+                     "/api/answer"):
         assert endpoint in script, endpoint
 
 
@@ -1690,6 +1693,43 @@ def test_a_form_that_moved_is_read_again_rather_than_left_inert(tmp_path):
     assert "stopped = true" in branch
 
 
+def test_the_form_can_be_emptied_from_the_page_that_mirrors_it(tmp_path):
+    """One command on the thread that owns the page, not a clear per row from here.
+
+    `_clear` re-reads the form on its way out, so a loop of thirty clears from this side
+    goes stale the first time emptying something changes the form's shape — and every
+    later one is then correctly dropped, leaving a reset that emptied four fields
+    reported as a whole one.
+    """
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    assert h._api_session_reset()["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.kind == live_mod.RESET
+    assert session.commands.empty(), "one command, not one per field"
+
+
+def test_resetting_carries_no_handle_and_no_epoch(tmp_path):
+    """Which is what makes it the way out of a form that has moved under the page.
+
+    Every per-field command is refused there, correctly — the handles this side is
+    holding name their neighbours now. Reset names nothing from this side at all, so
+    there is no handle of ours that could have gone stale, and the epoch it would be
+    checked against is one it has no reason to carry.
+    """
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.epoch += 99                       # the form moved; the page does not know
+
+    assert h._api_session_reset()["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.handle == "" and command.value == ""
+    assert command.epoch == -1
+
+
 def test_saving_to_the_bank_is_offered_by_default(tmp_path):
     """Ticked from the start, because this is where the bank grows.
 
@@ -1764,7 +1804,8 @@ def test_the_only_way_to_submit_is_armed_and_one_shot(tmp_path):
 
     # And still not something the queue can carry: `submit` is a session-level gate, so
     # nothing that reaches `Session.submit` can activate a control.
-    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert live_mod.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
+                                   "highlight"}
     assert "submit" not in live_mod.VOCABULARY
     session = live_mod.current()
     assert session.submit(live_mod.Command(kind="submit", handle="jt0")) is False
@@ -2243,7 +2284,8 @@ def test_the_window_can_be_closed_from_the_page(tmp_path):
     assert h._api_session_close()["ok"] is True
     assert session.close_requested() is True
     assert session.commands.empty()
-    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert live_mod.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
+                                   "highlight"}
 
 
 def test_closing_works_from_any_phase(tmp_path):

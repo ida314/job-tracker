@@ -722,9 +722,15 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
 
     # -- the fields -------------------------------------------------------------------
     p.append('<div class="pane fields">')
+    # Read again re-reads; Reset empties. Both are form-wide, so both live here rather
+    # than on a row. Reset is the way back from a fill that went somewhere you did not
+    # want it — and from a form that has moved under the page, which is the one state
+    # where every per-field control is refused and this one still works.
     p.append(
         '<div class="phead">Fields '
-        '<button id="reread">Read the form again</button></div>'
+        '<button id="reread">Read the form again</button>'
+        '<button id="resetform">Reset</button>'
+        '<span class="note" id="resetmsg"></span></div>'
     )
     # Every key you already hold, offered to every "save as" box on the page. This is
     # what the model's enum became: it chose one of these per unplaceable question, and
@@ -1633,6 +1639,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_session_highlight(payload))
             elif path == "/api/session/rediscover":
                 self._send_json(self._api_session_command(live.REDISCOVER))
+            elif path == "/api/session/reset":
+                self._send_json(self._api_session_reset())
             elif path == "/api/session/submit":
                 self._send_json(self._api_session_submit(payload))
             elif path == "/api/session/close":
@@ -2863,6 +2871,23 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "bad epoch"}
         return self._api_session_command(live.CLEAR, handle, "", epoch)
 
+    def _api_session_reset(self) -> dict:
+        """Empty every field on the live form and read it again.
+
+        One command rather than a clear per field, and that is the whole reason it is an
+        endpoint at all: `_clear` re-reads the form on the way out, so a shape change
+        part way down a loop of thirty clears renumbers the handles and every later one
+        is correctly dropped as stale. The page would then report a reset that emptied
+        four fields of thirty. Taken as a single command it is atomic on the thread that
+        owns the page.
+
+        It carries no epoch and needs none — it names no handle from this side, so there
+        is no handle here that could have gone stale. That is also why it is the way out
+        of the state the epoch puts the page in: a form that has moved under you can
+        still be emptied, whatever the page is holding.
+        """
+        return self._api_session_command(live.RESET)
+
     def _api_session_submit(self, payload: dict) -> dict:
         """Arm the one submit this session has, or say exactly why it will not.
 
@@ -3127,7 +3152,13 @@ padding:.05rem .4rem;border-radius:99px}
 .st-gap{color:#d97706;background:rgba(217,119,6,.14)}
 .st-refused{color:#dc3545;background:rgba(220,53,69,.14)}
 .st-pending{opacity:.6;background:rgba(127,127,127,.14)}
+/* Emptied on purpose. Its own word and its own colour because it is not `filled` (there
+   is nothing in it) and not `gap` (a gap is a question nobody had an answer for) — and
+   without a rule of its own it rendered unstyled, which read as neither. */
+.st-cleared{opacity:.75;background:rgba(127,127,127,.14);border:1px solid currentColor}
 .lf.busy{opacity:.6}
+#resetmsg{margin-left:0}
+.phead .note{font-weight:400;font-size:.8rem}
 
 """
 
@@ -3392,9 +3423,37 @@ _APPLY_JS = """
     push(card, '');
   });
 
-  // -- the two buttons ---------------------------------------------------------------
+  // -- the form-wide buttons ---------------------------------------------------------
   document.getElementById('reread').addEventListener('click', function () {
     post('/api/session/rediscover', {});
+  });
+
+  // Reset. Empties every field the form is holding and reads it again, in one command
+  // on the thread that owns the page — not a clear per row from here, which would go
+  // stale the first time emptying something changed the form's shape.
+  //
+  // Nothing is reloaded and nothing is repainted here: the browser thread marks each row
+  // `cleared` as it goes and the next poll paints that, which is the same path every
+  // other outcome on this page takes. Claiming it here would be claiming an outcome this
+  // side cannot see.
+  var resetbtn = document.getElementById('resetform');
+  var resetmsg = document.getElementById('resetmsg');
+  resetbtn.addEventListener('click', function () {
+    // Confirmed, because the fill is the work: what it emptied is not recoverable from
+    // anywhere — no ATS keeps a draft for an anonymous candidate — and re-filling it
+    // means opening the job again.
+    if (!confirm('Empty every field on the form? What was filled in is not saved '
+                 + 'anywhere, so this is not undoable.')) return;
+    resetbtn.disabled = true;
+    resetmsg.textContent = 'clearing…';
+    post('/api/session/reset', {}).then(function (res) {
+      resetbtn.disabled = false;
+      resetmsg.textContent = res.ok ? 'clearing the form…'
+                                    : (res.error || 'it was not cleared');
+    }).catch(function () {
+      resetbtn.disabled = false;
+      resetmsg.textContent = 'the server did not answer';
+    });
   });
 
   // Fit or full size. Entirely on this side of the wire: the shot is always the whole
@@ -3530,6 +3589,7 @@ _APPLY_JS = """
       el.disabled = true;
     });
     closewin.disabled = true;
+    resetbtn.disabled = true;
     donemsg.textContent = 'the window is closed';
     ago.textContent = 'the window is closed';
   }

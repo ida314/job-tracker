@@ -597,7 +597,7 @@ names them, and `_write` puts a value into exactly one of them. All that was mis
 channel from the page you are looking at to that writer.
 
 ```
-Cloudflare — Backend Engineer, New Grad          [Read the form again]
+Cloudflare — Backend Engineer, New Grad        [Read the form again] [Reset]
 
 ┌─ preview ───────────── Pause ─┐   First Name   [ Dylan          ]  filled
 │  [jpeg of the real form]      │     from your answer bank as `first_name`
@@ -608,6 +608,10 @@ Cloudflare — Backend Engineer, New Grad          [Read the form again]
                                       ☑ also save to my answer bank as [why_us      ▾]
 Review & submit                     3/4 fields filled · 1 need you
 ```
+
+**Reset** empties every field the form is holding and reads it again. It is the way back
+from a fill that went somewhere you did not want it, and from a form that has moved under
+the page — see the rule below for why it is one command rather than thirty.
 
 **The save box is ticked**, and the key box is a picker over every answer you already
 hold. Together they are what replaced the model pass: leave the minted key to answer a
@@ -639,10 +643,20 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 
 ### Rules that are load-bearing
 
-- **A command points, it does not write.** The vocabulary is exactly five names — `set`,
-  `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
-  never a selector and never anything the browser thread evaluates. That is `browser.py`'s
-  click rule carried across the new channel, and it has its own test.
+- **A command points, it does not write.** The vocabulary is exactly six names — `set`,
+  `clear`, `reset`, `rediscover`, `shoot`, `highlight` — and a command carries a field
+  *handle*, never a selector and never anything the browser thread evaluates. That is
+  `browser.py`'s click rule carried across the new channel, and it has its own test.
+- **`reset` is `clear` over the whole form, and it is one command rather than a loop.**
+  A clear re-reads the form on the way out, so thirty clears sent from the page are
+  thirty chances for the shape to change under the remaining handles — after which every
+  later one is correctly dropped as stale, and a reset that emptied four fields of
+  thirty is reported as a whole one. It is on `clear`'s side of the activation line by
+  the same test: emptying reaches nothing a fill does not. It touches only rows holding
+  something, because a `gap` is a question nobody had an answer for and `cleared` is one
+  you emptied on purpose. And it is the **one command carrying no epoch**, because it
+  names no handle from the page's side — which is what makes it the way out of a form
+  that has moved, where every per-field command is refused by design.
 - **There are two clicks in `browser.py`, and the rule narrowed rather than loosened when
   the second arrived.** `_submit` presses the employer's own button, once, behind the
   gate. `_press` is everything a *widget* needs to be operated — an option in its listbox,

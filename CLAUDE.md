@@ -1218,6 +1218,18 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   before its outcome does. The guard is read **before** anything is disabled, or it is
   reading a page it has just blurred; a file picker deliberately does not count as
   typing, since it is the row that most reliably moves the epoch.
+- **`reset` is the sixth name in the vocabulary** (2026-08-26), and it is `clear` over
+  every field at once — on `clear`'s side of the activation line by the same test, since
+  emptying reaches nothing a fill does not. It is one command rather than a loop of
+  clears from the page because `_clear` re-reads the form on its way out: thirty of those
+  is thirty chances for the shape to change under the remaining handles, after which
+  every later clear is correctly dropped and a reset that emptied four fields of thirty
+  is reported as a whole one. It touches only rows holding something (a `gap` is a
+  question nobody had an answer for; `cleared` is one you emptied on purpose), and a
+  field that will not give its value up stays `refused` holding it. It is the **one
+  command carrying no epoch** — it names no handle from the page's side, which is what
+  makes it the way out of a form that has moved, where every per-field command is refused
+  by design.
 - **But the epoch moves only when the handles actually moved.** A successful write
   re-reads the form (questions get revealed by answers). Bumping every time would mean the
   second field you typed is refused because the first one succeeded — every edit poisoning

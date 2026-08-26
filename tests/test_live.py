@@ -28,7 +28,7 @@ def _session(*specs, handles=None):
 
 # -- the invariant that matters most ---------------------------------------------------
 def test_the_command_vocabulary_cannot_activate_anything():
-    """A web request may make the browser do exactly five things, none of them a click.
+    """A web request may make the browser do exactly six things, none of them a click.
 
     This is `browser.py`'s no-submit rule carried across the new channel. That rule is
     enforced against the module's own source, which says nothing about commands arriving
@@ -38,8 +38,12 @@ def test_the_command_vocabulary_cannot_activate_anything():
     emptying a field is the inverse of filling one and reaches nothing a fill does not,
     whereas submitting activates a control and is therefore a session-level act with its
     own gate, not a name a queued request can reach.
+
+    `reset` is on `clear`'s side of that line for the same reason and by the same test:
+    it is `clear` over every field at once, so it reaches nothing a fill does not.
     """
-    assert live.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert live.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
+                               "highlight"}
     assert "submit" not in live.VOCABULARY
 
     # And a command carries a handle and a value — never a selector, never an

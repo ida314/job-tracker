@@ -1395,3 +1395,142 @@ def test_the_gap_list_names_a_question_once(tmp_path, answers):
     # And the phone-number country selector is not filled from an identity location.
     assert "Country*" not in {f.label for f in report.filled}
     conn.close()
+
+
+# -- emptying the whole form -----------------------------------------------------------
+def test_reset_empties_what_is_holding_something_and_leaves_a_gap_alone():
+    """`cleared` and `gap` are two different answers and reset may only produce one.
+
+    A gap is a question nobody ever had an answer for; `cleared` is one you emptied on
+    purpose. Marking every row `cleared` would spend the distinction the two statuses
+    exist to draw — and would say the reset did something to thirty fields when it
+    touched one.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"),
+                             ("why", "Why us?", "textarea"))
+    session.mark("jt0", live.FILLED, "Dylan")
+    page = _Recorder(found)
+
+    browser._reset(session, page)
+
+    rows = {r["handle"]: r for r in session.snapshot()["fields"]}
+    assert rows["jt0"]["status"] == live.CLEARED and rows["jt0"]["value"] == ""
+    # Never touched, and never claimed to have been.
+    assert rows["jt1"]["status"] == live.PENDING
+    assert page.filled == {'[data-jt-id="jt0"]': ""}
+
+
+def test_reset_reads_the_form_once_rather_than_after_every_field():
+    """The reason it is one command and not a loop of clears from the page.
+
+    `_clear` on its own path re-reads the form on the way out. Thirty of those is thirty
+    chances for the shape to change under the remaining handles — and attaching or
+    detaching a file is exactly that change — after which every later clear is correctly
+    dropped as stale. The page would then report a whole reset over four emptied fields
+    of thirty, on a form about to be sent.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"),
+                             ("email", "Email", "text"),
+                             ("why", "Why us?", "textarea"))
+    for handle in ("jt0", "jt1", "jt2"):
+        session.mark(handle, live.FILLED, "x")
+    page = _Recorder(found)
+
+    browser._reset(session, page)
+
+    assert len(page.filled) == 3
+    # `evaluate` records one arg per discovery pass — `_find_submit` answers off the
+    # script it was handed and is not counted.
+    assert len(page.evaluated) == 1
+
+
+def test_a_field_that_will_not_empty_keeps_saying_it_is_holding_something():
+    """`refused` is a real outcome here as it is for a single clear.
+
+    A combobox with no clear indicator cannot be emptied, and a row reporting `cleared`
+    over a widget still holding an answer would be counted out of "need you" and off the
+    submit gate's blocker list — the reset's own version of the emptied field that read
+    as filled.
+    """
+    class _Empty:
+        def count(self):
+            return 0
+
+    class _NoClearControl(_Recorder):
+        def locator(self, selector):
+            return _Empty()
+
+    session, found = _mirror(("country", "Country", "combobox"))
+    session.mark("jt0", live.FILLED, "United States +1")
+    page = _NoClearControl(found)
+
+    browser._reset(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.REFUSED
+    assert row["value"] == "United States +1"
+
+
+def test_reset_is_reachable_from_the_queue_and_needs_no_epoch():
+    """The one command that carries no epoch, because it names no handle from outside.
+
+    A form that has moved under the page refuses every per-field command by design — the
+    handles the page is holding name their neighbours now. Reset is what still works
+    there, so requiring the epoch it cannot have would take the way out of that state
+    away in exactly the case it exists for.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"))
+    session.mark("jt0", live.FILLED, "Dylan")
+    page = _Recorder(found)
+
+    assert session.submit(live.Command(kind=live.RESET)) is True
+    session.epoch += 99                       # the form moved under the page
+    browser._drain(session, page)
+
+    assert page.filled == {'[data-jt-id="jt0"]': ""}
+
+
+@needs_browser
+def test_resetting_empties_the_real_form_in_one_pass(tmp_path):
+    """The same four controls as the clear test, but reached by one command.
+
+    Read against a real browser for the same reason: three of the four are Playwright
+    semantics rather than ours, and a fake page only asserts we called them. What this
+    adds is that one command reaches all of them — the property that made `reset` a name
+    of its own instead of a loop of clears from a page whose handles go stale the first
+    time emptying something changes the form's shape.
+    """
+    page_file = tmp_path / "form.html"
+    page_file.write_text(CLEARABLE_HTML)
+    (tmp_path / "resume.pdf").write_bytes(b"%PDF-1.4 fake")
+    session = live.start("Stripe", "1", "Backend Engineer", page_file.as_uri())
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        context = browser._launch(pw, tmp_path / "profile", headless=True)
+        try:
+            page = context.new_page()
+            page.goto(page_file.as_uri())
+            page.set_input_files("#cv", str(tmp_path / "resume.pdf"))
+
+            found = page.evaluate(browser._DISCOVER_JS)
+            fields = browser._fields_from_dom(found)
+            session.absorb(live.rows_from(found, fields))
+            session.set_phase(live.READY)
+            for row in session.snapshot()["fields"]:
+                # What the fill would have left behind: everything holding something.
+                session.mark(row["handle"], live.FILLED, "x")
+
+            session.submit(live.Command(kind=live.RESET))
+            browser._drain(session, page)
+
+            assert page.input_value("#fn") == ""
+            assert page.input_value("#ctry") == ""
+            assert not page.is_checked("#agree")
+            assert page.evaluate("document.getElementById('cv').files.length") == 0
+
+            statuses = {r["key"]: r["status"] for r in session.snapshot()["fields"]}
+            assert set(statuses.values()) == {live.CLEARED}
+        finally:
+            context.close()
