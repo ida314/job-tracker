@@ -599,15 +599,24 @@ channel from the page you are looking at to that writer.
 ```
 Cloudflare — Backend Engineer, New Grad        [Read the form again] [Reset]
 
-┌─ preview ───────────── Pause ─┐   First Name   [ Dylan          ]  filled
-│  [jpeg of the real form]      │     from your answer bank as `first_name`
-│                               │     [ Dylan            ] [Save]
-│                               │   Resume/CV    [ Choose file    ]  filled
-│                               │   Work auth?   [ Yes         ▾  ]  filled
-└───────────────────────────────┘   Why us?      [                ]  needs you
-                                      ☑ also save to my answer bank as [why_us      ▾]
-Review & submit                     3/4 fields filled · 1 need you
+┌ Preview  Pause  100%  Open application ┐  First Name  [ Dylan       ]  filled
+│  [jpeg of the whole real form]         │    from your answer bank as `first_name`
+│                                        │    [ Dylan          ] [Save]
+│                                        │  Resume/CV   [ Choose file ]  filled
+│                                        │  Work auth?  [ Yes      ▾  ]  filled
+└────────────────────────────────────────┘  Why us?     [             ]  needs you
+                                              ☑ also save to my answer bank as [why_us ▾]
+Review & submit                             3/4 fields filled · 1 need you
 ```
+
+**Open application** opens the form itself in a tab of *your* browser — the URL the
+browser actually landed on, so a Greenhouse embed or an Ashby `/application` opens the
+page the preview is a picture of. It is deliberately not a link to the window: that was
+the remote-desktop viewer this page replaced, and a video stream for fifteen text fields
+is not coming back. It is for reading the parts the discovery pass could not mirror — a
+captcha, a collapsed section, a dropzone. Typing in it changes nothing here; two tabs on
+one anonymous form share no draft, which is the same fact that makes this feature a
+browser rather than a link.
 
 **Reset** empties every field the form is holding and reads it again. It is the way back
 from a fill that went somewhere you did not want it, and from a form that has moved under

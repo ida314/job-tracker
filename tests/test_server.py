@@ -1730,6 +1730,39 @@ def test_resetting_carries_no_handle_and_no_epoch(tmp_path):
     assert command.epoch == -1
 
 
+def test_the_page_offers_the_real_form_in_a_tab_of_your_own_browser(tmp_path):
+    """"Open application" is the form itself, not the window drawing it.
+
+    The window is on the machine running `serve` and nothing here links to it — that was
+    the remote-desktop viewer this page replaced, and a video stream for fifteen text
+    fields is not coming back. What this opens is the URL the browser actually landed
+    on, so a Greenhouse embed or an Ashby `/application` opens the page the preview is a
+    picture of, for the parts the discovery pass could not mirror.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+
+    assert 'href="https://x/apply" target="_blank" rel="noopener noreferrer"' in page
+    assert "Open application" in page
+    # And no link to a viewer of the window came back with it.
+    for gone in ("vnc", "novnc", "xpra", "BROWSER_VIEW_URL"):
+        assert gone not in page, gone
+
+
+def test_the_link_to_the_form_refuses_a_scheme_that_would_run(tmp_path):
+    """The session's URL is where an ATS redirected the browser, which is third-party
+    text like every other URL on these pages. `javascript:` in an href runs on click."""
+    session = _live_session()
+    session.retarget("javascript:alert(1)")
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "javascript:alert" not in page
+    assert 'href="#" target="_blank"' in page
+
+
 def test_saving_to_the_bank_is_offered_by_default(tmp_path):
     """Ticked from the start, because this is where the bank grows.
 

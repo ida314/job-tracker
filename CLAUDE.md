@@ -480,6 +480,13 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   full-page preview is the first and `/apply`'s Submit is the second, so what was left was a
   video stream for fifteen text fields, which is the slow path this page was built to
   replace. A link to an interface too laggy to use is worse than no link.
+  **"Open application" on `/apply` is not that link coming back** (added 2026-08-26). It
+  opens the *form* — `Session.url`, the page the browser actually landed on — in a tab of
+  your own browser, for reading the parts the discovery pass could not mirror. Nothing
+  about it reaches the window or the host's display, and typing in it changes nothing
+  here: two tabs on one anonymous form share no draft, which is the same fact that makes
+  this a browser rather than a link in the first place. It is scheme-checked like every
+  other third-party URL these pages render.
   **`DISPLAY` and Xvfb stay** — Chromium will not launch headful without a display, and
   headless is a different bot-detection posture. The window is an implementation detail
   nobody looks at, not a thing that stopped existing.

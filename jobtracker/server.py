@@ -684,10 +684,23 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
 
     # -- the preview ------------------------------------------------------------------
     p.append('<div class="pane">')
+    # "Open application" is the page the browser is on, opened in a tab of *your*
+    # browser. Deliberately not a link to the window — that is the viewer this page
+    # replaced, and it is not coming back (see the module docstring). This is the form
+    # itself, from the URL the browser actually landed on rather than the posting's, so
+    # a Greenhouse embed or an Ashby `/application` opens the thing the preview is a
+    # picture of. It is a plain link and has no handler, because there is nothing for a
+    # script to do: a second copy of the form, for reading the parts the discovery pass
+    # could not mirror — a captcha, a collapsed section, a dropzone.
+    #
+    # Typing in it changes nothing here. Two tabs on one anonymous form share no draft,
+    # which is the same fact that makes this whole feature a browser rather than a link.
     p.append(
         '<div class="phead">Preview '
         '<button id="pause" data-paused="0">Pause</button>'
         '<button id="zoom" data-fit="1">100%</button>'
+        f'<a class="btn openapp" href="{dashboard_mod._safe_url(snap["url"])}" '
+        'target="_blank" rel="noopener noreferrer">Open application</a>'
         '<span class="ago" id="ago"></span></div>'
     )
     # A still of the *whole* form, refreshed on a cadence — not a stream. What this page
@@ -3094,7 +3107,8 @@ _APPLY_CSS = """
 gap:1.2rem;align-items:start}
 @media (max-width:820px){.split{grid-template-columns:1fr}}
 .pane{min-width:0}
-.phead{display:flex;gap:.6rem;align-items:center;font-weight:600;margin:.2rem 0 .6rem}
+.phead{display:flex;gap:.6rem;align-items:center;font-weight:600;
+margin:.2rem 0 .6rem;flex-wrap:wrap}
 .phead .ago{font-weight:400;font-size:.8rem;opacity:.7;margin-left:auto}
 #preview{border:1px solid rgba(127,127,127,.35);border-radius:6px;
 background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
@@ -3157,6 +3171,11 @@ padding:.05rem .4rem;border-radius:99px}
    without a rule of its own it rendered unstyled, which read as neither. */
 .st-cleared{opacity:.75;background:rgba(127,127,127,.14);border:1px solid currentColor}
 .lf.busy{opacity:.6}
+/* A link that acts as a button. `button{}` above styles the element, not the role, so
+   without this "Open application" renders as bare underlined text in a row of buttons. */
+a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
+background:transparent;color:inherit;font:inherit;font-size:.9rem;text-decoration:none}
+a.btn:hover{opacity:.7}
 #resetmsg{margin-left:0}
 .phead .note{font-weight:400;font-size:.8rem}
 
