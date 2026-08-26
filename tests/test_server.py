@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 import pytest
 import yaml
 
-from jobtracker import config, curation, models, server, store
+from jobtracker import config, curation, dashboard, models, server, store
 from jobtracker.criteria import load_criteria
 
 # Titles, locations and URLs all arrive from third-party ATS APIs and are
@@ -1505,6 +1505,62 @@ def test_zero_fields_renders_as_no_form_found(tmp_path):
     assert "no application form found on https://x/apply" in body
     assert "nothing left to type" not in body
     conn.close()
+
+
+def _unterminated_strings(script: str) -> list:
+    """Lines of an emitted script that end while still inside a `'...'` or `"..."`.
+
+    JavaScript string literals cannot carry a raw newline, so every one of these is a
+    `SyntaxError` — and a `SyntaxError` anywhere in a script kills the whole script, not
+    the statement it is in.
+    """
+    bad, block = [], False
+    for number, line in enumerate(script.splitlines(), 1):
+        quote, i = None, 0
+        while i < len(line):
+            char = line[i]
+            if block:
+                if line.startswith("*/", i):
+                    block = False
+                    i += 1
+            elif quote:
+                if char == "\\":
+                    i += 1
+                elif char == quote:
+                    quote = None
+            elif line.startswith("//", i):
+                break
+            elif line.startswith("/*", i):
+                block, i = True, i + 1
+            elif char in "'\"":
+                quote = char
+            elif char == "`":
+                break            # a template literal may span lines, and several do
+            i += 1
+        if quote:
+            bad.append(f"line {number}: {line.strip()[:70]}")
+    return bad
+
+
+def test_no_emitted_script_carries_a_newline_inside_a_string():
+    """`\\n` in a JS string is two characters; `\\\\n` is what a non-raw Python
+    docstring has to spell to emit them.
+
+    `server._JS` had three of the first (2026-08-19 to 2026-08-26), which put a real
+    newline inside a quoted literal and made the entire script a `SyntaxError` — so
+    every handler it carries was dead on all four pages that emit it: the tuning page's
+    rule controls, Settings' answer saves, Applications' status buttons and the Add a
+    company form. Exactly the "Open prefilled" failure — a button whose handler is not
+    on the page — with a different cause and four times the reach, and it was invisible
+    because a page with no script still renders perfectly.
+
+    This is what the parity tests cannot see: they check that a handler was written, not
+    that the script it is in survives being parsed.
+    """
+    for name, script in (("server._JS", server._JS),
+                         ("server._APPLY_JS", server._APPLY_JS),
+                         ("dashboard._JS", dashboard._JS)):
+        assert _unterminated_strings(script) == [], name
 
 
 def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_path):

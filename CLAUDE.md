@@ -429,6 +429,17 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   and for a stronger reason: it drives a browser, which only a live process can do. The
   *counts* (`prefill 13/16 fields · 3 need you`) render in both, because they are useful
   offline — they say whether opening a job takes thirty seconds or ten minutes.
+- **And the script it lives in has to parse.** `server._JS` carried three `'\n'`
+  sequences written into a non-raw Python string (2026-08-19 to 2026-08-26), so a real
+  newline landed inside a quoted JS literal. A `SyntaxError` kills the whole script, not
+  the statement it is in — so **every** handler `server._JS` carries was dead on all four
+  pages that emit it: `/tuning`'s rule controls, Settings' answer saves, Applications'
+  status buttons, and the Add a company form. The same failure as "Open prefilled" —
+  a button with no handler on its page — with four times the reach and no symptom, because
+  a page whose script never ran still renders perfectly. In a `"""` block, `\n` is a real
+  newline and `\\n` is what emits the two characters JavaScript wants. The parity tests
+  cannot see this: they assert a handler was *written*, not that it survives parsing.
+  `test_no_emitted_script_carries_a_newline_inside_a_string` is the one that can.
 - **A button's handler lives in the file that renders the button.** "Open prefilled" was
   emitted by `dashboard.py` while its click handler sat in `server._JS`, which only
   `/tuning` and `/settings` emit — so the dashboard never loaded it and every click did

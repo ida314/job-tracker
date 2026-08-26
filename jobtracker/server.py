@@ -3677,9 +3677,10 @@ document.addEventListener('click', async (e) => {
       const v = res.verification || {};
       out.className = 'coresult bad';
       out.textContent = 'Not added — ' + v.reason +
-        (v.board_name ? '\nboard name: ' + v.board_name : '') +
-        (v.job_count ? '\njobs: ' + v.job_count : '') +
-        ((v.sample_titles || []).length ? '\ntitles: ' + v.sample_titles.join(' · ') : '');
+        (v.board_name ? '\\nboard name: ' + v.board_name : '') +
+        (v.job_count ? '\\njobs: ' + v.job_count : '') +
+        ((v.sample_titles || []).length ? '\\ntitles: ' + v.sample_titles.join(' · ')
+                                        : '');
       if (force) force.hidden = false;
       return;
     }
@@ -3687,12 +3688,12 @@ document.addEventListener('click', async (e) => {
     const v = res.verification;
     // textContent, never innerHTML: the diff carries a company name somebody typed.
     out.textContent = 'Added. Backup at ' + res.backup +
-      (res.skipped_because ? '\nNot verified — ' + res.skipped_because +
+      (res.skipped_because ? '\\nNot verified — ' + res.skipped_because +
                              '; expected_board_name written as null.' : '') +
-      (v ? '\nVerified: ' + v.evidence_kind + ' · ' + v.job_count + ' jobs · board "' +
+      (v ? '\\nVerified: ' + v.evidence_kind + ' · ' + v.job_count + ' jobs · board "' +
            v.board_name + '"' +
            (v.evidence_kind === 'reachable'
-             ? '\nThis ATS publishes no board name, so that is NOT an identity check — ' +
+             ? '\\nThis ATS publishes no board name, so that is NOT an identity check — ' +
                'it only proves the board answered and is not empty. Read the titles: ' +
                (v.sample_titles || []).join(' · ')
              : '') : '');
