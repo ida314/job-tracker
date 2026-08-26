@@ -912,7 +912,7 @@ def _submit(session, surface, on_submitted=None) -> None:
 def _drain(session, page) -> None:
     """Carry the dashboard's queued commands to the live page, then keep the preview up.
 
-    Runs on the browser thread, once per tick. Every command is one of four names and
+    Runs on the browser thread, once per tick. Every command is one of six names and
     carries a handle rather than a selector, so there is nothing here that can be pointed
     at an arbitrary element or made to evaluate arbitrary text — see `live.py`.
     """
@@ -941,6 +941,9 @@ def _obey(session, page, command) -> None:
         return
     if command.kind == live.REDISCOVER:
         _reread(session, page)
+        return
+    if command.kind == live.RESET:
+        _reset(session, page)
         return
     if command.kind not in (live.SET, live.CLEAR, live.HIGHLIGHT):
         return  # not in the vocabulary; `Session.submit` refused it too
@@ -997,6 +1000,40 @@ def _obey(session, page, command) -> None:
         _reread(session, page)
     else:
         session.mark(command.handle, live.REFUSED, "")
+    _shoot(session, page)
+
+
+def _reset(session, page) -> None:
+    """Empty every field this form is holding, then read it again. Never navigates.
+
+    One command rather than a clear per field from the page, and the difference is not
+    chattiness. Each `_clear` re-reads the form on the way out, so a shape change part
+    way down a loop — and attaching or detaching a file is exactly that — renumbers the
+    handles and every remaining clear is correctly dropped as stale. The page would then
+    report a reset that emptied the first four fields of thirty, which on a form you are
+    about to send is worse than no button at all.
+
+    Only rows that are holding something are touched. A `gap` is a question nobody ever
+    had an answer for, and marking it `cleared` would spend the one distinction the two
+    statuses exist to draw. A field that will not give its value up stays `refused`,
+    which is the same reading a single clear produces and for the same reason: it is
+    still holding an answer, and the page has to say so.
+    """
+    emptied = failed = 0
+    for row in list(session.fields):
+        if not row["value"] and row["status"] != live.FILLED:
+            continue
+        raw = {"handle": row["handle"], "type": row["type"], "label": row["label"],
+               "option": row.get("option") or ""}
+        if _clear(page, raw):
+            session.mark(row["handle"], live.CLEARED, "")
+            emptied += 1
+        else:
+            session.mark(row["handle"], live.REFUSED, row["value"])
+            failed += 1
+    log.info("reset the form — %d field(s) emptied, %d would not give it up",
+             emptied, failed)
+    _reread(session, page)
     _shoot(session, page)
 
 

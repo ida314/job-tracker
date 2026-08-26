@@ -70,6 +70,14 @@ MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
 _UPLOAD_ROUTES = {"/api/resume", "/api/posting-resume", "/api/session/file"}
 MAX_UPLOAD = resumes.MAX_UPLOAD
 
+# What the *body* carrying an upload may be, which is not what the file may be. Base64 is
+# ~4/3 of the bytes it encodes, so a body capped at `MAX_UPLOAD` rejects every file over
+# about three quarters of the documented limit — and rejects it as an empty payload, so
+# `validate_upload`'s own limit, the one the message quotes, could never be the thing that
+# fired. The cap that bounds memory is this one; the cap that describes a resume is
+# `resumes.MAX_UPLOAD`, checked after the decode where the real size is known.
+MAX_UPLOAD_BODY = MAX_UPLOAD * 4 // 3 + 4096
+
 # No external anything, matching the static dashboard's guarantee.
 #
 # `connect-src 'self'` is required, not optional: every write on this server goes out as
@@ -676,10 +684,23 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
 
     # -- the preview ------------------------------------------------------------------
     p.append('<div class="pane">')
+    # "Open application" is the page the browser is on, opened in a tab of *your*
+    # browser. Deliberately not a link to the window — that is the viewer this page
+    # replaced, and it is not coming back (see the module docstring). This is the form
+    # itself, from the URL the browser actually landed on rather than the posting's, so
+    # a Greenhouse embed or an Ashby `/application` opens the thing the preview is a
+    # picture of. It is a plain link and has no handler, because there is nothing for a
+    # script to do: a second copy of the form, for reading the parts the discovery pass
+    # could not mirror — a captcha, a collapsed section, a dropzone.
+    #
+    # Typing in it changes nothing here. Two tabs on one anonymous form share no draft,
+    # which is the same fact that makes this whole feature a browser rather than a link.
     p.append(
         '<div class="phead">Preview '
         '<button id="pause" data-paused="0">Pause</button>'
         '<button id="zoom" data-fit="1">100%</button>'
+        f'<a class="btn openapp" href="{dashboard_mod._safe_url(snap["url"])}" '
+        'target="_blank" rel="noopener noreferrer">Open application</a>'
         '<span class="ago" id="ago"></span></div>'
     )
     # A still of the *whole* form, refreshed on a cadence — not a stream. What this page
@@ -714,9 +735,15 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
 
     # -- the fields -------------------------------------------------------------------
     p.append('<div class="pane fields">')
+    # Read again re-reads; Reset empties. Both are form-wide, so both live here rather
+    # than on a row. Reset is the way back from a fill that went somewhere you did not
+    # want it — and from a form that has moved under the page, which is the one state
+    # where every per-field control is refused and this one still works.
     p.append(
         '<div class="phead">Fields '
-        '<button id="reread">Read the form again</button></div>'
+        '<button id="reread">Read the form again</button>'
+        '<button id="resetform">Reset</button>'
+        '<span class="note" id="resetmsg"></span></div>'
     )
     # Every key you already hold, offered to every "save as" box on the page. This is
     # what the model's enum became: it chose one of these per unplaceable question, and
@@ -775,6 +802,53 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
     p.append("</div>")
     p.append(f"<script>{_APPLY_JS}</script></div></body></html>")
     return "\n".join(p)
+
+
+# How long to wait for a window we have asked to close, when a different job is taking
+# its place. The hold loop reads `closing` once per `browser.HOLD_POLL_MS` (500ms) and
+# then has a browser context to tear down, so this is many times the expected cost and
+# still short enough to answer a click.
+#
+# It blocks the request thread, which on a single-request `HTTPServer` means the whole
+# server — the same bounded-inline trade `/api/company`'s verification makes, and for the
+# same reason: the answer decides whether the click succeeds, and nothing on another
+# thread can answer the click that started it. Bounded, so a browser that will not go
+# away costs a page a few seconds rather than wedging `serve` forever.
+SWAP_TIMEOUT_S = 15.0
+
+
+def _close_open_window(open_now) -> tuple:
+    """Close the window that is open so a different job can take it.
+
+    Returns `(note, error)`. On success the error is empty **and the lock is held** —
+    the caller's very next act is to launch into it, and releasing it in between is a
+    gap a second click could walk through, leaving two threads racing for the one
+    browser profile directory.
+
+    Asking is all this can do: Playwright objects belong to the thread that made them,
+    so `request_close` sets the flag the hold loop is already reading and the thread
+    releases the lock on its way out. Waiting for the lock is therefore waiting for the
+    window to actually be gone, which is the only proof that matters here — Chromium
+    locks that profile directory and a launch into it while the first browser lives
+    fails on the worker thread, where nobody would see it.
+
+    The flag is read in the hold loop, so a window still *filling* will not see it until
+    the fill lands — the same latency the Done button has always had, since it is the
+    same flag. On a long form that can outrun the timeout, and the refusal says so
+    rather than waiting on the request thread for as long as a browser feels like.
+    """
+    if open_now is None:
+        # The lock is held but no session is readable: the moment between acquiring it
+        # and `live.start`. There is nothing to ask to close, and guessing that it is
+        # closeable would mean waiting 15 seconds to say so.
+        return "", ("a prefilled window is opening — try again in a moment")
+    title = open_now.title[:60] or f"{open_now.company} {open_now.ats_job_id}"
+    log.info("closing the window for %s — another job was asked for", title)
+    open_now.request_close()
+    if not _APPLY_LOCK.acquire(timeout=SWAP_TIMEOUT_S):
+        return "", (f"the window open for {title} did not close — press Done on the "
+                    "Fill in page, then try again")
+    return f"closed {title} · ", ""
 
 
 def record_submission(conn, company: str, ats_job_id: str, title: str, url: str,
@@ -1572,8 +1646,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         # The cap is per-route rather than global: only the upload carries a file, and
-        # leaving 6 MB open on every endpoint would let a decision POST buffer one.
-        payload = self._read_json(MAX_UPLOAD if path in _UPLOAD_ROUTES else MAX_BODY)
+        # leaving 8 MB open on every endpoint would let a decision POST buffer one.
+        limit = MAX_UPLOAD_BODY if path in _UPLOAD_ROUTES else MAX_BODY
+        # Said out loud, rather than left to `_read_json`'s empty dict. An over-length
+        # body read as `{}` reaches the endpoint as a payload with no fields in it, and
+        # comes back "no file" — which is true of the request and false about the
+        # problem, and points at the picker rather than at the file's size. It is also
+        # the one refusal that happens with the body still arriving, so the client sees
+        # the connection close mid-upload: without an answer of its own it reads as a
+        # request that never finished.
+        if int(self.headers.get("Content-Length") or 0) > limit:
+            self._send_json(
+                {"ok": False,
+                 "error": f"that is larger than the {limit // (1024 * 1024)} MB "
+                          "this accepts"},
+                413,
+            )
+            return
+        payload = self._read_json(limit)
         try:
             if path == "/api/decision":
                 self._send_json(self._api_decision(payload))
@@ -1609,6 +1699,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_session_highlight(payload))
             elif path == "/api/session/rediscover":
                 self._send_json(self._api_session_command(live.REDISCOVER))
+            elif path == "/api/session/reset":
+                self._send_json(self._api_session_reset())
             elif path == "/api/session/submit":
                 self._send_json(self._api_session_submit(payload))
             elif path == "/api/session/close":
@@ -2672,17 +2764,31 @@ class Handler(BaseHTTPRequestHandler):
 
         # One window at a time. The browser profile is a single directory and Chromium
         # locks it, so a second launch while the first window is open fails — on the
-        # worker thread, where nobody sees it. Saying so is the honest answer.
+        # worker thread, where nobody sees it.
+        #
+        # But "a window is already open" is three situations and only one of them is a
+        # collision, and refusing all three made the button worse than the constraint:
+        #
+        #   - **The same job.** This click is the way *back* to a window you are already
+        #     filling in. The dashboard button is the only route to `/apply`, so a
+        #     refusal here stranded the session the moment you navigated away — the page
+        #     holding the Done button was the page you could no longer reach, and the
+        #     only ending left was restarting `serve`. Nothing is opened and no new
+        #     session is started; you are sent back to the one that exists.
+        #   - **A different job.** A swap you asked for. Closing the open window is
+        #     exactly what you would have done by hand, so do it and take its place.
+        #   - **Neither** — the lock is held but there is no readable session, which is
+        #     the moment between acquiring it and `live.start`. That one is still a
+        #     refusal, because there is nothing to ask to close.
+        swapped = ""
         if not _APPLY_LOCK.acquire(blocking=False):
-            # Name the job and say where the way out is. The window is on *this* machine,
-            # which on a headless host is nowhere you can click — so "close it first"
-            # used to be advice with no way to take it, and the honest half of the
-            # sentence is the second one.
             open_now = live.current()
-            held = f" for {open_now.title}" if open_now is not None else ""
-            return {"ok": False,
-                    "error": f"a prefilled window is already open{held} — finish it on "
-                             "the Fill in page, or press Done there to close it"}
+            if open_now is not None and open_now.holds(company_name, job_id):
+                return {"ok": True, "href": "/apply",
+                        "detail": f"already open — back to {row['title'][:60]}"}
+            swapped, error = _close_open_window(open_now)
+            if error:
+                return {"ok": False, "error": error}
 
         # The page the click is about to land on reads this, so it exists before the
         # thread does — a session created on the worker would leave `/apply` reporting
@@ -2737,7 +2843,7 @@ class Handler(BaseHTTPRequestHandler):
         # Where to go to fill it in. The button navigates rather than relabelling
         # itself: the form is now typed on that page, not in the window.
         return {"ok": True, "href": "/apply",
-                "detail": f"opening {row['title'][:60]}…"}
+                "detail": f"{swapped}opening {row['title'][:60]}…"}
 
     # -- the live form -------------------------------------------------------------
     #
@@ -2838,6 +2944,23 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return {"ok": False, "error": "bad epoch"}
         return self._api_session_command(live.CLEAR, handle, "", epoch)
+
+    def _api_session_reset(self) -> dict:
+        """Empty every field on the live form and read it again.
+
+        One command rather than a clear per field, and that is the whole reason it is an
+        endpoint at all: `_clear` re-reads the form on the way out, so a shape change
+        part way down a loop of thirty clears renumbers the handles and every later one
+        is correctly dropped as stale. The page would then report a reset that emptied
+        four fields of thirty. Taken as a single command it is atomic on the thread that
+        owns the page.
+
+        It carries no epoch and needs none — it names no handle from this side, so there
+        is no handle here that could have gone stale. That is also why it is the way out
+        of the state the epoch puts the page in: a form that has moved under you can
+        still be emptied, whatever the page is holding.
+        """
+        return self._api_session_command(live.RESET)
 
     def _api_session_submit(self, payload: dict) -> dict:
         """Arm the one submit this session has, or say exactly why it will not.
@@ -3045,7 +3168,8 @@ _APPLY_CSS = """
 gap:1.2rem;align-items:start}
 @media (max-width:820px){.split{grid-template-columns:1fr}}
 .pane{min-width:0}
-.phead{display:flex;gap:.6rem;align-items:center;font-weight:600;margin:.2rem 0 .6rem}
+.phead{display:flex;gap:.6rem;align-items:center;font-weight:600;
+margin:.2rem 0 .6rem;flex-wrap:wrap}
 .phead .ago{font-weight:400;font-size:.8rem;opacity:.7;margin-left:auto}
 #preview{border:1px solid rgba(127,127,127,.35);border-radius:6px;
 background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
@@ -3103,7 +3227,18 @@ padding:.05rem .4rem;border-radius:99px}
 .st-gap{color:#d97706;background:rgba(217,119,6,.14)}
 .st-refused{color:#dc3545;background:rgba(220,53,69,.14)}
 .st-pending{opacity:.6;background:rgba(127,127,127,.14)}
+/* Emptied on purpose. Its own word and its own colour because it is not `filled` (there
+   is nothing in it) and not `gap` (a gap is a question nobody had an answer for) — and
+   without a rule of its own it rendered unstyled, which read as neither. */
+.st-cleared{opacity:.75;background:rgba(127,127,127,.14);border:1px solid currentColor}
 .lf.busy{opacity:.6}
+/* A link that acts as a button. `button{}` above styles the element, not the role, so
+   without this "Open application" renders as bare underlined text in a row of buttons. */
+a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
+background:transparent;color:inherit;font:inherit;font-size:.9rem;text-decoration:none}
+a.btn:hover{opacity:.7}
+#resetmsg{margin-left:0}
+.phead .note{font-weight:400;font-size:.8rem}
 
 """
 
@@ -3147,6 +3282,9 @@ _APPLY_JS = """
 
   var POLL_MS = 2000;
   var DEBOUNCE_MS = 400;
+  // The file, not the body: the body is base64 and ~4/3 of it. Kept in step with
+  // `resumes.MAX_UPLOAD` by a test rather than by hand.
+  var MAX_UPLOAD_BYTES = __MAX_UPLOAD_BYTES__;
   var epoch = parseInt(root.dataset.epoch, 10);
   var paused = false;
   var moved = document.getElementById('moved');
@@ -3281,17 +3419,51 @@ _APPLY_JS = """
     // The browser's file picker shows the *server's* disk, not yours. So the file
     // travels as base64 through the one JSON POST path this server has, exactly like
     // the per-posting resume does.
+    //
+    // Every ending goes through `done`, and that is the whole shape of this branch.
+    // Before it, only a refusal answered by the server moved the pill: a file the reader
+    // could not open, a body the server hung up on, or a request that simply never came
+    // back all left it reading "uploading…" for the rest of the session — the word for a
+    // request in flight, over one that had already failed. And `.busy` is what keeps the
+    // poll from painting over the row while that is happening, so a branch that never
+    // took it off froze the card in place, which is what "cannot touch other fields"
+    // looked like from a row that had also gone quiet.
     if (e.target.classList.contains('lf-file') && e.target.files.length) {
       var file = e.target.files[0];
+      var picker = e.target;
       var st = card.querySelector('.st');
+      // The picker is emptied on every ending, not just a refusal. A file input fires
+      // `change` on the file it is *holding*, so one that goes on naming the last file
+      // is silent when you pick that same file again — which is exactly what you do
+      // after a failure, and what you do to re-attach after a detach.
+      var done = function (kind, word) {
+        card.classList.remove('busy');
+        picker.value = '';
+        setStatus(st, kind, word);
+      };
+      if (file.size > MAX_UPLOAD_BYTES) {
+        // Answered here rather than by the 413, because the body is ~4/3 of the file and
+        // there is no reason to send eight megabytes to be told so.
+        done('refused', Math.round(file.size / 1048576) + ' MB is too large');
+        return;
+      }
       setStatus(st, 'pending', 'uploading…');
+      card.classList.add('busy');
       var reader = new FileReader();
+      reader.onerror = function () { done('refused', 'could not read that file'); };
       reader.onload = function () {
         post('/api/session/file', {
           handle: card.dataset.handle, epoch: epoch, filename: file.name,
           content: String(reader.result).split(',')[1] || ''
         }).then(function (res) {
-          if (!res.ok) setStatus(st, 'refused', res.error || 'refused');
+          // Not "filled": the upload only queued the command. The browser thread
+          // attaches it on its next tick and `paint` is what says it happened — the
+          // same rule the submit button follows about never claiming an outcome it
+          // cannot see.
+          done(res.ok ? 'pending' : 'refused', res.ok ? 'attaching…'
+                                                      : (res.error || 'refused'));
+        }).catch(function () {
+          done('refused', 'the server did not answer');
         });
       };
       reader.readAsDataURL(file);
@@ -3331,9 +3503,37 @@ _APPLY_JS = """
     push(card, '');
   });
 
-  // -- the two buttons ---------------------------------------------------------------
+  // -- the form-wide buttons ---------------------------------------------------------
   document.getElementById('reread').addEventListener('click', function () {
     post('/api/session/rediscover', {});
+  });
+
+  // Reset. Empties every field the form is holding and reads it again, in one command
+  // on the thread that owns the page — not a clear per row from here, which would go
+  // stale the first time emptying something changed the form's shape.
+  //
+  // Nothing is reloaded and nothing is repainted here: the browser thread marks each row
+  // `cleared` as it goes and the next poll paints that, which is the same path every
+  // other outcome on this page takes. Claiming it here would be claiming an outcome this
+  // side cannot see.
+  var resetbtn = document.getElementById('resetform');
+  var resetmsg = document.getElementById('resetmsg');
+  resetbtn.addEventListener('click', function () {
+    // Confirmed, because the fill is the work: what it emptied is not recoverable from
+    // anywhere — no ATS keeps a draft for an anonymous candidate — and re-filling it
+    // means opening the job again.
+    if (!confirm('Empty every field on the form? What was filled in is not saved '
+                 + 'anywhere, so this is not undoable.')) return;
+    resetbtn.disabled = true;
+    resetmsg.textContent = 'clearing…';
+    post('/api/session/reset', {}).then(function (res) {
+      resetbtn.disabled = false;
+      resetmsg.textContent = res.ok ? 'clearing the form…'
+                                    : (res.error || 'it was not cleared');
+    }).catch(function () {
+      resetbtn.disabled = false;
+      resetmsg.textContent = 'the server did not answer';
+    });
   });
 
   // Fit or full size. Entirely on this side of the wire: the shot is always the whole
@@ -3469,8 +3669,23 @@ _APPLY_JS = """
       el.disabled = true;
     });
     closewin.disabled = true;
+    resetbtn.disabled = true;
     donemsg.textContent = 'the window is closed';
     ago.textContent = 'the window is closed';
+  }
+
+  // Is anything of yours in flight or half-typed. Both are reasons not to reload under
+  // you: focus is a sentence you have not finished, and `.busy` is a value whose outcome
+  // has not come back yet. Neither survives a navigation, and the reload can wait — the
+  // banner is showing, and the next poll comes round in two seconds.
+  function busyNow() {
+    var here = document.activeElement;
+    // Only a control you type into. A file picker holds nothing half-finished, and it
+    // is the row that most reliably moves the epoch — counting it would make the one
+    // case this recovery exists for the one case that takes a second poll to recover.
+    if (here && here.closest && here.closest('.lf') &&
+        here.classList.contains('lv')) return true;
+    return document.querySelector('.lf.busy') !== null;
   }
 
   function age(then) {
@@ -3501,9 +3716,23 @@ _APPLY_JS = """
       if (counts) counts.textContent = line;
 
       // The form was read again and the handles moved, so every field on this page now
-      // points at the wrong input. Say so and stop — silently pushing into whatever is
-      // there now is the one outcome this whole mechanism exists to prevent.
+      // points at the wrong input. Say so and stop pushing — silently writing into
+      // whatever is there now is the one outcome this whole mechanism exists to prevent.
+      //
+      // But stopping is not an ending, and treating it as one is what made attaching a
+      // resume look like a hang: Greenhouse's file row re-renders into a filename and a
+      // remove control the moment it takes a file, which is a shape change, which is a
+      // correct epoch bump — and the page then disabled every field on it and waited for
+      // a Reload nobody had a reason to press. The fields it is holding are stale; the
+      // *server's* rendering of them is not, and re-reading it is exactly what a reload
+      // does. So it reloads itself, and only asks when it cannot: a reload while you are
+      // typing would discard the sentence you are in the middle of, and one with a push
+      // in flight would land before its outcome does.
       if (s.epoch !== epoch) {
+        // Asked before anything is disabled, because disabling the field you are in
+        // blurs it — the guard would then be reading a page it had just cleared, and
+        // would reload one tick later having lost the typing it exists to protect.
+        if (!busyNow()) { stopped = true; location.reload(); return; }
         moved.hidden = false;
         document.querySelectorAll('.lf .lv, .lf .lf-file').forEach(function (el) {
           el.disabled = true;
@@ -3575,7 +3804,7 @@ _APPLY_JS = """
 
   tick();
 })();
-"""
+""".replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD))
 
 
 # Values come from data-* attributes rather than being interpolated into onclick
@@ -3677,9 +3906,10 @@ document.addEventListener('click', async (e) => {
       const v = res.verification || {};
       out.className = 'coresult bad';
       out.textContent = 'Not added — ' + v.reason +
-        (v.board_name ? '\nboard name: ' + v.board_name : '') +
-        (v.job_count ? '\njobs: ' + v.job_count : '') +
-        ((v.sample_titles || []).length ? '\ntitles: ' + v.sample_titles.join(' · ') : '');
+        (v.board_name ? '\\nboard name: ' + v.board_name : '') +
+        (v.job_count ? '\\njobs: ' + v.job_count : '') +
+        ((v.sample_titles || []).length ? '\\ntitles: ' + v.sample_titles.join(' · ')
+                                        : '');
       if (force) force.hidden = false;
       return;
     }
@@ -3687,12 +3917,12 @@ document.addEventListener('click', async (e) => {
     const v = res.verification;
     // textContent, never innerHTML: the diff carries a company name somebody typed.
     out.textContent = 'Added. Backup at ' + res.backup +
-      (res.skipped_because ? '\nNot verified — ' + res.skipped_because +
+      (res.skipped_because ? '\\nNot verified — ' + res.skipped_because +
                              '; expected_board_name written as null.' : '') +
-      (v ? '\nVerified: ' + v.evidence_kind + ' · ' + v.job_count + ' jobs · board "' +
+      (v ? '\\nVerified: ' + v.evidence_kind + ' · ' + v.job_count + ' jobs · board "' +
            v.board_name + '"' +
            (v.evidence_kind === 'reachable'
-             ? '\nThis ATS publishes no board name, so that is NOT an identity check — ' +
+             ? '\\nThis ATS publishes no board name, so that is NOT an identity check — ' +
                'it only proves the board answered and is not empty. Read the titles: ' +
                (v.sample_titles || []).join(' · ')
              : '') : '');

@@ -597,17 +597,30 @@ names them, and `_write` puts a value into exactly one of them. All that was mis
 channel from the page you are looking at to that writer.
 
 ```
-Cloudflare — Backend Engineer, New Grad          [Read the form again]
+Cloudflare — Backend Engineer, New Grad        [Read the form again] [Reset]
 
-┌─ preview ───────────── Pause ─┐   First Name   [ Dylan          ]  filled
-│  [jpeg of the real form]      │     from your answer bank as `first_name`
-│                               │     [ Dylan            ] [Save]
-│                               │   Resume/CV    [ Choose file    ]  filled
-│                               │   Work auth?   [ Yes         ▾  ]  filled
-└───────────────────────────────┘   Why us?      [                ]  needs you
-                                      ☑ also save to my answer bank as [why_us      ▾]
-Review & submit                     3/4 fields filled · 1 need you
+┌ Preview  Pause  100%  Open application ┐  First Name  [ Dylan       ]  filled
+│  [jpeg of the whole real form]         │    from your answer bank as `first_name`
+│                                        │    [ Dylan          ] [Save]
+│                                        │  Resume/CV   [ Choose file ]  filled
+│                                        │  Work auth?  [ Yes      ▾  ]  filled
+└────────────────────────────────────────┘  Why us?     [             ]  needs you
+                                              ☑ also save to my answer bank as [why_us ▾]
+Review & submit                             3/4 fields filled · 1 need you
 ```
+
+**Open application** opens the form itself in a tab of *your* browser — the URL the
+browser actually landed on, so a Greenhouse embed or an Ashby `/application` opens the
+page the preview is a picture of. It is deliberately not a link to the window: that was
+the remote-desktop viewer this page replaced, and a video stream for fifteen text fields
+is not coming back. It is for reading the parts the discovery pass could not mirror — a
+captcha, a collapsed section, a dropzone. Typing in it changes nothing here; two tabs on
+one anonymous form share no draft, which is the same fact that makes this feature a
+browser rather than a link.
+
+**Reset** empties every field the form is holding and reads it again. It is the way back
+from a fill that went somewhere you did not want it, and from a form that has moved under
+the page — see the rule below for why it is one command rather than thirty.
 
 **The save box is ticked**, and the key box is a picker over every answer you already
 hold. Together they are what replaced the model pass: leave the minted key to answer a
@@ -639,10 +652,20 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 
 ### Rules that are load-bearing
 
-- **A command points, it does not write.** The vocabulary is exactly five names — `set`,
-  `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
-  never a selector and never anything the browser thread evaluates. That is `browser.py`'s
-  click rule carried across the new channel, and it has its own test.
+- **A command points, it does not write.** The vocabulary is exactly six names — `set`,
+  `clear`, `reset`, `rediscover`, `shoot`, `highlight` — and a command carries a field
+  *handle*, never a selector and never anything the browser thread evaluates. That is
+  `browser.py`'s click rule carried across the new channel, and it has its own test.
+- **`reset` is `clear` over the whole form, and it is one command rather than a loop.**
+  A clear re-reads the form on the way out, so thirty clears sent from the page are
+  thirty chances for the shape to change under the remaining handles — after which every
+  later one is correctly dropped as stale, and a reset that emptied four fields of
+  thirty is reported as a whole one. It is on `clear`'s side of the activation line by
+  the same test: emptying reaches nothing a fill does not. It touches only rows holding
+  something, because a `gap` is a question nobody had an answer for and `cleared` is one
+  you emptied on purpose. And it is the **one command carrying no epoch**, because it
+  names no handle from the page's side — which is what makes it the way out of a form
+  that has moved, where every per-field command is refused by design.
 - **There are two clicks in `browser.py`, and the rule narrowed rather than loosened when
   the second arrived.** `_submit` presses the employer's own button, once, behind the
   gate. `_press` is everything a *widget* needs to be operated — an option in its listbox,
@@ -745,16 +768,27 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
   never imply the list is the whole form. Zero fields is still *"no application form
   found"*, never "nothing left to type".
 - **A form that rewrites itself while you are in it.** Re-reading after each write narrows
-  the window; when the shape does change, the page says so and stops rather than pushing
-  into whatever is there now. "Read the form again" is one click.
+  the window; when the shape does change, the page stops pushing rather than pushing into
+  whatever is there now.
+
+  But **stopping is not an ending**, and treating it as one is what made attaching a
+  resume look like a hang. Greenhouse's file row re-renders into a filename and a remove
+  control the moment it takes a file — a shape change, so a correct epoch bump — and the
+  page then disabled every field on it and waited for a Reload nobody had a reason to
+  press. The handles are stale; the *server's* rendering of them is not, and re-reading
+  it is exactly what a reload does. So the page reloads itself, and asks only when it
+  cannot: a reload while you are typing would discard the sentence you are in, and one
+  with a push in flight would land before its outcome does. The guard is read **before**
+  anything is disabled, because disabling the field you are in blurs it.
 
 ### Ending a session
 
 **Done — close the window** on `/apply` is the way out, and on a headless host it is the
 only one. The browser opens on the machine running `serve`; if you cannot reach that
 machine's screen, you cannot close the window, and until it closes `_APPLY_LOCK` stays
-held and every later "Open prefilled" answers *"a prefilled window is already open"* —
-until `serve` itself is restarted. Observed 2026-08-19.
+held. Observed 2026-08-19; until 2026-08-26 that also meant every later "Open prefilled"
+answered *"a prefilled window is already open"* until `serve` itself was restarted, which
+is no longer true — see "Going back to a window, and swapping one" below.
 
 `POST /api/session/close` sets `Session.closing`; `_hold_until_closed` reads it in the
 tick it was already doing, breaks, and `fill_application` closes the context on the way
@@ -778,6 +812,46 @@ Two things about the endpoint's shape:
   precisely when you want the window gone, and it is also the state most likely to be
   holding the lock. `submit()` refuses commands once the phase is `CLOSED`; this must
   not.
+
+### Going back to a window, and swapping one
+
+Added 2026-08-26. One window at a time is a real constraint — Chromium locks the single
+browser-profile directory — but *"a prefilled window is already open"* was the answer to
+three different situations, and only one of them is a collision.
+
+- **The same posting.** Not a second window: the one you asked for is the one that is up.
+  `_api_apply_to` returns `ok:true, href:/apply` and starts nothing at all — no session,
+  and the lock left exactly as it was found. This is the case that was actually broken.
+  The dashboard button is the only route to `/apply`, so opening a job, navigating back
+  to the dashboard and pressing the same button refused you, and the page holding **Done
+  — close the window** was the page the refusal had just made unreachable. The only
+  ending left was restarting `serve`.
+- **A different posting.** A swap you asked for, and closing the open window is exactly
+  what you would have done by hand. `_close_open_window` calls `request_close`, waits for
+  the browser thread to release `_APPLY_LOCK`, and hands the lock — *held* — to the
+  launch. Held, because the caller's next act is to launch into that profile directory
+  and a gap between the two is a second click's way in.
+- **Neither.** The lock held with nothing readable in `live.current()` is the moment
+  between acquiring it and `live.start`. Still a refusal, and a fast one: there is
+  nothing to ask to close, so waiting would be fifteen seconds spent to say so.
+
+`live.Session.holds(company, ats_job_id)` decides the first of those, and `CLOSED` is
+deliberately not held. A session whose window has gone is a page that can do nothing but
+report that it has gone, so reading it as "you are already there" would send the click to
+a dead form instead of opening a real one — absence read as success, one control along.
+
+Two things about the wait. It **blocks the request thread**, which on a single-request
+`HTTPServer` is the whole server; that is the bounded-inline trade `/api/company`'s
+verification already makes, and for the same reason — the answer decides whether the
+click succeeds, and nothing on a daemon thread can answer the click that started it. And
+the flag is read in the hold loop, so a window still *filling* will not see it until the
+fill lands. That is the latency **Done** has always had, since it is the same flag; on a
+long form it can outrun `SWAP_TIMEOUT_S` (15s), and the refusal then names the window and
+points at the button rather than waiting on a browser for as long as it likes.
+
+Nothing may launch without the lock. A swap that timed out and started a browser anyway
+would put two Chromiums into one profile directory, and the second one fails on the
+worker thread — turning a refusal you can read into a button stuck on "Opening…".
 
 None of this removes the need for `DISPLAY` or `Xvfb`: Chromium still has to draw
 somewhere, and it will not launch headful without a display. What it removes is any reason

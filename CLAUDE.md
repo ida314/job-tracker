@@ -429,6 +429,17 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   and for a stronger reason: it drives a browser, which only a live process can do. The
   *counts* (`prefill 13/16 fields · 3 need you`) render in both, because they are useful
   offline — they say whether opening a job takes thirty seconds or ten minutes.
+- **And the script it lives in has to parse.** `server._JS` carried three `'\n'`
+  sequences written into a non-raw Python string (2026-08-19 to 2026-08-26), so a real
+  newline landed inside a quoted JS literal. A `SyntaxError` kills the whole script, not
+  the statement it is in — so **every** handler `server._JS` carries was dead on all four
+  pages that emit it: `/tuning`'s rule controls, Settings' answer saves, Applications'
+  status buttons, and the Add a company form. The same failure as "Open prefilled" —
+  a button with no handler on its page — with four times the reach and no symptom, because
+  a page whose script never ran still renders perfectly. In a `"""` block, `\n` is a real
+  newline and `\\n` is what emits the two characters JavaScript wants. The parity tests
+  cannot see this: they assert a handler was *written*, not that it survives parsing.
+  `test_no_emitted_script_carries_a_newline_inside_a_string` is the one that can.
 - **A button's handler lives in the file that renders the button.** "Open prefilled" was
   emitted by `dashboard.py` while its click handler sat in `server._JS`, which only
   `/tuning` and `/settings` emit — so the dashboard never loaded it and every click did
@@ -469,6 +480,13 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   full-page preview is the first and `/apply`'s Submit is the second, so what was left was a
   video stream for fifteen text fields, which is the slow path this page was built to
   replace. A link to an interface too laggy to use is worse than no link.
+  **"Open application" on `/apply` is not that link coming back** (added 2026-08-26). It
+  opens the *form* — `Session.url`, the page the browser actually landed on — in a tab of
+  your own browser, for reading the parts the discovery pass could not mirror. Nothing
+  about it reaches the window or the host's display, and typing in it changes nothing
+  here: two tabs on one anonymous form share no draft, which is the same fact that makes
+  this a browser rather than a link in the first place. It is scheme-checked like every
+  other third-party URL these pages render.
   **`DISPLAY` and Xvfb stay** — Chromium will not launch headful without a display, and
   headless is a different bot-detection posture. The window is an implementation detail
   nobody looks at, not a thing that stopped existing.
@@ -1196,6 +1214,29 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   neighbour. Commands carry the `epoch` they were written against and are dropped on a
   mismatch, in the drain, where nothing can bypass it. This is the one way this feature
   could put an answer you did not give into a field you cannot see.
+- **But stopping is not an ending** (2026-08-26). The page held the epoch check and then
+  disabled every field and waited for a Reload nobody had a reason to press — which is
+  what attaching a resume looked like, because Greenhouse's file row re-renders into a
+  filename and a remove control the moment it takes a file. A correct bump, and a dead
+  page: *"it hangs and I cannot touch anything else"*. The handles the page holds are
+  stale; the **server's** rendering of them is not, and re-reading it is exactly what a
+  reload does, so the page reloads itself. It asks only when it cannot — a reload while
+  you are typing discards the sentence you are in, and one with a push in flight lands
+  before its outcome does. The guard is read **before** anything is disabled, or it is
+  reading a page it has just blurred; a file picker deliberately does not count as
+  typing, since it is the row that most reliably moves the epoch.
+- **`reset` is the sixth name in the vocabulary** (2026-08-26), and it is `clear` over
+  every field at once — on `clear`'s side of the activation line by the same test, since
+  emptying reaches nothing a fill does not. It is one command rather than a loop of
+  clears from the page because `_clear` re-reads the form on its way out: thirty of those
+  is thirty chances for the shape to change under the remaining handles, after which
+  every later clear is correctly dropped and a reset that emptied four fields of thirty
+  is reported as a whole one. It touches only rows holding something (a `gap` is a
+  question nobody had an answer for; `cleared` is one you emptied on purpose), and a
+  field that will not give its value up stays `refused` holding it. It is the **one
+  command carrying no epoch** — it names no handle from the page's side, which is what
+  makes it the way out of a form that has moved, where every per-field command is refused
+  by design.
 - **But the epoch moves only when the handles actually moved.** A successful write
   re-reads the form (questions get revealed by answers). Bumping every time would mean the
   second field you typed is refused because the first one succeeded — every edit poisoning
@@ -1310,6 +1351,22 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   shows the *server's* disk, so this upload is the file transfer, and a file route left
   out of that set reads its body as `{}` and reports "no file". Validation, naming and the
   atomic write are `resumes`', unchanged — there is no second way a file reaches this box.
+- **The cap on the body is not the cap on the file** (2026-08-26). Base64 is ~4/3 of what
+  it encodes, so a body capped at `resumes.MAX_UPLOAD` refused every file over about three
+  quarters of the documented limit — and refused it *as an empty payload*, so the message
+  quoting that limit could never be the thing that fired, and the reply pointed at the
+  picker instead of at the size. `MAX_UPLOAD_BODY` bounds memory; `resumes.MAX_UPLOAD`
+  describes a resume and is checked after the decode. Over-length is answered **413 in
+  words**, not read as `{}`: it is the one refusal that happens with the body still
+  arriving, so without an answer of its own the client sees a connection closing
+  mid-upload — a request that never finished rather than one that was refused.
+- **Every ending of an upload has to reach the status pill and take `.busy` off.** Only a
+  refusal the server answered used to move it, so a file the reader could not open, a body
+  hung up on, or a request that never came back all left the row reading *"uploading…"* —
+  the word for a request in flight — over a card still wearing `.busy`, which is what
+  stops the poll repainting it. A row frozen mid-word beside a page that will not repaint
+  it is what "the upload hangs" looks like from the outside. Success is `attaching…`,
+  never `filled`: the upload queued a command, and only the poll can see it land.
 - **Handlers live in `server._APPLY_JS`**, emitted only by `render_apply` — the
   button-and-handler-in-the-same-file rule, applied up front. There is a parity test.
 - **"Done — close the window" is the only ending a headless host can reach** (added
@@ -1322,6 +1379,30 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   request may do to the *form*, and this does nothing to the form — and **deliberately
   not conditional on the phase**, because a session stuck mid-fill is exactly the one
   holding the lock. The refusal on the dashboard names the job and points at the page.
+- **"Open prefilled" is also the way *back* to a window already open** (2026-08-26).
+  "A window is already open" is three situations and only one is a collision, and
+  refusing all three made the button worse than the constraint it was enforcing: the
+  dashboard button is the only route to `/apply`, so pressing it for the job you were
+  already filling in refused you — with the page holding Done being the page you could no
+  longer reach. `live.Session.holds` answers it: **the same posting** returns
+  `ok:true, href:/apply` and starts nothing, **a different posting** is a swap
+  (`_close_open_window` asks, waits for the browser thread to release `_APPLY_LOCK`, and
+  takes its place), and **the lock held with no readable session** — the moment between
+  acquiring it and `live.start` — is still a refusal, because there is nothing to ask to
+  close. `CLOSED` is deliberately not "held": sending the click back to a page that can
+  only report the window has gone is absence-read-as-success, one control along.
+  - **The lock is the proof, and nothing launches without it.** `_close_open_window`
+    returns it *held*, because the caller's next act is to launch into it. Releasing in
+    between is a gap a second click walks through, and two threads racing for the one
+    Chromium profile directory fail on the worker thread where nobody sees it — so a
+    swap that timed out and launched anyway would turn a visible refusal into that.
+  - **It blocks the request thread, bounded** (`SWAP_TIMEOUT_S`, 15s), which is the same
+    trade `/api/company`'s verification makes on a single-request `HTTPServer`: the
+    answer decides whether the click succeeds, so nothing on another thread can give it.
+    A window still *filling* does not read `closing` until the fill lands — the same
+    latency Done has always had, same flag — so a long form can outrun the timeout, and
+    the refusal says which window and where the button is rather than waiting on a
+    browser indefinitely.
 - **This did not remove `DISPLAY` or Xvfb**, and must not be read as having done so.
   Chromium still draws somewhere and will not launch headful without a display. What it
   removed, as of 2026-08-22, is every reason to look at it: the viewer link is gone, the

@@ -19,7 +19,7 @@ never touch `page`. So a request enqueues a command and returns; the browser thr
 drains the queue inside the poll it was already doing, and the outcome comes back on the
 next snapshot. Nothing here blocks on a browser.
 
-**A command points, it does not write.** The vocabulary is five names, and a command
+**A command points, it does not write.** The vocabulary is six names, and a command
 carries a field *handle* — an opaque token minted by the discovery pass — never a
 selector, never an expression, never anything the browser thread evaluates. That is
 `browser.py`'s no-click rule carried across this channel, for the same reason: there must
@@ -83,11 +83,12 @@ CLOSED = "closed"
 # list with a test on it, not an open protocol.
 SET = "set"                # put a value in one field, by handle
 CLEAR = "clear"            # empty one field, by handle
+RESET = "reset"            # empty every field the form is holding, in one pass
 REDISCOVER = "rediscover"  # read the form again; its shape may have changed
 SHOOT = "shoot"            # take a preview screenshot
 HIGHLIGHT = "highlight"    # outline one field, so the preview follows what you edit
 
-VOCABULARY = frozenset({SET, CLEAR, REDISCOVER, SHOOT, HIGHLIGHT})
+VOCABULARY = frozenset({SET, CLEAR, RESET, REDISCOVER, SHOOT, HIGHLIGHT})
 
 # `CLEAR` is its own name rather than `SET` with an empty value, for two reasons that both
 # bite. A `file` row's value is a path on this machine, so `""` there is not "no text" but
@@ -97,7 +98,15 @@ VOCABULARY = frozenset({SET, CLEAR, REDISCOVER, SHOOT, HIGHLIGHT})
 #
 # It stays inside the vocabulary because it still cannot activate anything: emptying a
 # field is the exact inverse of filling one. Submitting is not, which is why it is a
-# session flag and not a sixth name here — see `Session.request_submit`.
+# session flag and not another name here — see `Session.request_submit`.
+#
+# `RESET` is `CLEAR` over the whole form and is a name of its own rather than a loop of
+# clears from the page, for a reason that is the epoch's: a successful clear re-reads the
+# form, so a shape change part-way through a loop would leave every later handle stale
+# and every later clear correctly dropped. That is half a reset, on a form you are about
+# to send, reported as a whole one. Taken as a single command it names no handle from
+# outside at all — it empties whatever the browser thread is holding at the moment it
+# runs — which is also why it is the one command that carries no epoch and needs none.
 
 # Row statuses. `refused` is a real outcome and not an error: a dropdown that does not
 # offer the answer we hold is a question we cannot answer, and saying so beats picking
@@ -124,7 +133,7 @@ class Command:
     kind: str
     handle: str = ""
     value: str = ""
-    epoch: int = -1  # -1 means "not tied to a discovery" — SHOOT and REDISCOVER
+    epoch: int = -1  # -1 means "not tied to a discovery" — SHOOT, REDISCOVER, RESET
 
 
 def rows_from(found: list, fields: list, carried: Optional[dict] = None) -> list:
@@ -377,6 +386,21 @@ class Session:
     def close_requested(self) -> bool:
         with self.lock:
             return self.closing
+
+    def holds(self, company: str, ats_job_id: str) -> bool:
+        """Whether this session is the live window for that posting.
+
+        `CLOSED` is not held, and the distinction is the whole point of asking. A session
+        whose window has gone is a page that can do nothing but say so, so reading it as
+        "you are already there" would send the click to a dead form instead of opening a
+        real one. Everything else — opening, filling, ready, submitted — is a window you
+        can still go back to, which is what the dashboard button needs to know: reopening
+        the job that is already open is the way back to it, not a collision with it.
+        """
+        with self.lock:
+            return (self.phase != CLOSED
+                    and self.company == company
+                    and self.ats_job_id == ats_job_id)
 
     # -- sending it ------------------------------------------------------------------
     def set_submit_control(self, control: Optional[dict]) -> None:

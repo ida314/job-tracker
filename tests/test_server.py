@@ -10,12 +10,14 @@ import html
 import inspect
 import json
 import re
+import threading
+import time
 from html.parser import HTMLParser
 
 import pytest
 import yaml
 
-from jobtracker import config, curation, models, server, store
+from jobtracker import config, curation, dashboard, models, server, store
 from jobtracker.criteria import load_criteria
 
 # Titles, locations and URLs all arrive from third-party ATS APIs and are
@@ -479,19 +481,154 @@ def test_apply_to_says_so_when_there_is_no_browser_to_drive(tmp_path, monkeypatc
     assert "playwright is not installed" in res["error"]
 
 
-def test_apply_to_refuses_a_second_window_while_one_is_open(tmp_path, monkeypatch):
-    """One browser profile directory, which Chromium locks. Two at once cannot work."""
-    from jobtracker import browser
+def test_apply_to_refuses_a_second_window_while_one_is_still_opening(
+        tmp_path, monkeypatch):
+    """One browser profile directory, which Chromium locks. Two at once cannot work.
+
+    The lock held with no readable session is the half-second between acquiring it and
+    `live.start`, and it is the one case with nothing to ask to close — so it is still a
+    refusal, and a fast one rather than a fifteen-second wait for a window that was
+    never there.
+    """
+    from jobtracker import browser, live
 
     monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
     handler = _apply_handler(tmp_path, monkeypatch)
+    live.CURRENT = None
 
     assert server._APPLY_LOCK.acquire(blocking=False)   # a window is open
     try:
         res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
     finally:
         server._APPLY_LOCK.release()
-    assert res["ok"] is False and "already open" in res["error"]
+    assert res["ok"] is False and "already open" not in res["error"]
+    assert "try again" in res["error"]
+
+
+def test_reopening_the_job_already_open_goes_back_to_it(tmp_path, monkeypatch):
+    """The bug this replaced: the button was the only route to the page holding Done.
+
+    Open a window, navigate back to the dashboard, press the same button again — and be
+    told a window is already open, by the one control that could have taken you to it.
+    The session was then unreachable and unclosable short of restarting `serve`.
+
+    Nothing is launched here: no new session, and the lock is left exactly as it was
+    found, because the window asked for is the window that is already up.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    handler = _apply_handler(tmp_path, monkeypatch)
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    session.set_phase(live.READY)
+
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+    finally:
+        server._APPLY_LOCK.release()
+    assert res["ok"] is True and res["href"] == "/apply"
+    assert "already open" in res["detail"]
+    assert live.current() is session          # not restarted
+    assert session.close_requested() is False  # and not closed on the way past
+
+
+def test_a_closed_session_for_the_same_job_is_not_a_window_to_go_back_to(tmp_path):
+    """`CLOSED` is a page that can only report that it has gone.
+
+    Answering "you are already there" for one would send the click to a dead form
+    instead of opening a real one — absence read as success, one control along.
+    """
+    from jobtracker import live
+
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    assert session.holds("Acme", "1") is True
+    assert session.holds("Acme", "2") is False
+    assert session.holds("Other", "1") is False
+    session.set_phase(live.CLOSED)
+    assert session.holds("Acme", "1") is False
+
+
+def test_opening_another_job_closes_the_window_that_is_open(tmp_path, monkeypatch):
+    """A different job is a swap you asked for, not a collision.
+
+    Closing the open window is what you would have done by hand, so `_api_apply_to`
+    does it: it asks, waits for the browser thread to release the lock — which is the
+    only proof the profile directory is free — and takes its place.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    started = threading.Event()
+    monkeypatch.setattr(browser, "fill_application",
+                        lambda *a, **k: started.set())
+    handler = _apply_handler(tmp_path, monkeypatch)
+
+    old = live.start("Acme", "9", "Some Other Role", "https://x/other")
+    old.set_phase(live.READY)
+    assert server._APPLY_LOCK.acquire(blocking=False)
+
+    # Stands in for the hold loop: it reads `closing` in the tick it is already doing,
+    # then the browser thread releases the lock on its way out.
+    def _hold():
+        while not old.close_requested():
+            time.sleep(0.01)
+        old.set_phase(live.CLOSED)
+        server._APPLY_LOCK.release()
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+        assert started.wait(5), "the new window never launched"
+    finally:
+        holder.join(5)
+        # The worker's own `finally` releases it; waiting for that rather than
+        # releasing here is what keeps this test from racing the code it is testing.
+        for _ in range(200):
+            if not server._APPLY_LOCK.locked():
+                break
+            time.sleep(0.01)
+        else:  # pragma: no cover — only if the swap left the lock held
+            server._APPLY_LOCK.release()
+
+    assert res["ok"] is True and res["href"] == "/apply"
+    assert old.close_requested() is True
+    assert "closed Some Other Role" in res["detail"]
+    # The new session replaced it, and the old one is not what the page will find.
+    assert live.current() is not old
+    assert (live.current().company, live.current().ats_job_id) == ("Acme", "1")
+
+
+def test_a_window_that_will_not_close_is_a_refusal_not_a_second_browser(
+        tmp_path, monkeypatch):
+    """The lock is the proof, and without it nothing may launch.
+
+    Chromium locks the one profile directory, so starting a second browser into it fails
+    on the worker thread where nobody sees it. A swap that timed out and launched anyway
+    would turn a visible refusal into that.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(server, "SWAP_TIMEOUT_S", 0.05)
+    launched = []
+    monkeypatch.setattr(browser, "fill_application",
+                        lambda *a, **k: launched.append(1))
+    handler = _apply_handler(tmp_path, monkeypatch)
+
+    old = live.start("Acme", "9", "Stuck Role", "https://x/other")
+    old.set_phase(live.FILLING)
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+    finally:
+        server._APPLY_LOCK.release()
+
+    assert res["ok"] is False and "did not close" in res["error"]
+    assert "Stuck Role" in res["error"]
+    assert not launched
+    assert live.current() is old
 
 
 # -- the answer bank, collected from the page ---------------------------------------
@@ -1507,6 +1644,62 @@ def test_zero_fields_renders_as_no_form_found(tmp_path):
     conn.close()
 
 
+def _unterminated_strings(script: str) -> list:
+    """Lines of an emitted script that end while still inside a `'...'` or `"..."`.
+
+    JavaScript string literals cannot carry a raw newline, so every one of these is a
+    `SyntaxError` — and a `SyntaxError` anywhere in a script kills the whole script, not
+    the statement it is in.
+    """
+    bad, block = [], False
+    for number, line in enumerate(script.splitlines(), 1):
+        quote, i = None, 0
+        while i < len(line):
+            char = line[i]
+            if block:
+                if line.startswith("*/", i):
+                    block = False
+                    i += 1
+            elif quote:
+                if char == "\\":
+                    i += 1
+                elif char == quote:
+                    quote = None
+            elif line.startswith("//", i):
+                break
+            elif line.startswith("/*", i):
+                block, i = True, i + 1
+            elif char in "'\"":
+                quote = char
+            elif char == "`":
+                break            # a template literal may span lines, and several do
+            i += 1
+        if quote:
+            bad.append(f"line {number}: {line.strip()[:70]}")
+    return bad
+
+
+def test_no_emitted_script_carries_a_newline_inside_a_string():
+    """`\\n` in a JS string is two characters; `\\\\n` is what a non-raw Python
+    docstring has to spell to emit them.
+
+    `server._JS` had three of the first (2026-08-19 to 2026-08-26), which put a real
+    newline inside a quoted literal and made the entire script a `SyntaxError` — so
+    every handler it carries was dead on all four pages that emit it: the tuning page's
+    rule controls, Settings' answer saves, Applications' status buttons and the Add a
+    company form. Exactly the "Open prefilled" failure — a button whose handler is not
+    on the page — with a different cause and four times the reach, and it was invisible
+    because a page with no script still renders perfectly.
+
+    This is what the parity tests cannot see: they check that a handler was written, not
+    that the script it is in survives being parsed.
+    """
+    for name, script in (("server._JS", server._JS),
+                         ("server._APPLY_JS", server._APPLY_JS),
+                         ("dashboard._JS", dashboard._JS)):
+        assert _unterminated_strings(script) == [], name
+
+
 def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_path):
     """A button whose handler is on another page is indistinguishable from a broken one.
 
@@ -1520,8 +1713,10 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
 
     script = page[page.rindex("<script>"):]
     ids = set(re.findall(r'id="([a-z]+)"', page))
-    assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone"} <= ids
-    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone"):
+    assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone",
+            "resetform", "resetmsg"} <= ids
+    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone",
+                    "resetform", "resetmsg"):
         assert f"getElementById('{element}')" in script, element
     for hook in ("lf-file", "lf-detach", "tobank", "bankkey", "savebank", "bankval",
                  ".lv"):
@@ -1532,8 +1727,177 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     assert 'list="bankkeys"' in page and '<datalist id="bankkeys">' in page
     for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
                      "/api/session/highlight", "/api/session/rediscover",
-                     "/api/session/file", "/api/session/close", "/api/answer"):
+                     "/api/session/reset", "/api/session/file", "/api/session/close",
+                     "/api/answer"):
         assert endpoint in script, endpoint
+
+
+def test_a_resume_at_the_documented_limit_actually_fits_in_the_body(tmp_path):
+    """The two caps are about two different things and only one of them bounds memory.
+
+    `validate_upload` refuses a *file* over `resumes.MAX_UPLOAD`, and quotes that number
+    in the message. The body carrying it is base64, so ~4/3 of it — and while the body
+    was capped at the same number, every file over about three quarters of the documented
+    limit was refused before the decode, as an empty payload reported as "no file". The
+    limit the message names could never be the thing that fired.
+    """
+    import base64
+
+    from jobtracker import resumes as resumes_mod
+
+    biggest = base64.b64encode(b"x" * resumes_mod.MAX_UPLOAD)
+    body = json.dumps({"filename": "cv.pdf", "content": biggest.decode()})
+    assert len(body) <= server.MAX_UPLOAD_BODY
+
+    # And it is still a bound, not an opening: a decision POST cannot buffer one.
+    assert server.MAX_BODY < server.MAX_UPLOAD_BODY < 2 * resumes_mod.MAX_UPLOAD
+
+
+def test_the_page_knows_the_limit_the_server_enforces(tmp_path):
+    """Duplicated numbers drift, and this pair drifts into a silent failure: a client
+    that thinks the cap is larger sends a body the server hangs up on mid-upload, which
+    on the other side is a request that never comes back rather than a refusal."""
+    from jobtracker import resumes as resumes_mod
+
+    assert f"var MAX_UPLOAD_BYTES = {resumes_mod.MAX_UPLOAD};" in server._APPLY_JS
+
+
+def test_every_ending_of_an_upload_reaches_the_status_pill(tmp_path):
+    """"uploading…" is the word for a request in flight, and it was also the word for
+    one that had already failed.
+
+    A file the reader could not open, a body the server hung up on, and a request that
+    never came back all left the pill reading it for the rest of the session — over a
+    card still wearing `.busy`, which is what keeps the poll from painting the row. A row
+    that has gone quiet next to a page that will not repaint it is what "it hangs and I
+    cannot touch anything else" looks like from here.
+    """
+    js = server._APPLY_JS
+    branch = js[js.index("classList.contains('lf-file')"):]
+    branch = branch[:branch.index("\n    }")]
+
+    # Every ending, and every one of them takes `.busy` off with it.
+    assert "reader.onerror" in branch
+    assert ".catch(" in branch
+    assert branch.count("done(") >= 4
+    assert "card.classList.remove('busy')" in branch
+    # Never "filled": the upload queued a command, and only the poll can see it land.
+    assert "'filled'" not in branch
+
+
+def test_an_over_length_body_is_refused_in_words_rather_than_read_as_empty(tmp_path):
+    """The one refusal that happens with the body still arriving.
+
+    Read as `{}` it reached the endpoint as a payload with no fields in it and came back
+    "no file" — true of the request, false about the problem, and pointing at the picker
+    rather than at the file. And the connection closes mid-upload either way, so without
+    an answer of its own the client sees a request that never finished.
+    """
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    h.path = "/api/session/file"
+    h.headers = {"Content-Length": str(server.MAX_UPLOAD_BODY + 1)}
+    sent = {}
+    h._send_json = lambda payload, status=200: sent.update(payload=payload, status=status)
+
+    h.do_POST()
+
+    assert sent["status"] == 413
+    assert sent["payload"]["ok"] is False
+    assert "larger than" in sent["payload"]["error"]
+
+
+def test_a_form_that_moved_is_read_again_rather_than_left_inert(tmp_path):
+    """Stopping is not an ending, and treating it as one is what made a resume look
+    like a hang.
+
+    Greenhouse's file row re-renders into a filename and a remove control the moment it
+    takes a file. That is a shape change, which is a correct epoch bump — and the page
+    then disabled every field on it and waited for a Reload nobody had a reason to
+    press, over a browser that was working perfectly. The handles are stale; the
+    server's rendering of them is not, and re-reading it is exactly what a reload does.
+
+    The guard is asked *before* anything is disabled: disabling the field you are in
+    blurs it, so a guard read afterwards is reading a page it has just cleared.
+    """
+    js = server._APPLY_JS
+    branch = js[js.index("if (s.epoch !== epoch) {"):]
+    branch = branch[:branch.index("\n      }")]
+
+    assert "location.reload()" in branch
+    assert branch.index("busyNow()") < branch.index("el.disabled = true")
+    # And it stops polling on the way out, or the reload races a tick that would run
+    # this branch again.
+    assert "stopped = true" in branch
+
+
+def test_the_form_can_be_emptied_from_the_page_that_mirrors_it(tmp_path):
+    """One command on the thread that owns the page, not a clear per row from here.
+
+    `_clear` re-reads the form on its way out, so a loop of thirty clears from this side
+    goes stale the first time emptying something changes the form's shape — and every
+    later one is then correctly dropped, leaving a reset that emptied four fields
+    reported as a whole one.
+    """
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    assert h._api_session_reset()["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.kind == live_mod.RESET
+    assert session.commands.empty(), "one command, not one per field"
+
+
+def test_resetting_carries_no_handle_and_no_epoch(tmp_path):
+    """Which is what makes it the way out of a form that has moved under the page.
+
+    Every per-field command is refused there, correctly — the handles this side is
+    holding name their neighbours now. Reset names nothing from this side at all, so
+    there is no handle of ours that could have gone stale, and the epoch it would be
+    checked against is one it has no reason to carry.
+    """
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.epoch += 99                       # the form moved; the page does not know
+
+    assert h._api_session_reset()["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.handle == "" and command.value == ""
+    assert command.epoch == -1
+
+
+def test_the_page_offers_the_real_form_in_a_tab_of_your_own_browser(tmp_path):
+    """"Open application" is the form itself, not the window drawing it.
+
+    The window is on the machine running `serve` and nothing here links to it — that was
+    the remote-desktop viewer this page replaced, and a video stream for fifteen text
+    fields is not coming back. What this opens is the URL the browser actually landed
+    on, so a Greenhouse embed or an Ashby `/application` opens the page the preview is a
+    picture of, for the parts the discovery pass could not mirror.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+
+    assert 'href="https://x/apply" target="_blank" rel="noopener noreferrer"' in page
+    assert "Open application" in page
+    # And no link to a viewer of the window came back with it.
+    for gone in ("vnc", "novnc", "xpra", "BROWSER_VIEW_URL"):
+        assert gone not in page, gone
+
+
+def test_the_link_to_the_form_refuses_a_scheme_that_would_run(tmp_path):
+    """The session's URL is where an ATS redirected the browser, which is third-party
+    text like every other URL on these pages. `javascript:` in an href runs on click."""
+    session = _live_session()
+    session.retarget("javascript:alert(1)")
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "javascript:alert" not in page
+    assert 'href="#" target="_blank"' in page
 
 
 def test_saving_to_the_bank_is_offered_by_default(tmp_path):
@@ -1610,7 +1974,8 @@ def test_the_only_way_to_submit_is_armed_and_one_shot(tmp_path):
 
     # And still not something the queue can carry: `submit` is a session-level gate, so
     # nothing that reaches `Session.submit` can activate a control.
-    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert live_mod.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
+                                   "highlight"}
     assert "submit" not in live_mod.VOCABULARY
     session = live_mod.current()
     assert session.submit(live_mod.Command(kind="submit", handle="jt0")) is False
@@ -2089,7 +2454,8 @@ def test_the_window_can_be_closed_from_the_page(tmp_path):
     assert h._api_session_close()["ok"] is True
     assert session.close_requested() is True
     assert session.commands.empty()
-    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert live_mod.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
+                                   "highlight"}
 
 
 def test_closing_works_from_any_phase(tmp_path):
@@ -2107,11 +2473,25 @@ def test_closing_works_from_any_phase(tmp_path):
     assert h._api_session_close()["ok"] is False
 
 
-def test_a_refused_open_says_where_the_way_out_is(tmp_path):
-    """"Close it first" was advice with no way to take it on a headless host."""
-    source = inspect.getsource(server.Handler._api_apply_to)
-    start = source.index("a prefilled window is already open")
-    assert "Fill in page" in source[start:start + 200]
+def test_a_refused_open_says_where_the_way_out_is(tmp_path, monkeypatch):
+    """"Close it first" was advice with no way to take it on a headless host.
+
+    Read off the refusal itself rather than off the source — the wording moved once and
+    a source-grep is what noticed, which is the wrong thing to be checking. Only one
+    refusal is left here: a window that would not close. The other two became a way
+    through instead, the same job going back to it and a different one taking its place.
+    """
+    from jobtracker import live
+
+    monkeypatch.setattr(server, "SWAP_TIMEOUT_S", 0.05)
+    session = live.start("Acme", "9", "Stuck Role", "https://x/other")
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        note, error = server._close_open_window(session)
+    finally:
+        server._APPLY_LOCK.release()
+    assert note == ""
+    assert "Stuck Role" in error and "Fill in page" in error
 
 
 def test_a_set_with_an_unreadable_epoch_is_refused_rather_than_guessed(tmp_path):
