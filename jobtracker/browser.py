@@ -687,6 +687,14 @@ def fill_application(
             # `FormField`s, which carry no handle — and the handle is the only thing
             # that identifies an input on the live page.
             statuses: dict = {}
+            # What a refused dropdown had to read in order to refuse, kept until there is
+            # a session to publish it into. The fill runs before `live.start`, so a
+            # refusal here cannot call `Session.offer` the way `_obey` does — and this is
+            # the refusal that matters most, because it is the one already on the page
+            # when you first open it. Without this, "would not take it" arrived with no
+            # list attached and the row could only offer you a Look up button for a menu
+            # it had *just* read.
+            offers: dict = {}
             for raw, field_ in zip(found, fields):
                 entry = (
                     index.get(field_.key)
@@ -711,8 +719,9 @@ def fill_application(
                     _remember(conn, company.name, field_, None, today)
                     continue
 
+                seen: list = []
                 if _write(surface, raw, value, _upload_name(answers, question_key,
-                                                             value)):
+                                                             value), seen):
                     report.filled.append(Filled(
                         handle=raw["handle"], label=field_.label,
                         type=field_.type, value=value, question_key=question_key,
@@ -722,6 +731,8 @@ def fill_application(
                 else:
                     report.gaps.append(field_)
                     statuses[raw["handle"]] = (live.REFUSED, "", question_key)
+                    if seen:
+                        offers[raw["handle"]] = (value, seen)
                     if field_.required:
                         unfilled_required.append(raw["handle"])
                     # A refused answer must not be remembered as this question's key.
@@ -766,6 +777,11 @@ def fill_application(
                 carried = {f.key: statuses.get(r["handle"], (live.PENDING, "", None))
                            for r, f in zip(found, fields)}
                 session.absorb(live.rows_from(found, fields, carried))
+                # After `absorb`, never before: `rows_from` builds fresh rows carrying no
+                # offer, so publishing first would be overwritten by the rows it is about.
+                # Same ordering `_obey`'s search branch keeps for the same reason.
+                for handle, (query, options) in offers.items():
+                    session.offer(handle, query, options)
                 session.set_submit_control(_find_submit(surface))
                 session.set_phase(live.READY, report.summary())
 

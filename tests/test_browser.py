@@ -1819,3 +1819,24 @@ def test_the_launch_failure_never_comes_back_empty_handed():
     from pathlib import Path
 
     assert browser._why_no_browser([], Path("/data/browser")).strip()
+
+
+def test_the_first_refusal_on_the_page_arrives_with_its_menu_attached():
+    """The refusal that matters most is the one already there when you open `/apply`.
+
+    `_obey` publishes what a refused `_pick` saw, but the *initial* fill runs before
+    `live.start` exists, so its refusals had nowhere to put the reading and the row
+    opened saying "would not take it" with an empty dropdown — for a menu the fill had
+    just finished reading. Measured against Vercel's live Greenhouse form: Location
+    (City) came back `refused` with `offered: []`.
+
+    Asserted on the source because reaching it otherwise means driving a real browser
+    through `fill_application`: the fill must hand `_write` somewhere to record what it
+    saw, and must publish it *after* `absorb`, since `rows_from` builds rows carrying no
+    offer and would overwrite an earlier one.
+    """
+    src = inspect.getsource(browser.fill_application)
+    assert "offers[raw[\"handle\"]] = (value, seen)" in src
+    absorb = src.index("session.absorb(")
+    publish = src.index("session.offer(")
+    assert absorb < publish, "publishing before absorb is overwritten by rows_from"
