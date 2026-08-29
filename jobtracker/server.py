@@ -612,19 +612,28 @@ def _tracked_companies(conn: sqlite3.Connection, companies) -> list:
         p.append("</tbody></table>")
     return p
 
-def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
+def render_apply(conn: sqlite3.Connection, session, answers_path=None,
+                 view_url: str = "") -> str:
     """The live application form, mirrored into fields you can actually type in.
 
     Pure read — it never writes to `conn`, and it never touches the browser. Everything
     it renders comes from the `live.Session` the worker thread publishes into.
 
-    **This page is the whole job.** The window is on the machine running `serve`, and
-    there is no longer anything anywhere that links you to it: reaching it meant a remote
-    X server shipping video frames for a task that is fifteen text fields, and the lag was
-    structural rather than a tuning problem. So the window is an implementation detail —
-    it still draws on a display, because Chromium has to, and nobody looks at it. What you
-    read instead is the preview: a still of the whole form, a few seconds behind, over
-    fields that are local and instant.
+    **This page is the whole job, and `view_url` is where it runs out.** The window is on
+    the machine running `serve`, and typing in it meant a remote X server shipping video
+    frames for a task that is fifteen text fields — the lag was structural, not a tuning
+    problem, which is why the fields are here and why the link to that window was deleted
+    on 2026-08-22.
+
+    It is back, as a fallback and labelled as one. The mirror can only carry what the
+    discovery pass could read and what `_write` can put into it, and there is a residue
+    that fails both tests: a captcha, a dropzone, a widget that will not take a value
+    however it is written. For that residue the answer had become "open the window", with
+    nothing anywhere that opened it — a supported way of working that no control on any
+    page led to. A slow interface you can reach beats a fast one that has stopped at the
+    thing you need. It renders only when `JOBTRACKER_BROWSER_VIEW_URL` is set, and it sits
+    beside the preview rather than beside the fields, because it is what you reach for
+    when the picture shows something the rows do not.
     """
     p = [
         "<!doctype html><meta charset=utf-8><title>Fill in</title>",
@@ -695,14 +704,27 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
     #
     # Typing in it changes nothing here. Two tabs on one anonymous form share no draft,
     # which is the same fact that makes this whole feature a browser rather than a link.
-    p.append(
-        '<div class="phead">Preview '
-        '<button id="pause" data-paused="0">Pause</button>'
-        '<button id="zoom" data-fit="1">100%</button>'
+    #
+    # "View window" is the other thing entirely: the browser `serve` is driving, on that
+    # host's display, through whatever viewer `JOBTRACKER_BROWSER_VIEW_URL` names. It is
+    # the *same* form the fields below write into — the one holding your fill — which is
+    # exactly what "Open application" is not. Rendered only when the URL is configured,
+    # and last in the row, because it is the fallback: everything to the left of it is
+    # faster, and this is what is left when a field will not take a value at all.
+    phead = [
+        '<div class="phead">Preview ',
+        '<button id="pause" data-paused="0">Pause</button>',
+        '<button id="zoom" data-fit="1">100%</button>',
         f'<a class="btn openapp" href="{dashboard_mod._safe_url(snap["url"])}" '
-        'target="_blank" rel="noopener noreferrer">Open application</a>'
-        '<span class="ago" id="ago"></span></div>'
-    )
+        'target="_blank" rel="noopener noreferrer">Open application</a>',
+    ]
+    if view_url:
+        phead.append(
+            f'<a class="btn viewwin" href="{dashboard_mod._safe_url(view_url)}" '
+            'target="_blank" rel="noopener noreferrer">View window ↗</a>'
+        )
+    phead.append('<span class="ago" id="ago"></span></div>')
+    p.append("".join(phead))
     # A still of the *whole* form, refreshed on a cadence — not a stream. What this page
     # replaces was a stream, and being a stream is why it was slow.
     #
@@ -792,10 +814,18 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None) -> str:
     # The mirror can only show what the discovery pass could see — a collapsed section,
     # a drag-and-drop dropzone or a rich-text editor is not an input and never appears
     # here. Saying so beats implying the list is the whole form.
+    # The sentence already said the residue is "only in the window"; until the viewer
+    # link came back there was nothing on any page that took you to one, which made it a
+    # statement of where the feature ends rather than a way through it.
+    reach = (' <a class="viewwin" href="' + dashboard_mod._safe_url(view_url) + '" '
+             'target="_blank" rel="noopener noreferrer">View window ↗</a> to reach it.'
+             if view_url else
+             " Set <code>JOBTRACKER_BROWSER_VIEW_URL</code> to get a link to it "
+             "from here.")
     p.append(
         "<p class=note>These are the fields read off the page. Anything it could not "
         "read — a custom widget, a collapsed section, a captcha — is only in the "
-        "window.</p>"
+        f"window.{reach}</p>"
     )
     p.append("</div>")
 
@@ -1627,7 +1657,8 @@ class Handler(BaseHTTPRequestHandler):
                 conn = self._conn()
                 try:
                     page = render_apply(conn, live.current(),
-                                       self.server.answers_path)
+                                       self.server.answers_path,
+                                       config.BROWSER_VIEW_URL)
                 finally:
                     conn.close()
                 self._send(page)
@@ -3232,6 +3263,11 @@ padding:.05rem .4rem;border-radius:99px}
    without a rule of its own it rendered unstyled, which read as neither. */
 .st-cleared{opacity:.75;background:rgba(127,127,127,.14);border:1px solid currentColor}
 .lf.busy{opacity:.6}
+/* The fallback, and last in the row on purpose. It is the browser `serve` is driving, on
+   that host's display, through whatever viewer JOBTRACKER_BROWSER_VIEW_URL names —
+   slower than everything to its left, and the only thing that reaches a captcha or a
+   widget no write will move. */
+.viewwin{font-weight:600}
 /* A link that acts as a button. `button{}` above styles the element, not the role, so
    without this "Open application" renders as bare underlined text in a row of buttons. */
 a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;

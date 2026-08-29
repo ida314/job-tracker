@@ -472,14 +472,23 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   `serve` restarted. `_hold_until_closed` waits in `page.wait_for_timeout(500)`; both
   endings then arrive as an empty page list or `TargetClosedError`. Measured against a
   real browser 2026-08-16, and there is a test asserting the call is still there.
-- **The browser opens on the machine running `serve`, not the machine viewing the page**,
-  and as of 2026-08-22 **nothing in this app links you to it**. `JOBTRACKER_BROWSER_VIEW_URL`
-  and both "View window" links are deleted; `config.BROWSER_VIEW_URL` no longer exists.
-  They pointed at a remote-desktop view of that host's display (noVNC, xpra, …) and existed
-  for the two things the mirror could not do — read the application over, and send it. The
-  full-page preview is the first and `/apply`'s Submit is the second, so what was left was a
-  video stream for fifteen text fields, which is the slow path this page was built to
-  replace. A link to an interface too laggy to use is worse than no link.
+- **The browser opens on the machine running `serve`, not the machine viewing the page.**
+  From 2026-08-22 to 2026-08-29 nothing in this app linked you to it: `JOBTRACKER_BROWSER
+  _VIEW_URL` and both "View window" links were deleted, because they existed for the two
+  things the mirror could not do — read the application over, and send it — and the
+  full-page preview is the first while `/apply`'s Submit is the second. What was left was
+  a video stream for fifteen text fields, which is the slow path this page was built to
+  replace.
+  **It is back as a fallback, on `/apply` only** (2026-08-29). That deletion was right
+  about the main flow and wrong about the last resort: the mirror carries what the
+  discovery pass could read and what `_write` can move, and the residue that is neither —
+  a captcha, a dropzone, a widget that will not take a value however it is written — had
+  "open the window" as its documented answer with nothing anywhere that opened one. A slow
+  interface you can reach beats a fast one that stops at the thing you need. `config.
+  BROWSER_VIEW_URL` exists again; set it and `/apply` renders **View window ↗** beside the
+  preview and again in the sentence about what the mirror could not read, unset it and
+  neither renders. **The Today card's link did not come back** — nothing there has a
+  window open yet — and the URL is `_safe_url`-checked like every other third-party href.
   **"Open application" on `/apply` is not that link coming back** (added 2026-08-26). It
   opens the *form* — `Session.url`, the page the browser actually landed on — in a tab of
   your own browser, for reading the parts the discovery pass could not mirror. Nothing
@@ -1405,12 +1414,13 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
     browser indefinitely.
 - **This did not remove `DISPLAY` or Xvfb**, and must not be read as having done so.
   Chromium still draws somewhere and will not launch headful without a display. What it
-  removed, as of 2026-08-22, is every reason to look at it: the viewer link is gone, the
-  submit is on this page, and the window is an implementation detail. The **viewer units**
-  on gx10 (`jobtracker-x11vnc`, `jobtracker-novnc`) are no longer referenced by anything
-  in the app and can be retired at the deployment layer; `jobtracker-xvfb` cannot.
-  Captchas are the one thing still stuck in the window, and the honest answer there is
-  that a form raising one is a form this cannot finish — see `docs/prefill.md`.
+  removed, as of 2026-08-22, was every *routine* reason to look at it: the submit is on
+  this page and the window is an implementation detail while everything is going well.
+  **Do not retire the viewer units on gx10** (`jobtracker-x11vnc`, `jobtracker-novnc`) —
+  this file said they could be, and 2026-08-29 reversed that: `JOBTRACKER_BROWSER_VIEW_URL`
+  is read again and `/apply` renders a link to them. `jobtracker-xvfb` was never
+  retirable. Captchas are still stuck in the window, and so is every widget no write will
+  move; the difference is that there is now a way to get there — see `docs/prefill.md`.
 
 ## Slug repair
 

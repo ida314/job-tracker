@@ -1882,9 +1882,43 @@ def test_the_page_offers_the_real_form_in_a_tab_of_your_own_browser(tmp_path):
 
     assert 'href="https://x/apply" target="_blank" rel="noopener noreferrer"' in page
     assert "Open application" in page
-    # And no link to a viewer of the window came back with it.
-    for gone in ("vnc", "novnc", "xpra", "BROWSER_VIEW_URL"):
-        assert gone not in page, gone
+    # With no viewer configured there is no viewer link — only the sentence saying what
+    # to set to get one. A dead "View window" over a host with no viewer is the empty
+    # affordance this page keeps out of every other control.
+    assert "View window" not in page
+    assert "JOBTRACKER_BROWSER_VIEW_URL" in page
+
+
+def test_the_window_can_be_reached_when_a_viewer_is_configured(tmp_path):
+    """The fallback, back on 2026-08-29 after being deleted on 2026-08-22.
+
+    Deleting it was right about the main flow and wrong about the last resort. `/apply`
+    mirrors what the discovery pass could read and what `_write` can move; a captcha, a
+    dropzone and a widget that will not take a value are none of those, and for all three
+    the documented answer was "open the window" with nothing anywhere that opened one.
+
+    It is on `/apply` only — the dashboard has no window open yet — and it is
+    `_safe_url`-checked like every other third-party href these pages render.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session(), None, "https://gx10:6080/vnc.html")
+    conn.close()
+
+    assert 'href="https://gx10:6080/vnc.html"' in page
+    assert page.count("View window") == 2      # beside the preview, and in the note
+    assert 'class="btn viewwin"' in page
+    # And it is still not the same link as the form's own.
+    assert 'href="https://x/apply"' in page
+
+
+def test_a_hostile_viewer_url_cannot_smuggle_a_scheme(tmp_path):
+    """It comes out of the environment, which on a container host is not always the same
+    hands as the ones reading the page. Every href here goes through `_safe_url`."""
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session(), None, "javascript:alert(1)")
+    conn.close()
+
+    assert "javascript:alert" not in page
 
 
 def test_the_link_to_the_form_refuses_a_scheme_that_would_run(tmp_path):

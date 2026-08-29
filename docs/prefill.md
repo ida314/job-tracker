@@ -569,13 +569,26 @@ state**. It still needs a display — point `$DISPLAY` at an X server not attach
 monitor (`Xvfb :100`), because Chromium will not launch headful without one — but nothing
 carries that display anywhere and nothing in the app links to it.
 
-**The viewer is gone** (2026-08-22). `JOBTRACKER_BROWSER_VIEW_URL`, the "View window" link
-on the Today card, and the one on this page were all deleted. They existed because the
-window was where you did the two things the mirror could not do: read the application over,
-and submit it. The first is what the full-page preview is for. The second is now `/apply`'s
-Submit button. What is left — a remote X server shipping video frames for fifteen text
-fields — was only ever the slow path, and keeping a link to it advertised an interface that
-does not work well enough to use.
+**The viewer went (2026-08-22) and came back as a fallback (2026-08-29).** It was deleted
+because the window had been where you did the two things the mirror could not do: read the
+application over, and submit it. The first is what the full-page preview is for; the second
+is `/apply`'s Submit button. What was left — a remote X server shipping video frames for
+fifteen text fields — was only ever the slow path.
+
+That was right about the main flow and wrong about the last resort. The mirror carries what
+the discovery pass could read and what `_write` can move, and there is a residue that is
+neither: a captcha, a dropzone, a widget that will not take a value however it is written.
+For that residue the documented answer was "open the window" — with nothing anywhere that
+opened one. A slow interface you can reach beats a fast one that has stopped at the thing
+you need.
+
+So `JOBTRACKER_BROWSER_VIEW_URL` is back and `config.BROWSER_VIEW_URL` exists again. Set it
+to a remote-desktop view of the host's display (noVNC, xpra, …) and `/apply` renders **View
+window ↗** beside the preview, and again in the sentence about what the mirror could not
+read. Unset, neither renders and the sentence says what to set. It is on `/apply` only —
+the Today card's link did **not** come back, because nothing there has a window open yet —
+and the URL goes through `_safe_url` like every other third-party href these pages render.
+The app still neither starts, probes nor knows anything about the viewer.
 
 The static dashboard shows the prefill counts — `prefill 13/16 fields · 3 need you` —
 and **no button**. The counts are useful offline; a button that cannot drive a browser is
@@ -599,7 +612,7 @@ channel from the page you are looking at to that writer.
 ```
 Cloudflare — Backend Engineer, New Grad        [Read the form again] [Reset]
 
-┌ Preview  Pause  100%  Open application ┐  First Name  [ Dylan       ]  filled
+┌ Preview Pause 100% Open application ↗View┐ First Name  [ Dylan      ]  filled
 │  [jpeg of the whole real form]         │    from your answer bank as `first_name`
 │                                        │    [ Dylan          ] [Save]
 │                                        │  Resume/CV   [ Choose file ]  filled
@@ -611,12 +624,15 @@ Review & submit                             3/4 fields filled · 1 need you
 
 **Open application** opens the form itself in a tab of *your* browser — the URL the
 browser actually landed on, so a Greenhouse embed or an Ashby `/application` opens the
-page the preview is a picture of. It is deliberately not a link to the window: that was
-the remote-desktop viewer this page replaced, and a video stream for fifteen text fields
-is not coming back. It is for reading the parts the discovery pass could not mirror — a
-captcha, a collapsed section, a dropzone. Typing in it changes nothing here; two tabs on
-one anonymous form share no draft, which is the same fact that makes this feature a
-browser rather than a link.
+page the preview is a picture of. It is for reading the parts the discovery pass could not
+mirror. Typing in it changes nothing here; two tabs on one anonymous form share no draft,
+which is the same fact that makes this feature a browser rather than a link.
+
+**View window ↗**, when `JOBTRACKER_BROWSER_VIEW_URL` is set, is the other thing entirely:
+the browser `serve` is driving, holding *your* fill, through a remote-desktop view of that
+host's display. It is last in the row and it is the fallback — everything to its left is
+faster, and this is what is left when a field will not take a value at all. See "The viewer
+went and came back" above.
 
 **Reset** empties every field the form is holding and reads it again. It is the way back
 from a fill that went somewhere you did not want it, and from a form that has moved under
