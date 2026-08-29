@@ -912,7 +912,7 @@ def _submit(session, surface, on_submitted=None) -> None:
 def _drain(session, page) -> None:
     """Carry the dashboard's queued commands to the live page, then keep the preview up.
 
-    Runs on the browser thread, once per tick. Every command is one of six names and
+    Runs on the browser thread, once per tick. Every command is one of seven names and
     carries a handle rather than a selector, so there is nothing here that can be pointed
     at an arbitrary element or made to evaluate arbitrary text — see `live.py`.
     """
@@ -945,7 +945,7 @@ def _obey(session, page, command) -> None:
     if command.kind == live.RESET:
         _reset(session, page)
         return
-    if command.kind not in (live.SET, live.CLEAR, live.HIGHLIGHT):
+    if command.kind not in (live.SET, live.CLEAR, live.HIGHLIGHT, live.SEARCH):
         return  # not in the vocabulary; `Session.submit` refused it too
 
     if command.epoch != session.epoch:
@@ -965,6 +965,24 @@ def _obey(session, page, command) -> None:
         page.evaluate(_HIGHLIGHT_JS, [command.handle])
         return
 
+    if command.kind == live.SEARCH:
+        # Ask the widget what it offers, and publish that. Nothing is chosen and nothing
+        # is stored against the employer's form — see `_read_vocabulary`.
+        #
+        # The re-reading is not optional and is not about the shape changing. Typing into
+        # a react-select remounts its input, which takes the `data-jt-id` with it, so
+        # without this the field the page had just searched would be the one field on the
+        # form nothing else could reach. `_reread` re-mints every tag; `signature` says
+        # the handles did not move, so no epoch is spent and the page never notices.
+        # `offer` goes after it, because `rows_from` builds fresh rows with none.
+        offered = _read_vocabulary(page, command.handle, command.value)
+        _reread(session, page)
+        session.offer(command.handle, command.value, offered)
+        log.debug("%s offers %d option(s) for %r",
+                  command.handle, len(offered), command.value)
+        _shoot(session, page)
+        return
+
     # `_write` is the only writer, here as in the fill. It takes the raw DOM finding, of
     # which it reads exactly two keys — so the mirror row stands in for it directly and
     # no second write path exists to keep in step with the first.
@@ -973,6 +991,7 @@ def _obey(session, page, command) -> None:
            # one this is; without it every tick is compared against "yes" and refused.
            "option": row.get("option") or ""}
 
+    seen: list = []
     if command.kind == live.CLEAR:
         done, status = _clear(page, raw), live.CLEARED
     else:
@@ -990,7 +1009,7 @@ def _obey(session, page, command) -> None:
         if row["type"] == "file":
             stem = Path(session.upload_name).stem if session.upload_name else "resume"
             name = f"{stem}{Path(command.value).suffix}"
-        done, status = _write(page, raw, command.value, name), live.FILLED
+        done, status = _write(page, raw, command.value, name, seen), live.FILLED
 
     if done:
         session.mark(command.handle, status, command.value)
@@ -1000,6 +1019,12 @@ def _obey(session, page, command) -> None:
         _reread(session, page)
     else:
         session.mark(command.handle, live.REFUSED, "")
+        # A refused dropdown has already told us what it *would* take — `_pick` read the
+        # open menu in order to decide. Publishing it turns the one status on this page
+        # you could do nothing about into a list to choose from. Nothing is re-read
+        # first: a refusal changed no value, so the rows the offer lands on are current.
+        if seen:
+            session.offer(command.handle, command.value, seen)
     _shoot(session, page)
 
 
@@ -1198,7 +1223,7 @@ _VOCABULARY_JS = """
 """
 
 
-def _read_vocabulary(page, handle: str) -> list:
+def _read_vocabulary(page, handle: str, query: str = "") -> list:
     """Open one combobox, read what it offers, close it again. Never chooses anything.
 
     A combobox holds its options in JavaScript and renders them only while its menu is
@@ -1211,6 +1236,18 @@ def _read_vocabulary(page, handle: str) -> list:
     Read once per company and kept: `store.upsert_form_field` no longer lets a later pass
     erase an option list, so a first visit teaches that employer's form permanently.
 
+    **`query` is the one kind of menu that cannot be read any other way.** Greenhouse's
+    "Location (City)" fetches its options per keystroke, so opening it shows nothing and
+    goes on showing nothing however long you wait — measured on Twilio's live form, it is
+    the only combobox of ten with no "Toggle flyout" button beside it, because there is
+    no list to toggle. Typing is not an extra liberty taken here: it is what `_pick`
+    already does before choosing, in the branch written for exactly this widget. The
+    difference is that this stops there.
+
+    What comes back with a query is *not* a vocabulary and must never be stored as one.
+    It is one widget's answer to one query, which is why `Session.offer` keeps the query
+    beside it and `_learn_vocabularies` — the caller that does persist — never passes one.
+
     Nothing here moves a value. Both presses are the widget's own toggle, scoped to this
     field's control, and the menu is left the way it was found.
     """
@@ -1219,7 +1256,14 @@ def _read_vocabulary(page, handle: str) -> list:
         return []
     try:
         _press(control.first, f"opening {handle} to read its options")
-        page.wait_for_timeout(_MENU_SETTLE_MS)
+        if query:
+            # Into the widget's own search box, which is focused and live now that the
+            # menu is open. The same `fill` does nothing at all while it is closed —
+            # react-select throws the value away on its next render.
+            page.fill(f'[data-jt-ctl="{handle}"] input', query)
+            page.wait_for_timeout(_SEARCH_SETTLE_MS)
+        else:
+            page.wait_for_timeout(_MENU_SETTLE_MS)
         offered = page.evaluate(_VOCABULARY_JS, handle)
         _press(control.first, f"closing {handle}")
         return [str(o) for o in offered]
@@ -1250,7 +1294,7 @@ def _learn_vocabularies(page, found: list, fields: list) -> list:
     return out
 
 
-def _pick(page, handle: str, value: str) -> bool:
+def _pick(page, handle: str, value: str, seen: Optional[list] = None) -> bool:
     """Choose `value` from a combobox by pressing its own option. False if it is not there.
 
     This is where the module's second click lives, and it is here because the alternative
@@ -1273,6 +1317,13 @@ def _pick(page, handle: str, value: str) -> bool:
     Not finding the option is a refusal, not an error, and the menu is closed again on
     the way out. Typing an answer the menu does not offer is the mistake `match_option`
     exists to prevent, one layer down.
+
+    `seen`, when given, is extended with whatever the menu turned out to be offering.
+    That is the same reading the refusal is made from, and passing it back is what stops
+    "would not take it" being a dead end: the widget was opened, the answer was typed,
+    and the list on screen at that moment is precisely what the page needs in order to
+    let you choose from it instead. Discarding it meant every refused dropdown had to be
+    searched again from scratch.
     """
     control = page.locator(f'[data-jt-ctl="{handle}"]')
     if not control.count():
@@ -1282,23 +1333,39 @@ def _pick(page, handle: str, value: str) -> bool:
     page.wait_for_timeout(_MENU_SETTLE_MS)
 
     found = page.evaluate(_OPTION_JS, {"handle": handle, "value": value})
-    if not found or not found.get("opened"):
-        # Some widgets have nothing to show until you type — Greenhouse's location field
-        # is a place-lookup that fetches its suggestions per keystroke, so an opened menu
-        # is genuinely empty and stays empty. Typing here is typing into the widget's own
-        # search box, which is now focused and live: the same `fill` refused to do
-        # anything at all while it was closed, because react-select had thrown the value
-        # away on its next render.
+    if not found or not found.get("chose"):
+        # Nothing showing is ours, so type it into the widget's own search box, which is
+        # focused and live now that the menu is open. The same `fill` did nothing at all
+        # while it was closed — react-select throws the value away on its next render.
+        #
+        # The condition used to be "the menu came up empty", which is the place-lookup
+        # case: Greenhouse's location field fetches its suggestions per keystroke, so an
+        # opened menu is genuinely empty and stays empty. That reading was too narrow in
+        # a way `search` made routine — a widget showing *anything* was refused without
+        # ever being asked for the value we hold, and a menu that is showing something is
+        # the ordinary state of one that has been searched before, or one that opens on a
+        # default list. Measured against a live async combobox 2026-08-29: with "newark"
+        # left in the box from an earlier lookup, choosing New York was refused and
+        # reported as "the menu does not offer it", quoting a menu nobody had asked the
+        # question of.
+        #
+        # Typing when the answer is already on screen would be the wasteful reading of
+        # this, hence the `chose` test rather than an unconditional search: a static
+        # Yes/No costs exactly what it always did.
         try:
             page.fill(f'[data-jt-ctl="{handle}"] input', value)
         except Exception as exc:  # noqa: BLE001 — an untypeable widget is a refusal
             log.debug("combobox %s would not take a search: %s", handle, exc)
             return False
         page.wait_for_timeout(_SEARCH_SETTLE_MS)
-        found = page.evaluate(_OPTION_JS, {"handle": handle, "value": value})
+        found = page.evaluate(_OPTION_JS, {"handle": handle, "value": value}) or found
     if not found or not found.get("opened"):
         log.debug("combobox %s did not open a menu", handle)
         return False
+    if seen is not None:
+        # What it was offering when the decision was made, which after a search is the
+        # searched list — the one worth showing somebody who has to choose from it.
+        seen.extend(str(o) for o in found.get("offered", []))
     if not found.get("chose"):
         log.debug("combobox %s does not offer %r (offers %s)",
                   handle, value, ", ".join(found.get("offered", [])[:8]))
@@ -1348,12 +1415,17 @@ def _upload(value: str, upload_name: str = "") -> dict | str:
     }
 
 
-def _write(page, raw: dict, value: str, upload_name: str = "") -> bool:
+def _write(page, raw: dict, value: str, upload_name: str = "",
+           seen: Optional[list] = None) -> bool:
     """Put `value` in one field. False if the field would not take it.
 
     Refusing is a real outcome, not an error: a dropdown that does not offer the option
     we hold is a question we cannot answer, and it belongs in the gap list next to the
     ones we never had an answer for.
+
+    `seen` is only ever filled by the combobox branch, and only the mirror passes one:
+    the nightly fill has nowhere to put a list of options nobody is looking at, whereas
+    a person watching `/apply` is exactly who a refusal needs to tell.
     """
     selector = f'[data-jt-id="{raw["handle"]}"]'
     kind = raw["type"]
@@ -1368,7 +1440,7 @@ def _write(page, raw: dict, value: str, upload_name: str = "") -> bool:
             page.select_option(selector, label=value)
             return True
         if kind == "combobox":
-            return _pick(page, raw["handle"], value)
+            return _pick(page, raw["handle"], value, seen)
         if kind == "checkbox":
             # A member of a set is checked when the answer names *its* choice. Falling
             # back to the yes/true/1/on reading would tick every box in a nine-option

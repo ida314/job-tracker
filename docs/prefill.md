@@ -451,10 +451,35 @@ assuming otherwise. **The page has no `<select>` element on it at all.**
   from a text box into a menu, and what gives `match_option` something to check a stored
   answer against. Bounded by `MAX_VOCABULARIES`; a form past the cap keeps an empty list,
   renders as a text box, and says so.
-- **Some have no fixed vocabulary at all.** The location field is a place lookup that
-  fetches per keystroke, so an opened menu is genuinely empty. `_pick` types the answer
-  into the widget's own search box — which works once it is open and focused, and did
-  nothing whatever while it was closed — and reads again.
+- **Some have no fixed vocabulary at all, and that is what `search` is for.** *Location
+  (City)* is a place lookup that fetches per keystroke, so an opened menu is genuinely
+  empty and stays empty — measured on the fixture, it is the one combobox of ten with no
+  "Toggle flyout" button in its indicators, because there is no list to toggle. So
+  `_learn_vocabularies` correctly learns nothing, the row on `/apply` rendered as a plain
+  text box, and an answer that was not character-for-character one of the widget's own
+  suggestions came back *"would not take it"* with no way to find out what would have
+  been taken. That was the single worst dead end on the page.
+
+  Two things fix it, and both are readings the widget was already being asked for. A
+  **refused** `_pick` publishes the menu it read in order to refuse (`seen` →
+  `Session.offer`), so the prefill's own refusal arrives with the answer list attached.
+  And the row grows a query box and a **Look up** button behind `live.SEARCH`, which is
+  `_read_vocabulary` with a query: open the widget, type into its own search box, read
+  what it then shows, close it. Either way the suggestions render as the row's `<select>`
+  and choosing one pushes an ordinary `set` carrying a string the menu itself produced —
+  the one kind of value `_pick` is guaranteed to find.
+
+  What comes back is **never** stored as the field's `options`. It answers one query, and
+  `store.known_options` replays whatever is stored at every later visit — so writing a
+  place lookup's answer to "new" there would teach that employer's form a vocabulary of
+  four cities and `match_option` would refuse every other one. `Session.offer` keeps the
+  query beside the list for the same reason, and a re-reading of the form drops both.
+
+  `_pick`'s search condition widened with it (2026-08-29): it used to type only when the
+  menu came up *empty*, so a menu showing anything at all was refused without ever being
+  asked for the value we hold — which is the ordinary state of one that has been searched
+  before. Measured against a live async combobox: with a previous lookup's query still in
+  the widget, choosing the answer from that very lookup's list was refused.
 - **Every combobox is followed by a phantom** `<input required tabindex="-1"
   aria-hidden="true">` that react-select renders to drive native validation. It has no
   name and no id, so it keyed on a slug of the same label as the widget it shadows: one
@@ -569,13 +594,26 @@ state**. It still needs a display — point `$DISPLAY` at an X server not attach
 monitor (`Xvfb :100`), because Chromium will not launch headful without one — but nothing
 carries that display anywhere and nothing in the app links to it.
 
-**The viewer is gone** (2026-08-22). `JOBTRACKER_BROWSER_VIEW_URL`, the "View window" link
-on the Today card, and the one on this page were all deleted. They existed because the
-window was where you did the two things the mirror could not do: read the application over,
-and submit it. The first is what the full-page preview is for. The second is now `/apply`'s
-Submit button. What is left — a remote X server shipping video frames for fifteen text
-fields — was only ever the slow path, and keeping a link to it advertised an interface that
-does not work well enough to use.
+**The viewer went (2026-08-22) and came back as a fallback (2026-08-29).** It was deleted
+because the window had been where you did the two things the mirror could not do: read the
+application over, and submit it. The first is what the full-page preview is for; the second
+is `/apply`'s Submit button. What was left — a remote X server shipping video frames for
+fifteen text fields — was only ever the slow path.
+
+That was right about the main flow and wrong about the last resort. The mirror carries what
+the discovery pass could read and what `_write` can move, and there is a residue that is
+neither: a captcha, a dropzone, a widget that will not take a value however it is written.
+For that residue the documented answer was "open the window" — with nothing anywhere that
+opened one. A slow interface you can reach beats a fast one that has stopped at the thing
+you need.
+
+So `JOBTRACKER_BROWSER_VIEW_URL` is back and `config.BROWSER_VIEW_URL` exists again. Set it
+to a remote-desktop view of the host's display (noVNC, xpra, …) and `/apply` renders **View
+window ↗** beside the preview, and again in the sentence about what the mirror could not
+read. Unset, neither renders and the sentence says what to set. It is on `/apply` only —
+the Today card's link did **not** come back, because nothing there has a window open yet —
+and the URL goes through `_safe_url` like every other third-party href these pages render.
+The app still neither starts, probes nor knows anything about the viewer.
 
 The static dashboard shows the prefill counts — `prefill 13/16 fields · 3 need you` —
 and **no button**. The counts are useful offline; a button that cannot drive a browser is
@@ -599,7 +637,7 @@ channel from the page you are looking at to that writer.
 ```
 Cloudflare — Backend Engineer, New Grad        [Read the form again] [Reset]
 
-┌ Preview  Pause  100%  Open application ┐  First Name  [ Dylan       ]  filled
+┌ Preview Pause 100% Open application ↗View┐ First Name  [ Dylan      ]  filled
 │  [jpeg of the whole real form]         │    from your answer bank as `first_name`
 │                                        │    [ Dylan          ] [Save]
 │                                        │  Resume/CV   [ Choose file ]  filled
@@ -611,12 +649,15 @@ Review & submit                             3/4 fields filled · 1 need you
 
 **Open application** opens the form itself in a tab of *your* browser — the URL the
 browser actually landed on, so a Greenhouse embed or an Ashby `/application` opens the
-page the preview is a picture of. It is deliberately not a link to the window: that was
-the remote-desktop viewer this page replaced, and a video stream for fifteen text fields
-is not coming back. It is for reading the parts the discovery pass could not mirror — a
-captcha, a collapsed section, a dropzone. Typing in it changes nothing here; two tabs on
-one anonymous form share no draft, which is the same fact that makes this feature a
-browser rather than a link.
+page the preview is a picture of. It is for reading the parts the discovery pass could not
+mirror. Typing in it changes nothing here; two tabs on one anonymous form share no draft,
+which is the same fact that makes this feature a browser rather than a link.
+
+**View window ↗**, when `JOBTRACKER_BROWSER_VIEW_URL` is set, is the other thing entirely:
+the browser `serve` is driving, holding *your* fill, through a remote-desktop view of that
+host's display. It is last in the row and it is the fallback — everything to its left is
+faster, and this is what is left when a field will not take a value at all. See "The viewer
+went and came back" above.
 
 **Reset** empties every field the form is holding and reads it again. It is the way back
 from a fill that went somewhere you did not want it, and from a form that has moved under
@@ -652,10 +693,19 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 
 ### Rules that are load-bearing
 
-- **A command points, it does not write.** The vocabulary is exactly six names — `set`,
-  `clear`, `reset`, `rediscover`, `shoot`, `highlight` — and a command carries a field
-  *handle*, never a selector and never anything the browser thread evaluates. That is
-  `browser.py`'s click rule carried across the new channel, and it has its own test.
+- **A command points, it does not write.** The vocabulary is exactly seven names —
+  `set`, `clear`, `reset`, `rediscover`, `shoot`, `highlight`, `search` — and a command
+  carries a field *handle*, never a selector and never anything the browser thread
+  evaluates. That is `browser.py`'s click rule carried across the new channel, and it has
+  its own test.
+- **`search` is on `clear`'s side of the activation line, by the same test.** It opens one
+  combobox, types a query into the widget's own search box and reads back what the menu
+  then shows — both halves of which `_pick` already performs as the first step of a `set`.
+  It stops where `_pick` goes on to press an option, so it commits nothing and returns
+  text. It re-reads the form on the way out, because typing into a react-select remounts
+  its input and takes the `data-jt-id` with it; the handles do not move, so no epoch is
+  spent and the page never notices. `Session.offer` lands *after* that re-reading, since
+  `rows_from` builds fresh rows carrying no offer.
 - **`reset` is `clear` over the whole form, and it is one command rather than a loop.**
   A clear re-reads the form on the way out, so thirty clears sent from the page are
   thirty chances for the shape to change under the remaining handles — after which every

@@ -111,7 +111,8 @@ is a fact about the company.
 | `JOBTRACKER_PROFILE` | No | Defaults to the copy baked into the image. Mount it to tune the ranking without rebuilding |
 | `JOBTRACKER_ANSWERS` | For `prefill`/`apply-to` | Your answer bank. Not in the image — it is personal data. Absent → `jobtracker prefill` refuses and says so, `prepare` says it cannot prefill, and nothing else notices |
 | `JOBTRACKER_BROWSER_PROFILE` | For `apply-to` | Persistent browser profile. Put it on a volume or every run starts logged out |
-| `DISPLAY` | For `apply-to`/`serve`'s button | Not ours, but load-bearing: Playwright draws a real window on the host running the command. A headless host needs an X display (`Xvfb :100`) or the launch fails. Nobody looks at it — `/apply` is where you type — but it still has to exist |
+| `DISPLAY` | For `apply-to`/`serve`'s button | Not ours, but load-bearing: Playwright draws a real window on the host running the command. A headless host needs an X display (`Xvfb :100`) or the launch fails. `/apply` is where you type, so nobody looks at it in the ordinary case — but it still has to exist |
+| `JOBTRACKER_BROWSER_VIEW_URL` | No | A remote-desktop view of that display (noVNC, xpra, …). Set it and `/apply` renders a **View window ↗** link; absent, it renders none and says what to set. The fallback for what the mirrored form cannot reach — a captcha, a dropzone, a widget no write will move — so the viewer units are worth keeping. The app never starts or probes the viewer; it is a URL |
 | `JOBTRACKER_RESUMES` | No | Where per-posting resumes are stored. Defaults to `./data/resumes`, so a mounted `/data` already covers it |
 | `JOBTRACKER_MAILDIR` | For `mail`/`inbox` | Your job-search mailbox. **Mount it read-only** (`:ro`) — the code never writes to it and the mount should say so too. Absent → `mail` exits 1 and the `inbox` task reports itself unavailable, which is a different state from "nothing to do" |
 

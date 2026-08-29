@@ -472,14 +472,23 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   `serve` restarted. `_hold_until_closed` waits in `page.wait_for_timeout(500)`; both
   endings then arrive as an empty page list or `TargetClosedError`. Measured against a
   real browser 2026-08-16, and there is a test asserting the call is still there.
-- **The browser opens on the machine running `serve`, not the machine viewing the page**,
-  and as of 2026-08-22 **nothing in this app links you to it**. `JOBTRACKER_BROWSER_VIEW_URL`
-  and both "View window" links are deleted; `config.BROWSER_VIEW_URL` no longer exists.
-  They pointed at a remote-desktop view of that host's display (noVNC, xpra, …) and existed
-  for the two things the mirror could not do — read the application over, and send it. The
-  full-page preview is the first and `/apply`'s Submit is the second, so what was left was a
-  video stream for fifteen text fields, which is the slow path this page was built to
-  replace. A link to an interface too laggy to use is worse than no link.
+- **The browser opens on the machine running `serve`, not the machine viewing the page.**
+  From 2026-08-22 to 2026-08-29 nothing in this app linked you to it: `JOBTRACKER_BROWSER
+  _VIEW_URL` and both "View window" links were deleted, because they existed for the two
+  things the mirror could not do — read the application over, and send it — and the
+  full-page preview is the first while `/apply`'s Submit is the second. What was left was
+  a video stream for fifteen text fields, which is the slow path this page was built to
+  replace.
+  **It is back as a fallback, on `/apply` only** (2026-08-29). That deletion was right
+  about the main flow and wrong about the last resort: the mirror carries what the
+  discovery pass could read and what `_write` can move, and the residue that is neither —
+  a captcha, a dropzone, a widget that will not take a value however it is written — had
+  "open the window" as its documented answer with nothing anywhere that opened one. A slow
+  interface you can reach beats a fast one that stops at the thing you need. `config.
+  BROWSER_VIEW_URL` exists again; set it and `/apply` renders **View window ↗** beside the
+  preview and again in the sentence about what the mirror could not read, unset it and
+  neither renders. **The Today card's link did not come back** — nothing there has a
+  window open yet — and the URL is `_safe_url`-checked like every other third-party href.
   **"Open application" on `/apply` is not that link coming back** (added 2026-08-26). It
   opens the *form* — `Session.url`, the page the browser actually landed on — in a tab of
   your own browser, for reading the parts the discovery pass could not mirror. Nothing
@@ -918,6 +927,22 @@ been deciding. Two rules follow from the removal and both are load-bearing:
   text on a real application exactly as surely as writing it. The rule that survives is
   the general one, and it now has no exception: a value reaches a field because a canonical
   ATS name matched, or because *the user attached this wording to this answer*.
+- **A dropdown with no list to open is asked, not guessed at** (2026-08-29). `search` is
+  the seventh command and the only way to read the one kind of menu that has no vocabulary:
+  Greenhouse's *Location (City)* fetches its options per keystroke, so opening it shows
+  nothing and goes on showing nothing — measured, it is the one combobox of ten on Twilio's
+  form with no "Toggle flyout" button, because there is nothing to toggle. So
+  `_learn_vocabularies` correctly learnt nothing, `/apply` rendered a text box, and any
+  answer that was not character-for-character one of its suggestions came back *"would not
+  take it"* with no way to see what would have been taken. Now a **refused** `_pick`
+  publishes the menu it had to read in order to refuse (`seen` → `Session.offer`), and the
+  row carries a query box and **Look up** for asking it something else; either way the
+  suggestions render as the row's `<select>` and picking one pushes a string the widget's
+  own menu produced. The reading is **never** stored as the field's `options` — it answers
+  one query, and `known_options` would replay it at every later visit — and a re-reading of
+  the form drops it. `_pick`'s search condition widened with it: it used to type only when
+  the menu came up *empty*, so a menu showing anything at all (a previous lookup's results,
+  a default list) was refused without ever being asked for the value we hold.
 - **A dropdown that does not offer our answer is a gap, not a fill.** Picking the nearest
   option puts an answer the candidate did not give onto a submitted application.
   `match_option` waves any string through when `options` is empty, which is right for a
@@ -1180,8 +1205,9 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   that made them** — an HTTP handler calling into one is the bug this shape prevents. So a
   write is queued and answered immediately and the outcome arrives on the next poll, the
   same shape `_api_apply_to` already had and for the same reason.
-- **A command points, it does not write.** The vocabulary is exactly five names — `set`,
-  `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
+- **A command points, it does not write.** The vocabulary is exactly seven names — `set`,
+  `clear`, `reset`, `rediscover`, `shoot`, `highlight`, `search` — and a command carries a
+  field *handle*,
   never a selector and never anything the browser thread evaluates. That is `browser.py`'s
   no-click-path rule carried across the new channel, and it needs its own test because the
   existing one only scans that module's source.
@@ -1405,12 +1431,13 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
     browser indefinitely.
 - **This did not remove `DISPLAY` or Xvfb**, and must not be read as having done so.
   Chromium still draws somewhere and will not launch headful without a display. What it
-  removed, as of 2026-08-22, is every reason to look at it: the viewer link is gone, the
-  submit is on this page, and the window is an implementation detail. The **viewer units**
-  on gx10 (`jobtracker-x11vnc`, `jobtracker-novnc`) are no longer referenced by anything
-  in the app and can be retired at the deployment layer; `jobtracker-xvfb` cannot.
-  Captchas are the one thing still stuck in the window, and the honest answer there is
-  that a form raising one is a form this cannot finish — see `docs/prefill.md`.
+  removed, as of 2026-08-22, was every *routine* reason to look at it: the submit is on
+  this page and the window is an implementation detail while everything is going well.
+  **Do not retire the viewer units on gx10** (`jobtracker-x11vnc`, `jobtracker-novnc`) —
+  this file said they could be, and 2026-08-29 reversed that: `JOBTRACKER_BROWSER_VIEW_URL`
+  is read again and `/apply` renders a link to them. `jobtracker-xvfb` was never
+  retirable. Captchas are still stuck in the window, and so is every widget no write will
+  move; the difference is that there is now a way to get there — see `docs/prefill.md`.
 
 ## Slug repair
 

@@ -38,6 +38,25 @@ BROWSER_PROFILE = Path(
     os.environ.get("JOBTRACKER_BROWSER_PROFILE", ROOT / "data" / "browser")
 )
 
+# Where to watch the browser the button opens, when it opens somewhere you cannot see.
+# Playwright drives a browser on the machine running `serve`, so on a headless host the
+# window exists and has no screen; pointing this at a remote-desktop viewer for that
+# host's display (noVNC, xpra, …) puts it back in front of you. Empty means the window is
+# local, or that you have no viewer, and the link is simply not rendered. The app neither
+# starts, probes nor knows anything about the viewer — it is a URL, `_safe_url`-checked
+# like every other third-party href these pages render.
+#
+# This was deleted on 2026-08-22 and is back, narrower, since 2026-08-29. Deleting it was
+# right about the main flow and wrong about the last resort: `/apply` mirrors the fields
+# the discovery pass could read, and the honest answer for everything else — a captcha, a
+# widget that will not take a value however it is written, a section that only renders
+# once something is clicked — used to be "open the window", with nothing anywhere that
+# opened it. A video stream is a bad way to type fifteen fields and the only way to reach
+# a form that will not be typed into at all. So it is on `/apply` alone, beside the
+# preview it is the fallback for, and it is not on the dashboard: nothing there has a
+# window open yet.
+BROWSER_VIEW_URL = os.environ.get("JOBTRACKER_BROWSER_VIEW_URL", "")
+
 # Resumes tailored to one posting each. The answer bank's `resume:` is the default and
 # lives beside answers.yaml; these are the exceptions, uploaded from the browser and
 # stored under a name this repo minted. Gitignored with the rest of ./data.
