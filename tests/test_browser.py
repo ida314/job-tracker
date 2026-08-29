@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from jobtracker import browser, live, store
-from jobtracker.answers import load_answers
+from jobtracker.answers import load_answers, normalize_label
 from jobtracker.models import Company, FormField
 
 try:  # pragma: no cover - depends on the optional extra
@@ -155,9 +155,13 @@ def test_the_only_activations_in_this_module_are_the_two_named_ones():
         _callers_of("_press")
     assert _callers_of("_pick") == ["_write"], _callers_of("_pick")
     # And reading a vocabulary must never *choose* one. It presses the widget's toggle
-    # twice — open, read, closed again — and the only thing it returns is text.
+    # twice — open, read, closed again — and the only thing it returns is text. That is
+    # true whether it was given a query or not: `_obey` reaches it for the `search`
+    # command, which types into the widget's own search box exactly as `_pick` already
+    # does before choosing, and then stops instead of pressing an option.
     assert ".click(" not in _code_without_prose_of(browser._read_vocabulary)
-    assert _callers_of("_read_vocabulary") == ["_learn_vocabularies"]
+    assert _callers_of("_read_vocabulary") == ["_learn_vocabularies", "_obey"], \
+        _callers_of("_read_vocabulary")
 
 
 def _code_without_prose_of(fn) -> str:
@@ -714,6 +718,192 @@ def test_a_control_that_will_not_empty_says_so_rather_than_going_quiet():
     session.submit(live.Command(kind=live.CLEAR, handle="jt0", epoch=session.epoch))
     browser._drain(session, page)
     assert session.snapshot()["fields"][0]["status"] == live.REFUSED
+
+
+# -- the menu that has no list ----------------------------------------------------------
+# Greenhouse's "Location (City)" is a react-select whose options are fetched per
+# keystroke. There is nothing to open, so `_learn_vocabularies` correctly learns nothing,
+# the row rendered as a plain text box, and any answer that was not character-for-
+# character one of the widget's own suggestions came back "would not take it" with no way
+# to find out what would have been taken. `search` is how the page asks.
+
+
+class _Locator:
+    """Playwright's locator, reduced to what `_pick` and `_read_vocabulary` use."""
+
+    def __init__(self, page, present=True):
+        self.page, self.present = page, present
+
+    def count(self):
+        return 1 if self.present else 0
+
+    @property
+    def first(self):
+        return self
+
+    def click(self):
+        self.page.presses += 1
+
+
+class _ComboPage(_Recorder):
+    """A page whose one combobox offers nothing until something types into it.
+
+    Modelled on the real widget rather than on a `<select>`: opening it shows an empty
+    menu however long you wait, and the options that do arrive are a function of the
+    query. That is the whole shape the `search` command exists for.
+    """
+
+    def __init__(self, found, offers):
+        super().__init__(found)
+        self.offers = offers          # query -> what the menu then shows
+        self.query = ""
+        self.presses = 0
+
+    def locator(self, selector):
+        return _Locator(self)
+
+    def fill(self, selector, value):
+        super().fill(selector, value)
+        self.query = value
+
+    def evaluate(self, script, arg=None):
+        if "data-jt-submit" in script:
+            return self.submit
+        # `data-jt-id` is what tells the two *reading* scripts from the two *widget*
+        # ones. `_DISCOVER_JS` names all three attributes — it is what sets them — so
+        # discriminating on `data-jt-opt` or `data-jt-ctl` first answered a discovery
+        # pass with a list of city names.
+        if "data-jt-id" in script:                       # _DISCOVER_JS, _HIGHLIGHT_JS
+            self.evaluated.append(arg)
+            return self.found
+        offered = self.offers.get(self.query, [])
+        if "args.value" in script:                       # _OPTION_JS
+            wanted = normalize_label(arg["value"])
+            chose = next((o for o in offered if normalize_label(o) == wanted), None)
+            return {"opened": bool(offered), "chose": chose, "offered": offered}
+        return offered                                   # _VOCABULARY_JS
+
+
+def test_a_menu_with_no_list_can_be_asked_what_it_offers():
+    """`search` types the query into the widget's own box and reads the menu back.
+
+    It chooses nothing — the presses are the widget's own toggle, open and closed again —
+    and the value on the row does not move. What changes is what this side knows.
+    """
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"))
+    page = _ComboPage(found, {"new york": ["New York, NY, United States",
+                                           "New York Mills, MN, United States"]})
+
+    session.submit(live.Command(kind=live.SEARCH, handle="jt0", value="new york",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["offered"] == ["New York, NY, United States",
+                              "New York Mills, MN, United States"]
+    assert row["offered_for"] == "new york"
+    # Nothing was chosen and nothing was written: the field is exactly where it was.
+    assert row["value"] == "" and row["status"] == live.PENDING
+
+
+def test_searching_re_reads_the_form_without_spending_an_epoch():
+    """Typing into a react-select remounts its input, which takes the `data-jt-id` with
+    it — so without a re-reading the field just searched would be the one field on the
+    form nothing else could reach. The handles do not move, so the page never notices.
+    """
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"),
+                             ("first_name", "First Name", "text"))
+    page = _ComboPage(found, {"new": ["New York, NY, United States"]})
+    before = session.epoch
+
+    session.submit(live.Command(kind=live.SEARCH, handle="jt0", value="new",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert session.epoch == before, "a search invalidated the page's handles"
+    # And the re-reading did not throw the answer away: `rows_from` builds rows with no
+    # offer, so `offer` has to land after it.
+    assert session.snapshot()["fields"][0]["offered_for"] == "new"
+
+
+def test_a_refused_dropdown_says_what_it_would_have_taken():
+    """The dead end this whole feature is about.
+
+    `_pick` reads the open menu in order to decide, so a refusal already knows the answer
+    list — it was just being discarded. Publishing it is what turns the one status on the
+    page you could do nothing about into a list to choose from, with no second search.
+    """
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"))
+    page = _ComboPage(found, {"New York, NY": ["New York, NY, United States"]})
+
+    # What the answer bank holds — a perfectly reasonable answer the menu does not offer.
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="New York, NY",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.REFUSED
+    assert row["offered"] == ["New York, NY, United States"]
+    assert row["offered_for"] == "New York, NY"
+
+
+def test_choosing_one_of_its_own_wordings_is_taken():
+    """The other half: a value the menu produced is one `_pick` is guaranteed to find."""
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"))
+    page = _ComboPage(found, {"New York, NY, United States":
+                              ["New York, NY, United States"]})
+
+    session.submit(live.Command(kind=live.SET, handle="jt0",
+                                value="New York, NY, United States",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.FILLED
+    assert row["value"] == "New York, NY, United States"
+
+
+def test_a_menu_showing_something_else_is_still_asked_for_our_answer():
+    """`_pick` used to type only when the menu came up *empty*.
+
+    That was written for the place-lookup case and is too narrow by one word. A menu
+    showing anything at all was refused without ever being asked the question — and a
+    menu showing something is the ordinary state of one that has been searched before, or
+    one that opens on a default list. Found by driving a real async combobox on
+    2026-08-29: with a previous lookup's query still in the box, choosing the answer from
+    the list that lookup had produced was refused, quoting the leftover list back.
+
+    `search` is what made this routine, so it is fixed here rather than worked around by
+    clearing the box: the page must be able to look something up and then pick it.
+    """
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"))
+    page = _ComboPage(found, {
+        "newark": ["Newark, NJ, United States"],
+        "New York, NY, United States": ["New York, NY, United States"],
+    })
+    page.query = "newark"        # what a lookup a moment ago left in the widget
+
+    session.submit(live.Command(kind=live.SET, handle="jt0",
+                                value="New York, NY, United States",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.FILLED, row
+    assert row["value"] == "New York, NY, United States"
+
+
+def test_a_menu_that_is_already_showing_the_answer_is_not_typed_into():
+    """The other side of that condition: a static Yes/No costs what it always did."""
+    session, found = _mirror(("q1", "Work auth?", "combobox"))
+    page = _ComboPage(found, {"": ["Yes", "No"]})
+
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="Yes",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert session.snapshot()["fields"][0]["status"] == live.FILLED
+    assert page.filled == {}, "it searched a menu that was already offering the answer"
 
 
 def test_focusing_a_row_outlines_that_field_on_the_real_page():
@@ -1335,6 +1525,53 @@ def test_a_combobox_learns_its_vocabulary_from_what_the_ats_published(tmp_path):
     # published stays honestly empty rather than borrowing somebody else's.
     assert lent["country"].options == ()
     assert lent["first_name"].options == ()
+
+
+@needs_browser
+def test_the_location_field_is_the_one_menu_with_nothing_to_open(tmp_path):
+    """Why `search` had to exist, measured on the form rather than argued from types.
+
+    Ten comboboxes, and nine of them carry a "Toggle flyout" button in their indicators:
+    a list you can open and read, which is what `_learn_vocabularies` does once per
+    company and keeps forever. *Location (City)* carries none, because there is nothing
+    to toggle — its options are fetched per keystroke by a place lookup, so an opened menu
+    is genuinely empty and stays empty however long you wait.
+
+    That is the whole reason it rendered as a text box on `/apply` and the whole reason an
+    answer like "New York, NY" came back *"would not take it"*: nothing offline can learn
+    what it accepts, and the only thing that can is the widget, asked.
+    """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        chromium = pw.chromium.launch(headless=True)
+        page = chromium.new_page()
+        page.goto(REAL_FORM.as_uri(), wait_until="domcontentloaded")
+        found = page.evaluate(browser._DISCOVER_JS)
+        fields = browser._fields_from_dom(found)
+        toggles = {}
+        for raw, field_ in zip(found, fields):
+            if field_.type != "combobox":
+                continue
+            toggles[field_.key] = page.evaluate(
+                """(h) => {
+                    const ctl = document.querySelector(`[data-jt-ctl="${h}"]`);
+                    const ind = ctl && ctl.querySelector('[class*="indicators"]');
+                    return ind ? ind.querySelectorAll('button').length : 0;
+                }""",
+                raw["handle"],
+            )
+        # And what reading it without typing gets you, which is the fill's own path.
+        location = next(r for r, f in zip(found, fields)
+                        if f.key == "candidate-location")
+        empty = browser._read_vocabulary(page, location["handle"])
+        chromium.close()
+
+    assert len(toggles) == 10, toggles
+    assert toggles["candidate-location"] == 0
+    assert all(n == 1 for key, n in toggles.items()
+               if key != "candidate-location"), toggles
+    assert empty == [], "the menu is not empty, so the premise of `search` is wrong"
 
 
 # -- what an employer's copy of the resume is called -------------------------------------

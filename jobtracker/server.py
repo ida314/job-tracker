@@ -1025,6 +1025,11 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
         f'<div class="lf" data-handle="{handle}" '
         f'data-epoch="{html.escape(str(epoch), quote=True)}" '
         f'data-type="{html.escape(row["type"], quote=True)}" '
+        # The query this row's suggestions were rendered against. The poll compares it
+        # with the session's and reloads when they differ, which is how a menu that has
+        # just been read — by a lookup, or by a fill refusing — becomes a list you can
+        # choose from. Empty on every other kind of row, and equal on both sides there.
+        f'data-offeredfor="{html.escape(row.get("offered_for") or "", quote=True)}" '
         f'data-option="{html.escape(row["option"] or "", quote=True)}">',
         f'<div class="lab">{label}',
     ]
@@ -1042,7 +1047,13 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
         checked = " checked" if row["status"] == live.FILLED else ""
         out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}'
                    f'{off}> {html.escape(row["option"])}</label>')
-    elif row["type"] in ("select", "multiselect", "combobox") and row["options"]:
+    # A menu we know the whole of. `offered_for` excludes the one case where a published
+    # list has been contradicted: a combobox that refused an answer had its live menu read
+    # in order to refuse, and *that* is what the row should offer you — the published list
+    # is what just failed. `<select>` and `<multiselect>` never carry a reading, so the
+    # extra clause is inert for them.
+    elif (row["type"] in ("select", "multiselect", "combobox")
+          and row["options"] and not row.get("offered_for")):
         out.append(f'<select class="lv"{off}>')
         # A blank first option, always. Without one, opening the page would look like
         # every dropdown already holds its first value — and a dropdown we could not
@@ -1066,13 +1077,7 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
         out.append(f'<label class="cbx"><input class="lv" type="checkbox"{checked}'
                    f"{off}> yes</label>")
     elif row["type"] == "combobox":
-        # A dropdown whose options nobody has published yet. It is still a menu on the
-        # real page — typing here searches it and the first exact match is chosen — and
-        # saying so is better than a text box that looks like free text and is not.
-        out.append(f'<input class="lv" type="text" value="{value}"{off}>')
-        out.append("<p class=note>a menu on the real form — type an option's exact "
-                   "wording. Its choices are not published, so nothing here can list "
-                   "them.</p>")
+        out.extend(_search_combobox(row, off))
     elif row["type"] == "textarea":
         out.append(f'<textarea class="lv" rows="4"{off}>{value}</textarea>')
     else:
@@ -1080,6 +1085,81 @@ def _live_field(row: dict, epoch: int, dead: bool = False) -> list:
 
     out.extend(_bank_block(row, off))
     out.append("</div>")
+    return out
+
+
+def _search_combobox(row: dict, off: str) -> list:
+    """A dropdown whose options nobody has published — asked what it offers instead.
+
+    This is the field the whole `search` command exists for. Greenhouse's *Location
+    (City)* is a react-select whose options are fetched per keystroke, so there is no list
+    to open and `_learn_vocabularies` correctly comes back with nothing: measured on
+    Twilio's live form, it is the one combobox of ten with no "Toggle flyout" button,
+    because there is nothing to toggle. Its row therefore rendered as a plain text box
+    with a note apologising for itself, and anything typed into it that was not
+    character-for-character one of the widget's suggestions came back *"would not take
+    it"* — a refusal with no way to find out what would have been taken. It is the single
+    most-reported dead end on this page.
+
+    So the row asks. The query box is not the answer: it goes to `/api/session/search`,
+    the browser thread types it into the widget's own search box and reads the menu back,
+    and the **select** underneath is what the widget actually offered. Choosing from it
+    pushes an ordinary `set` carrying a string the menu itself produced, which is the one
+    kind of value `_pick` is guaranteed to find.
+
+    Two things are deliberately not done here. The suggestions are never stored as the
+    field's `options` — they answer one query, not the question "what does this field
+    accept" — and nothing picks the nearest match for you, which is the rule that keeps an
+    answer you did not give off an application you are about to send.
+
+    The options are rendered by the server, like every other control on this page. A
+    search therefore ends in a reload rather than in the script building `<option>`
+    elements: the row's markup is the server's, and re-reading it is what a reload is.
+    """
+    handle = html.escape(row["handle"], quote=True)
+    value = row["value"] or ""
+    asked = row.get("offered_for") or ""
+    query = html.escape(asked or value, quote=True)
+    offered = list(row.get("offered") or [])
+    out = [
+        f'<div class="sug"><input class="sq" type="text" value="{query}" '
+        f'placeholder="type part of the answer"{off}> '
+        f'<button class="lf-lookup" data-handle="{handle}"{off}>Look up</button></div>'
+    ]
+    # A live reading beats a published list, and only replaces one once it exists: a
+    # combobox reaches this function either because nobody published its options or
+    # because the menu was read and contradicted them. Without the fallback, the second
+    # case would render the published menu away and leave nothing in its place.
+    #
+    # The chosen value is an option too, or a reload after a successful pick would render
+    # a menu that does not contain what the field is holding — and `paint`, which only
+    # sets `.value`, would then blank the select and report a filled field as empty.
+    listed = list(offered) if asked else list(row["options"])
+    if value and value not in listed:
+        listed.append(value)
+    out.append(f'<select class="lv"{off}>')
+    out.append('<option value="">— choose —</option>')
+    for option in listed:
+        sel = " selected" if option == value else ""
+        o = html.escape(option, quote=True)
+        out.append(f'<option value="{o}"{sel}>{html.escape(option)}</option>')
+    out.append("</select>")
+    if offered:
+        out.append(f'<p class=note>what it offered for '
+                   f'<code>{html.escape(asked)}</code>. '
+                   "Pick one — these are its own wordings, and nothing else will be "
+                   "accepted.</p>")
+    elif asked:
+        # Said out loud, because a search that came back with nothing renders exactly
+        # like one that never ran, and the difference is whether to press the button
+        # again or type something else.
+        out.append(f'<p class=note>it offered nothing for '
+                   f'<code>{html.escape(asked)}</code>. Try fewer words — a place '
+                   "lookup usually wants the start of a city name.</p>")
+    else:
+        out.append("<p class=note>a menu on the real form, and it does not publish its "
+                   "choices. Type part of the answer and press <b>Look up</b> to see "
+                   "what it offers.</p>")
     return out
 
 
@@ -1726,6 +1806,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_session_set(payload))
             elif path == "/api/session/clear":
                 self._send_json(self._api_session_clear(payload))
+            elif path == "/api/session/search":
+                self._send_json(self._api_session_search(payload))
             elif path == "/api/session/highlight":
                 self._send_json(self._api_session_highlight(payload))
             elif path == "/api/session/rediscover":
@@ -2976,6 +3058,36 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "bad epoch"}
         return self._api_session_command(live.CLEAR, handle, "", epoch)
 
+    def _api_session_search(self, payload: dict) -> dict:
+        """Ask one combobox what it offers for a query, and publish the answer.
+
+        Same shape as every other command — a handle, a value, the epoch it was written
+        against, and nothing the browser thread evaluates. It is inside the vocabulary
+        because it reaches nothing a fill does not: `_pick` already opens the widget and
+        types into its search box as the first step of a `set`, and this stops there
+        rather than pressing an option.
+
+        It is the only way to read the one kind of menu that has no list to open —
+        Greenhouse's *Location (City)* fetches its options per keystroke — and without it
+        that field could only be answered by guessing its exact wording and being told
+        "would not take it".
+
+        Empty is refused, because an empty query is not a search: it reads the whole
+        unfiltered menu, which for a place lookup is nothing at all, and would overwrite
+        a list you had just asked for with a blank one.
+        """
+        handle = str(payload.get("handle") or "")
+        if not handle:
+            return {"ok": False, "error": "no field"}
+        try:
+            epoch = int(payload.get("epoch", -1))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad epoch"}
+        value = str(payload.get("value") or "").strip()
+        if not value:
+            return {"ok": False, "error": "type something to look up"}
+        return self._api_session_command(live.SEARCH, handle, value, epoch)
+
     def _api_session_reset(self) -> dict:
         """Empty every field on the live form and read it again.
 
@@ -3262,7 +3374,12 @@ padding:.05rem .4rem;border-radius:99px}
    is nothing in it) and not `gap` (a gap is a question nobody had an answer for) — and
    without a rule of its own it rendered unstyled, which read as neither. */
 .st-cleared{opacity:.75;background:rgba(127,127,127,.14);border:1px solid currentColor}
-.lf.busy{opacity:.6}
+.lf.busy,.lf.looking{opacity:.6}
+/* A dropdown that does not publish its choices — Greenhouse's "Location (City)" fetches
+   its options per keystroke — so the row asks it what it offers and renders the answer
+   underneath. The query box is not the answer: the `<select>` below it is. */
+.lf .sug{display:flex;gap:.4rem;align-items:center;margin:.15rem 0 .3rem}
+.lf .sug .sq{flex:1;min-width:8rem}
 /* The fallback, and last in the row on purpose. It is the browser `serve` is driving, on
    that host's display, through whatever viewer JOBTRACKER_BROWSER_VIEW_URL names —
    slower than everything to its left, and the only thing that reaches a captcha or a
@@ -3402,10 +3519,15 @@ _APPLY_JS = """
     }, DEBOUNCE_MS);
   }
 
+  // Off the tag, not off `data-type`: a `combobox` row renders as a `<select>` when
+  // anything knows what it offers and as a text box when nothing does, so the type says
+  // which question the field asks and the tag says which control is on the page. Read
+  // through the type, a dropdown of suggestions went down the debounce path meant for
+  // typing, and `bank` — which only the change branch calls — never saw the answer.
   document.addEventListener('input', function (e) {
     var card = e.target.closest('.lf');
     if (!card || !e.target.classList.contains('lv')) return;
-    if (card.dataset.type === 'select' || card.dataset.type === 'multiselect') return;
+    if (e.target.tagName === 'SELECT') return;
     if (card.dataset.type === 'checkbox') return;
     schedule(card, e.target.value);
   });
@@ -3442,11 +3564,14 @@ _APPLY_JS = """
         // compare "yes" against "LinkedIn" and refuse every tick.
         var choice = card.dataset.option || 'yes';
         push(card, e.target.checked ? choice : '');
-      } else if (card.dataset.type === 'select' ||
-                 card.dataset.type === 'multiselect') {
+      } else if (e.target.tagName === 'SELECT') {
         // Including the blank "— choose —" option, which is how you take a dropdown
         // answer back. Ignoring it left the one control on this page you could not
         // change your mind about.
+        //
+        // A searched combobox arrives here too, and that is the point of it: the string
+        // being pushed is one the widget's own menu produced, which is the only kind
+        // `_pick` is guaranteed to find.
         var v = e.target.value;
         push(card, v).then(function () { bank(card, v); });
       }
@@ -3525,6 +3650,60 @@ _APPLY_JS = """
         var card = btn.closest('.lf');
         if (card) push(card, value);
       });
+  });
+
+  // -- looking a dropdown up ----------------------------------------------------------
+  // Some menus have no list to open: Greenhouse's "Location (City)" fetches its options
+  // per keystroke, so nothing here and nothing in the nightly pass can know what it
+  // accepts until somebody types. This asks it, and the answer comes back as the row's
+  // own `<select>`.
+  //
+  // The result is rendered by the *server*, so this ends in a reload rather than in
+  // building `<option>` elements here — the rows on this page are the server's markup and
+  // re-reading them is exactly what a reload does. Nothing is lost by it: the query is
+  // held in the session and rendered back into the box.
+  //
+  // What triggers that reload is not this function. Each row carries the query it was
+  // rendered against, and the poll reloads when the session's differs — which covers the
+  // case nobody pressed a button for at all: a *refused* fill publishes what the menu was
+  // offering, because `_pick` had to read it in order to refuse, so the prefill's own
+  // "would not take it" arrives with the answer list attached.
+  function lookup(card) {
+    var box = card.querySelector('.sq');
+    if (!box || !box.value.trim()) return;
+    var st = card.querySelector('.st');
+    card.classList.add('looking');
+    setStatus(st, 'pending', 'looking up…');
+    post('/api/session/search',
+         {handle: card.dataset.handle, epoch: epoch, value: box.value.trim()})
+      .then(function (res) {
+        // Not "found": the request only queued it. The browser thread opens the widget,
+        // types and reads the menu on its next tick, and the poll is what notices.
+        if (res.ok) return;
+        card.classList.remove('looking');
+        setStatus(st, 'refused', res.error || 'refused');
+      })
+      .catch(function () {
+        card.classList.remove('looking');
+        setStatus(st, 'refused', 'the server did not answer');
+      });
+  }
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.classList.contains('lf-lookup')) return;
+    var card = e.target.closest('.lf');
+    if (card) lookup(card);
+  });
+
+  // Enter in the query box, because a lookup box that ignores Enter reads as broken.
+  // `keydown` on one input, and it can only reach `lookup`. There is nothing on this page
+  // an Enter could submit in any case — no form element anywhere, and `form-action
+  // 'none'` in the CSP — which is the property the submit gate depends on.
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' || !e.target.classList.contains('sq')) return;
+    e.preventDefault();
+    var card = e.target.closest('.lf');
+    if (card) lookup(card);
   });
 
   // Detaching. A file input offers no way to hold nothing once it holds something, so
@@ -3724,6 +3903,26 @@ _APPLY_JS = """
     return document.querySelector('.lf.busy') !== null;
   }
 
+  // A menu the session has read and this page has not. Driven off what each row was
+  // *rendered* against rather than off a button press, which is what makes a refused fill
+  // land the same way a lookup does: `_pick` reads the open menu in order to refuse, so
+  // "would not take it" arrives with the answer list attached and no click behind it.
+  //
+  // Only in that direction. The reverse — the page holding a list the session has since
+  // cleared — happens after every successful pick, and reloading there would throw away
+  // a menu that is still correct in order to render one that is empty.
+  function newReading(s) {
+    var seen = [];
+    s.fields.forEach(function (f) {
+      if (!f.offered_for) return;
+      var card = document.querySelector('.lf[data-handle="' + f.handle + '"]');
+      if (card && (card.dataset.offeredfor || '') !== f.offered_for) {
+        seen.push(f.handle + '=' + encodeURIComponent(f.offered_for));
+      }
+    });
+    return seen.length ? seen.join('&') : null;
+  }
+
   function age(then) {
     if (!then) return '';
     var secs = Math.max(0, Math.round(Date.now() / 1000 - then));
@@ -3776,6 +3975,23 @@ _APPLY_JS = """
         return;
       }
       paint(s);
+
+      // A menu has told us what it offers. The suggestions are a `<select>` the server
+      // renders, so the page re-reads itself rather than building options here — the same
+      // reasoning as the epoch recovery above, and the same guard: not while something of
+      // yours is in flight. The query survives, because the session is holding it.
+      var reading = newReading(s);
+      if (reading && !busyNow() && location.hash !== '#read=' + reading) {
+        // Marked in the hash before reloading, so this can happen at most once per
+        // distinct reading. The reload resolves the difference in every case there is —
+        // `render_apply` renders from the same snapshot this poll reads — and if one
+        // ever slipped through, a stale list is the failure to choose over a page that
+        // reloads itself forever.
+        location.hash = '#read=' + reading;
+        stopped = true;
+        location.reload();
+        return;
+      }
       if (blockers) {
         // Text, never markup — the rule every repaint on this page follows. A stale
         // checklist over a live button is how you arm against yesterday's form.
@@ -3822,7 +4038,10 @@ _APPLY_JS = """
     s.fields.forEach(function (f) {
       var card = document.querySelector('.lf[data-handle="' + f.handle + '"]');
       if (!card || card.contains(document.activeElement)) return;
-      if (card.classList.contains('busy')) return;
+      // `looking` is `busy`'s sibling for a lookup in flight. Without it the poll paints
+      // the row's real status — "needs you" — over "looking up…" a second after the
+      // button is pressed, which reads as the button having done nothing.
+      if (card.classList.contains('busy') || card.classList.contains('looking')) return;
       var word = {filled: 'filled', gap: 'needs you',
                   refused: 'would not take it', pending: '…',
                   cleared: 'cleared'}[f.status] || f.status;

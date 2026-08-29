@@ -451,10 +451,35 @@ assuming otherwise. **The page has no `<select>` element on it at all.**
   from a text box into a menu, and what gives `match_option` something to check a stored
   answer against. Bounded by `MAX_VOCABULARIES`; a form past the cap keeps an empty list,
   renders as a text box, and says so.
-- **Some have no fixed vocabulary at all.** The location field is a place lookup that
-  fetches per keystroke, so an opened menu is genuinely empty. `_pick` types the answer
-  into the widget's own search box — which works once it is open and focused, and did
-  nothing whatever while it was closed — and reads again.
+- **Some have no fixed vocabulary at all, and that is what `search` is for.** *Location
+  (City)* is a place lookup that fetches per keystroke, so an opened menu is genuinely
+  empty and stays empty — measured on the fixture, it is the one combobox of ten with no
+  "Toggle flyout" button in its indicators, because there is no list to toggle. So
+  `_learn_vocabularies` correctly learns nothing, the row on `/apply` rendered as a plain
+  text box, and an answer that was not character-for-character one of the widget's own
+  suggestions came back *"would not take it"* with no way to find out what would have
+  been taken. That was the single worst dead end on the page.
+
+  Two things fix it, and both are readings the widget was already being asked for. A
+  **refused** `_pick` publishes the menu it read in order to refuse (`seen` →
+  `Session.offer`), so the prefill's own refusal arrives with the answer list attached.
+  And the row grows a query box and a **Look up** button behind `live.SEARCH`, which is
+  `_read_vocabulary` with a query: open the widget, type into its own search box, read
+  what it then shows, close it. Either way the suggestions render as the row's `<select>`
+  and choosing one pushes an ordinary `set` carrying a string the menu itself produced —
+  the one kind of value `_pick` is guaranteed to find.
+
+  What comes back is **never** stored as the field's `options`. It answers one query, and
+  `store.known_options` replays whatever is stored at every later visit — so writing a
+  place lookup's answer to "new" there would teach that employer's form a vocabulary of
+  four cities and `match_option` would refuse every other one. `Session.offer` keeps the
+  query beside the list for the same reason, and a re-reading of the form drops both.
+
+  `_pick`'s search condition widened with it (2026-08-29): it used to type only when the
+  menu came up *empty*, so a menu showing anything at all was refused without ever being
+  asked for the value we hold — which is the ordinary state of one that has been searched
+  before. Measured against a live async combobox: with a previous lookup's query still in
+  the widget, choosing the answer from that very lookup's list was refused.
 - **Every combobox is followed by a phantom** `<input required tabindex="-1"
   aria-hidden="true">` that react-select renders to drive native validation. It has no
   name and no id, so it keyed on a slug of the same label as the widget it shadows: one
@@ -668,10 +693,19 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 
 ### Rules that are load-bearing
 
-- **A command points, it does not write.** The vocabulary is exactly six names — `set`,
-  `clear`, `reset`, `rediscover`, `shoot`, `highlight` — and a command carries a field
-  *handle*, never a selector and never anything the browser thread evaluates. That is
-  `browser.py`'s click rule carried across the new channel, and it has its own test.
+- **A command points, it does not write.** The vocabulary is exactly seven names —
+  `set`, `clear`, `reset`, `rediscover`, `shoot`, `highlight`, `search` — and a command
+  carries a field *handle*, never a selector and never anything the browser thread
+  evaluates. That is `browser.py`'s click rule carried across the new channel, and it has
+  its own test.
+- **`search` is on `clear`'s side of the activation line, by the same test.** It opens one
+  combobox, types a query into the widget's own search box and reads back what the menu
+  then shows — both halves of which `_pick` already performs as the first step of a `set`.
+  It stops where `_pick` goes on to press an option, so it commits nothing and returns
+  text. It re-reads the form on the way out, because typing into a react-select remounts
+  its input and takes the `data-jt-id` with it; the handles do not move, so no epoch is
+  spent and the page never notices. `Session.offer` lands *after* that re-reading, since
+  `rows_from` builds fresh rows carrying no offer.
 - **`reset` is `clear` over the whole form, and it is one command rather than a loop.**
   A clear re-reads the form on the way out, so thirty clears sent from the page are
   thirty chances for the shape to change under the remaining handles — after which every

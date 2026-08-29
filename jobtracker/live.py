@@ -19,7 +19,7 @@ never touch `page`. So a request enqueues a command and returns; the browser thr
 drains the queue inside the poll it was already doing, and the outcome comes back on the
 next snapshot. Nothing here blocks on a browser.
 
-**A command points, it does not write.** The vocabulary is six names, and a command
+**A command points, it does not write.** The vocabulary is seven names, and a command
 carries a field *handle* — an opaque token minted by the discovery pass — never a
 selector, never an expression, never anything the browser thread evaluates. That is
 `browser.py`'s no-click rule carried across this channel, for the same reason: there must
@@ -87,8 +87,9 @@ RESET = "reset"            # empty every field the form is holding, in one pass
 REDISCOVER = "rediscover"  # read the form again; its shape may have changed
 SHOOT = "shoot"            # take a preview screenshot
 HIGHLIGHT = "highlight"    # outline one field, so the preview follows what you edit
+SEARCH = "search"          # ask one combobox what it offers for a query, and read it back
 
-VOCABULARY = frozenset({SET, CLEAR, RESET, REDISCOVER, SHOOT, HIGHLIGHT})
+VOCABULARY = frozenset({SET, CLEAR, RESET, REDISCOVER, SHOOT, HIGHLIGHT, SEARCH})
 
 # `CLEAR` is its own name rather than `SET` with an empty value, for two reasons that both
 # bite. A `file` row's value is a path on this machine, so `""` there is not "no text" but
@@ -107,6 +108,21 @@ VOCABULARY = frozenset({SET, CLEAR, RESET, REDISCOVER, SHOOT, HIGHLIGHT})
 # to send, reported as a whole one. Taken as a single command it names no handle from
 # outside at all — it empties whatever the browser thread is holding at the moment it
 # runs — which is also why it is the one command that carries no epoch and needs none.
+#
+# `SEARCH` is the newest and is inside the vocabulary by the same test as `CLEAR`: it
+# reaches nothing a fill does not. It types a query into a combobox's own search box and
+# reads back what the widget then offers — both halves of which `_pick` already does as
+# the first step of a `SET`. It chooses nothing, commits nothing, and leaves the menu the
+# way it found it; the only thing it changes is what this side *knows*.
+#
+# It exists because one kind of dropdown cannot be read any other way. Greenhouse's
+# "Location (City)" is a react-select whose options are fetched per keystroke, so it has
+# no list to open — measured on Twilio's live form, it is the one combobox of ten with no
+# "Toggle flyout" button in its indicators, because there is nothing to toggle. Its
+# vocabulary is therefore permanently empty, `/apply` rendered it as a text box, and an
+# answer that was not character-for-character one of the suggestions came back "would not
+# take it" with no way to find out what it *would* have taken. A menu you cannot read is
+# a question you cannot answer; this is how the page reads it.
 
 # Row statuses. `refused` is a real outcome and not an error: a dropdown that does not
 # offer the answer we hold is a question we cannot answer, and saying so beats picking
@@ -173,6 +189,19 @@ def rows_from(found: list, fields: list, carried: Optional[dict] = None) -> list
             "value": value,
             "status": status,
             "question_key": question_key,
+            # What the widget offered the last time anything looked, and for which query.
+            # Deliberately **not** carried across a reading, unlike the status and the
+            # value: `options` is a vocabulary and belongs to the field, whereas these
+            # are one widget's answer to one query at one moment. A form that has just
+            # been re-read is a form whose menus nobody has opened since, and saying so
+            # is the difference between offering you a stale list and offering you none.
+            #
+            # They are also never written to `form_fields.options`. A place lookup's
+            # suggestions are a function of what you typed, so storing them would teach
+            # the employer's form a vocabulary it does not have — and `known_options`
+            # replays that at every later visit.
+            "offered": [],
+            "offered_for": "",
         })
     return rows
 
@@ -318,6 +347,27 @@ class Session:
                 if row["handle"] == handle:
                     row["status"] = status
                     row["value"] = value
+                    return
+
+    def offer(self, handle: str, query: str, options: list) -> None:
+        """Record what one combobox offered for one query, so the page can render it.
+
+        Written from two places, and the second is the one that matters. A `search` is
+        somebody asking; a *refused* `set` is the widget having already been asked — it
+        was opened, the query was typed, and its menu did not contain the answer we hold.
+        Throwing that reading away is what made "would not take it" a dead end: the page
+        said no and could not say what yes would have looked like.
+
+        The query is kept beside the options because they only mean anything together.
+        "New York, NY, United States" is not what this field offers; it is what it
+        offered for "new york", and a list rendered without its query is a menu that
+        looks complete and is not.
+        """
+        with self.lock:
+            for row in self.fields:
+                if row["handle"] == handle:
+                    row["offered"] = [str(o) for o in options]
+                    row["offered_for"] = query
                     return
 
     def retarget(self, url: str) -> None:

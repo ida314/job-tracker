@@ -1719,7 +1719,7 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
                     "resetform", "resetmsg"):
         assert f"getElementById('{element}')" in script, element
     for hook in ("lf-file", "lf-detach", "tobank", "bankkey", "savebank", "bankval",
-                 ".lv"):
+                 "lf-lookup", ".sq", ".lv"):
         assert hook in script, hook
     # The picker's options come from the answer bank, so an empty list is legitimate
     # here — but the element the key box points at has to exist either way, or the
@@ -1727,7 +1727,8 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
     assert 'list="bankkeys"' in page and '<datalist id="bankkeys">' in page
     for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
                      "/api/session/highlight", "/api/session/rediscover",
-                     "/api/session/reset", "/api/session/file", "/api/session/close",
+                     "/api/session/reset", "/api/session/search",
+                     "/api/session/file", "/api/session/close",
                      "/api/answer"):
         assert endpoint in script, endpoint
 
@@ -1870,11 +1871,14 @@ def test_resetting_carries_no_handle_and_no_epoch(tmp_path):
 def test_the_page_offers_the_real_form_in_a_tab_of_your_own_browser(tmp_path):
     """"Open application" is the form itself, not the window drawing it.
 
-    The window is on the machine running `serve` and nothing here links to it — that was
-    the remote-desktop viewer this page replaced, and a video stream for fifteen text
-    fields is not coming back. What this opens is the URL the browser actually landed
-    on, so a Greenhouse embed or an Ashby `/application` opens the page the preview is a
-    picture of, for the parts the discovery pass could not mirror.
+    What this opens is the URL the browser actually landed on, so a Greenhouse embed or
+    an Ashby `/application` opens the page the preview is a picture of, for the parts the
+    discovery pass could not mirror. Typing in it changes nothing here: two tabs on one
+    anonymous form share no draft.
+
+    That is a different thing from the viewer link below, which reaches the window
+    holding your fill — and it must not stand in for it. Reading a form and being able to
+    touch it are the two halves that were confused when the viewer was deleted.
     """
     conn = store.connect(tmp_path / "state.db")
     page = server.render_apply(conn, _live_session())
@@ -2009,7 +2013,7 @@ def test_the_only_way_to_submit_is_armed_and_one_shot(tmp_path):
     # And still not something the queue can carry: `submit` is a session-level gate, so
     # nothing that reaches `Session.submit` can activate a control.
     assert live_mod.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
-                                   "highlight"}
+                                   "highlight", "search"}
     assert "submit" not in live_mod.VOCABULARY
     session = live_mod.current()
     assert session.submit(live_mod.Command(kind="submit", handle="jt0")) is False
@@ -2359,6 +2363,177 @@ def test_the_page_and_its_script_call_a_status_the_same_thing(tmp_path):
         assert status in server._STATUS_WORD
 
 
+# -- asking a menu what it offers -------------------------------------------------------
+# The one dead end on this page. Greenhouse's "Location (City)" is a react-select whose
+# options are fetched per keystroke, so nothing offline can learn what it accepts: the
+# row rendered as a text box and any answer that was not character-for-character one of
+# the widget's own suggestions came back "would not take it", with no way to find out
+# what would have been taken.
+
+
+def test_a_lookup_is_queued_like_every_other_command(tmp_path):
+    """Handle, value, epoch. No selector, and nothing the browser thread evaluates."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    assert h._api_session_search({"handle": "jt0", "epoch": session.epoch,
+                                  "value": "new york"})["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.kind == live_mod.SEARCH
+    assert command.handle == "jt0" and command.value == "new york"
+    assert command.epoch == session.epoch
+
+
+def test_an_empty_lookup_is_refused(tmp_path):
+    """An empty query is not a search: it reads the whole unfiltered menu, which for a
+    place lookup is nothing at all — and it would overwrite a list you had just asked for
+    with a blank one, which renders as "it offered nothing"."""
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    out = h._api_session_search({"handle": "jt0", "epoch": session.epoch, "value": "  "})
+    assert out["ok"] is False
+    assert "look up" in out["error"]
+    assert session.commands.empty()
+
+    assert h._api_session_search({"epoch": 0, "value": "x"})["ok"] is False
+    assert h._api_session_search({"handle": "jt0", "epoch": "soon",
+                                  "value": "x"})["ok"] is False
+    assert session.commands.empty()
+
+
+def test_what_a_menu_offered_renders_as_a_menu(tmp_path):
+    """And the query it answered renders with it, because neither means anything alone.
+
+    Picking from this select pushes an ordinary `set` carrying a string the widget's own
+    menu produced — the one kind of value `_pick` is guaranteed to find. Nothing here
+    picks the nearest match for you, which is the rule that keeps an answer you did not
+    give off an application you are about to send.
+    """
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    session = _mirror([
+        (FormField(key="candidate-location", label="Location (City)*",
+                   type="combobox", required=True), live.REFUSED, "", None),
+    ])
+    session.offer("jt0", "New York, NY", ["New York, NY, United States",
+                                          "New York Mills, MN, United States"])
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert '<option value="New York, NY, United States">' in page
+    assert "what it offered for" in page
+    assert "<code>New York, NY</code>" in page
+    # The query goes back in the box, so a reload does not make you retype it.
+    assert 'class="sq" type="text" value="New York, NY"' in page
+
+
+def test_a_live_reading_supersedes_a_published_option_list(tmp_path):
+    """A published list that has just refused an answer is the list that failed.
+
+    Greenhouse publishes every option of every *question*, so those render as ordinary
+    menus and never come here. When one of them refuses anyway — the DOM disagreeing with
+    the API — `_pick` read the live menu in order to refuse, and that reading is what the
+    row should offer. Without the fallback in the other direction, a combobox with a
+    published list and no reading would render its menu away and put nothing in its place.
+    """
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    session = _mirror([
+        (FormField(key="q1", label="Work auth?", type="combobox", required=True,
+                   options=("Yes", "No")), live.GAP, "", None),
+    ])
+    # No reading yet: the published menu, and no lookup box cluttering a settled dropdown.
+    page = server.render_apply(conn, session)
+    assert '<option value="Yes">Yes</option>' in page
+    assert 'class="lf-lookup"' not in page
+
+    session.offer("jt0", "Authorized", ["Yes, I am authorized", "No"])
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert '<option value="Yes, I am authorized">' in page
+    assert '<option value="Yes">Yes</option>' not in page, "the list that just failed"
+    assert 'class="lf-lookup"' in page
+
+
+def test_a_lookup_that_came_back_with_nothing_says_so(tmp_path):
+    """It renders exactly like one that never ran, and the difference is whether to press
+    the button again or type something else."""
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    session = _mirror([
+        (FormField(key="candidate-location", label="Location (City)*",
+                   type="combobox", required=True), live.GAP, "", None),
+    ])
+    session.offer("jt0", "Atlantis", [])
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "it offered nothing for" in page
+    assert "<code>Atlantis</code>" in page
+
+
+def test_the_page_re_reads_itself_when_a_menu_has_been_read(tmp_path):
+    """The suggestions are the server's markup, so the page reloads rather than building
+    `<option>` elements — same reasoning as the epoch recovery, same busy guard.
+
+    Driven off what each row was *rendered* against rather than off a button press, which
+    is what makes a refused fill land the same way: `_pick` read the open menu in order to
+    refuse, and that reading arrives with no click behind it.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    script = page[page.rindex("<script>"):]
+
+    assert "card.dataset.offeredfor" in script
+    assert "f.offered_for" in script
+    assert "!busyNow()" in script
+    # And the row carries what it was rendered with, or there is nothing to compare.
+    assert "data-offeredfor=" in page
+    # At most once per distinct reading. The reload resolves the difference in every case
+    # there is — `render_apply` renders from the same snapshot the poll reads — but a
+    # page that reloads itself forever is the wrong failure to risk, so the reading is
+    # marked in the hash before the reload and not repeated. Verified in a real browser
+    # 2026-08-29 against a server that never stopped reporting the new list: two loads,
+    # not two hundred.
+    assert "location.hash = '#read=' + reading" in script
+    assert "location.hash !== '#read=' + reading" in script
+    # Only in the direction that gains a list. The reverse — the page holding one the
+    # session has since cleared — is what every successful pick produces, and reloading
+    # there throws away a menu that is still correct to render an empty one.
+    assert "if (!f.offered_for) return;" in script
+
+
+def test_a_menus_suggestions_are_never_stored_as_its_options(tmp_path):
+    """They answer one query, not the question "what does this field accept".
+
+    `store.known_options` replays whatever is stored at every later visit, so writing a
+    place lookup's answer to "new" there would teach that employer's form a vocabulary of
+    four cities — and `match_option` would then refuse every other one.
+    """
+    import inspect
+
+    from jobtracker import browser as browser_mod
+
+    # The one caller that persists never passes a query; the one that passes a query
+    # writes nothing.
+    assert "query" not in inspect.getsource(browser_mod._learn_vocabularies)
+    obey = inspect.getsource(browser_mod._obey)
+    search = obey[obey.index("live.SEARCH:"):]
+    assert "upsert_form_field" not in search and "_remember" not in search
+    assert "session.offer(" in search
+
+
 def test_deleting_a_value_is_sent_as_a_clear_rather_than_an_empty_set(tmp_path):
     """The endpoint refuses an empty `set`, so the page has to know the difference.
 
@@ -2489,7 +2664,7 @@ def test_the_window_can_be_closed_from_the_page(tmp_path):
     assert session.close_requested() is True
     assert session.commands.empty()
     assert live_mod.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
-                                   "highlight"}
+                                   "highlight", "search"}
 
 
 def test_closing_works_from_any_phase(tmp_path):
@@ -3083,8 +3258,15 @@ def test_a_checkbox_set_renders_as_one_question_with_its_choices(tmp_path):
 
 
 def test_a_dropdown_renders_as_a_dropdown_when_its_options_are_known(tmp_path):
-    """And as a text box, with a note, when they are not — because a `<select>` holding
-    only "— choose —" is worse than either."""
+    """And as a lookup box when they are not, rather than as free text.
+
+    A combobox with a published vocabulary is a plain menu. One without is the case
+    "Location (City)" made unavoidable: Greenhouse fetches its options per keystroke, so
+    there is no list to open and nothing offline can learn one. It used to render as a
+    text box apologising for itself, and anything typed into it that was not
+    character-for-character one of the widget's own suggestions came back "would not take
+    it" with no way to find out what would have been taken.
+    """
     from jobtracker import live
     from jobtracker.models import FormField
 
@@ -3098,8 +3280,15 @@ def test_a_dropdown_renders_as_a_dropdown_when_its_options_are_known(tmp_path):
     conn.close()
 
     assert '<option value="Yes">Yes</option>' in page
+    # The unpublished one gets a query box and a button to ask the widget itself, and
+    # says why. It never gets a free-text field pretending the answer is anything you
+    # like — that reading is what put "New York, New York" into a phone country selector.
     assert "a menu on the real form" in page
-    assert page.count("<select class=\"lv\"") == 1
+    assert 'class="lf-lookup"' in page
+    assert page.count('class="sq"') == 1
+    # Two selects, and the second one holds nothing but "— choose —" until something has
+    # asked. A menu with no options is still a menu; a text box is a different claim.
+    assert page.count('<select class="lv"') == 2
 
 
 def test_the_filename_an_employer_sees_is_a_setting(tmp_path):

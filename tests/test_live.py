@@ -28,7 +28,7 @@ def _session(*specs, handles=None):
 
 # -- the invariant that matters most ---------------------------------------------------
 def test_the_command_vocabulary_cannot_activate_anything():
-    """A web request may make the browser do exactly six things, none of them a click.
+    """A web request may make the browser do exactly seven things, none of them a click.
 
     This is `browser.py`'s no-submit rule carried across the new channel. That rule is
     enforced against the module's own source, which says nothing about commands arriving
@@ -41,9 +41,14 @@ def test_the_command_vocabulary_cannot_activate_anything():
 
     `reset` is on `clear`'s side of that line for the same reason and by the same test:
     it is `clear` over every field at once, so it reaches nothing a fill does not.
+
+    `search` is on that side too, and by the same test again. It opens a combobox, types
+    a query into the widget's own search box and reads back what the menu then shows —
+    both halves of which `_pick` already performs as the first step of a `set`. It stops
+    where `_pick` goes on to press an option, so it commits nothing and returns text.
     """
     assert live.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
-                               "highlight"}
+                               "highlight", "search"}
     assert "submit" not in live.VOCABULARY
 
     # And a command carries a handle and a value — never a selector, never an
@@ -312,3 +317,49 @@ def test_a_checkbox_set_is_answered_by_one_box_not_by_all_of_them():
     session.mark("jt1", live.FILLED, "Glassdoor")
     assert session.unfilled_required() == []
     assert session.snapshot()["need"] == 0
+
+
+# -- what a menu offered ----------------------------------------------------------------
+# The row's `offered`/`offered_for` pair, which is how a dropdown nobody publishes becomes
+# something you can choose from rather than something you have to guess at.
+
+
+def test_a_menu_reading_is_kept_with_the_query_that_produced_it():
+    """They only mean anything together.
+
+    "New York, NY, United States" is not what the field offers; it is what it offered for
+    "new york". A list rendered without its query is a menu that looks complete and is
+    not — and for a place lookup, "complete" would be a claim about every city on earth.
+    """
+    session = _session(("candidate-location", "Location (City)*", "combobox"))
+    assert session.snapshot()["fields"][0]["offered"] == []
+    assert session.snapshot()["fields"][0]["offered_for"] == ""
+
+    session.offer("jt0", "new york", ["New York, NY, United States"])
+    row = session.snapshot()["fields"][0]
+    assert row["offered"] == ["New York, NY, United States"]
+    assert row["offered_for"] == "new york"
+
+
+def test_a_menu_reading_does_not_survive_a_new_reading_of_the_form():
+    """Unlike the status and the value, which `carried` carries on purpose.
+
+    `options` is a vocabulary and belongs to the field; this is one widget's answer to one
+    query at one moment. A form that has just been re-read is a form whose menus nobody
+    has opened since, and offering a stale list is worse than offering none — you would
+    pick from it, and `_pick` would then not find what you picked.
+    """
+    session = _session(("candidate-location", "Location (City)*", "combobox"))
+    session.offer("jt0", "new york", ["New York, NY, United States"])
+    session.mark("jt0", live.FILLED, "New York, NY, United States")
+
+    session.absorb(live.rows_from(
+        _found("jt0"),
+        _fields(("candidate-location", "Location (City)*", "combobox")),
+        session.carried(),
+    ))
+    row = session.snapshot()["fields"][0]
+    assert row["offered"] == [] and row["offered_for"] == ""
+    # The two that *are* carried still are.
+    assert row["status"] == live.FILLED
+    assert row["value"] == "New York, NY, United States"

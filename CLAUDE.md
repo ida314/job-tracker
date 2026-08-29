@@ -927,6 +927,22 @@ been deciding. Two rules follow from the removal and both are load-bearing:
   text on a real application exactly as surely as writing it. The rule that survives is
   the general one, and it now has no exception: a value reaches a field because a canonical
   ATS name matched, or because *the user attached this wording to this answer*.
+- **A dropdown with no list to open is asked, not guessed at** (2026-08-29). `search` is
+  the seventh command and the only way to read the one kind of menu that has no vocabulary:
+  Greenhouse's *Location (City)* fetches its options per keystroke, so opening it shows
+  nothing and goes on showing nothing — measured, it is the one combobox of ten on Twilio's
+  form with no "Toggle flyout" button, because there is nothing to toggle. So
+  `_learn_vocabularies` correctly learnt nothing, `/apply` rendered a text box, and any
+  answer that was not character-for-character one of its suggestions came back *"would not
+  take it"* with no way to see what would have been taken. Now a **refused** `_pick`
+  publishes the menu it had to read in order to refuse (`seen` → `Session.offer`), and the
+  row carries a query box and **Look up** for asking it something else; either way the
+  suggestions render as the row's `<select>` and picking one pushes a string the widget's
+  own menu produced. The reading is **never** stored as the field's `options` — it answers
+  one query, and `known_options` would replay it at every later visit — and a re-reading of
+  the form drops it. `_pick`'s search condition widened with it: it used to type only when
+  the menu came up *empty*, so a menu showing anything at all (a previous lookup's results,
+  a default list) was refused without ever being asked for the value we hold.
 - **A dropdown that does not offer our answer is a gap, not a fill.** Picking the nearest
   option puts an answer the candidate did not give onto a submitted application.
   `match_option` waves any string through when `options` is empty, which is right for a
@@ -1189,8 +1205,9 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
   that made them** — an HTTP handler calling into one is the bug this shape prevents. So a
   write is queued and answered immediately and the outcome arrives on the next poll, the
   same shape `_api_apply_to` already had and for the same reason.
-- **A command points, it does not write.** The vocabulary is exactly five names — `set`,
-  `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
+- **A command points, it does not write.** The vocabulary is exactly seven names — `set`,
+  `clear`, `reset`, `rediscover`, `shoot`, `highlight`, `search` — and a command carries a
+  field *handle*,
   never a selector and never anything the browser thread evaluates. That is `browser.py`'s
   no-click-path rule carried across the new channel, and it needs its own test because the
   existing one only scans that module's source.
