@@ -398,8 +398,20 @@ def _launch(playwright, user_data_dir: Path, headless: bool):
     Using the system Chrome means no second browser to download and no second profile
     to keep logged in. Falling back to Playwright's bundled Chromium keeps this working
     on a machine that has neither.
+
+    **The failure carries its own reason** (2026-08-29). This used to send both attempts'
+    exceptions to `log.debug` and raise a fixed *"no browser to drive… `playwright
+    install chromium`"* — a message that names a cause, which is better than one that
+    names an absence only when the cause is the real one. Twice in two days it was not:
+    once `$DISPLAY` pointed at a dead X server, once the profile held a `SingletonLock`
+    naming a container that no longer existed. Both times chromium-1234 was present and
+    correct, the message sent the reader to reinstall it, and the *page* two layers up
+    said only that the window was closed. Debug logging is not an answer here — the
+    launch happens on `serve`'s daemon thread, where the exception is the only thing that
+    ever reaches a human.
     """
     user_data_dir.mkdir(parents=True, exist_ok=True)
+    attempts = []
     for channel in ("chrome", None):
         try:
             return playwright.chromium.launch_persistent_context(
@@ -410,9 +422,32 @@ def _launch(playwright, user_data_dir: Path, headless: bool):
             )
         except Exception as exc:  # noqa: BLE001 — try the next channel
             log.debug("could not launch channel=%s: %s", channel, exc)
-    raise BrowserUnavailable(
-        "no browser to drive. Install one with `playwright install chrome` "
-        "(or `playwright install chromium`)."
+            attempts.append(exc)
+    raise BrowserUnavailable(_why_no_browser(attempts, user_data_dir))
+
+
+def _why_no_browser(attempts: list, user_data_dir: Path) -> str:
+    """What to tell someone whose browser did not start.
+
+    Two different failures wear the same words otherwise. *Missing* is the one the old
+    message assumed and is genuinely fixed by installing something. *Present but would
+    not start* is everything else, and on a headless host it has been the same two causes
+    both times it has happened here — which are named because they were measured, not
+    because they are the only possibilities. The launcher's own first line goes in either
+    way: it is the only part of this that is evidence rather than inference.
+    """
+    reason = str(attempts[-1]).strip() if attempts else ""
+    first = reason.splitlines()[0] if reason else "no reason given"
+    if "Executable doesn't exist" in reason or "playwright install" in reason:
+        return (f"no browser to drive: {first} "
+                "Install one with `playwright install chrome` "
+                "(or `playwright install chromium`).")
+    return (
+        f"a browser is installed but would not start: {first} "
+        "On a headless host the two causes seen here are $DISPLAY pointing at an X "
+        f"server that is not running, and a stale SingletonLock in {user_data_dir} "
+        "naming a host that no longer exists — a container that has been recreated "
+        "leaves exactly that."
     )
 
 

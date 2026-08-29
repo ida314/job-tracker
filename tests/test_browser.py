@@ -1771,3 +1771,51 @@ def test_resetting_empties_the_real_form_in_one_pass(tmp_path):
             assert set(statuses.values()) == {live.CLEARED}
         finally:
             context.close()
+
+
+def test_a_browser_that_will_not_start_is_not_reported_as_a_missing_one():
+    """The message that cost two evenings, in both directions.
+
+    A launch failure used to send its real exception to `log.debug` and raise a fixed
+    "no browser to drive… `playwright install chromium`". On a headless host that is
+    almost never true: chromium-1234 was installed and correct both times this fired,
+    once with $DISPLAY pointing at a dead X server and once with a stale SingletonLock
+    in the profile naming a container that had been recreated. It happens on `serve`'s
+    daemon thread, where the exception is the only thing a human ever sees, so the
+    reason has to travel in it.
+    """
+    from pathlib import Path
+
+    could_not_start = browser._why_no_browser(
+        [Exception("Target page, context or browser has been closed\nBrowser logs: …")],
+        Path("/data/browser"),
+    )
+    assert "would not start" in could_not_start
+    assert "Target page, context or browser has been closed" in could_not_start
+    # It must not send the reader off to reinstall a browser that is already there.
+    assert "playwright install" not in could_not_start
+    # And it names where to look, which is the whole point of the change.
+    assert "SingletonLock" in could_not_start and "/data/browser" in could_not_start
+    # One line of the launcher's output, not the whole log dump.
+    assert "Browser logs" not in could_not_start
+
+
+def test_a_genuinely_missing_browser_still_says_how_to_install_one():
+    """The other half: the old message was right about *this* case and stays."""
+    from pathlib import Path
+
+    missing = browser._why_no_browser(
+        [Exception("Executable doesn't exist at /ms-playwright/chromium-1234/chrome")],
+        Path("/data/browser"),
+    )
+    assert "playwright install" in missing
+    assert "would not start" not in missing
+
+
+def test_the_launch_failure_never_comes_back_empty_handed():
+    """No attempts recorded is still a sentence, not a bare colon. Belt and braces: the
+    loop always appends before raising, but a message that degrades into punctuation is
+    how a reason-carrying error quietly becomes a reason-free one again."""
+    from pathlib import Path
+
+    assert browser._why_no_browser([], Path("/data/browser")).strip()

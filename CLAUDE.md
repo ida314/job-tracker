@@ -472,6 +472,17 @@ which outranks the raw corpus. See "Applications: the outer loop" below.
   `serve` restarted. `_hold_until_closed` waits in `page.wait_for_timeout(500)`; both
   endings then arrive as an empty page list or `TargetClosedError`. Measured against a
   real browser 2026-08-16, and there is a test asserting the call is still there.
+- **A launch failure has to say why it failed** (2026-08-29). `_launch` tries `chrome`
+  then bundled Chromium and used to send both exceptions to `log.debug` and raise a fixed
+  *"no browser to drive… `playwright install chromium`"*. That names a cause, which beats
+  naming an absence only when the cause is real — and twice in two days it was not: once
+  `$DISPLAY` pointed at a dead X server, once the profile held a `SingletonLock` naming a
+  container that had been recreated. Both times the browser was installed and correct, and
+  the page two layers up said only that the window was closed. `_why_no_browser` carries
+  the launcher's own first line into the exception and separates *missing* (install
+  something) from *would not start* (look at the display and the profile lock); debug
+  logging cannot substitute, because this runs on `serve`'s daemon thread where the
+  exception is the only thing that reaches a human.
 - **The browser opens on the machine running `serve`, not the machine viewing the page.**
   From 2026-08-22 to 2026-08-29 nothing in this app linked you to it: `JOBTRACKER_BROWSER
   _VIEW_URL` and both "View window" links were deleted, because they existed for the two
