@@ -2989,7 +2989,9 @@ def test_adding_a_company_reflows_nothing_else(tmp_path, monkeypatch):
 @pytest.mark.parametrize("payload, fragment", [
     ({"ats": "greenhouse"}, "name is required"),
     ({"name": "Stripe", "ats": "greenhouse", "slug": "s2"}, "already tracked"),
-    ({"name": "X", "ats": "workday", "slug": "x", "check_method": "api"}, "adapter"),
+    # `bespoke` rather than `workday`: Workday gained an adapter on 2026-08-31, so it is
+    # no longer an example of an ats that cannot be fetched.
+    ({"name": "X", "ats": "bespoke", "slug": "x", "check_method": "api"}, "adapter"),
     ({"name": "X", "ats": "greenhouse", "check_method": "api"}, "needs a slug"),
     ({"name": "X", "ats": "bespoke", "tier": "nine"}, "tier must be"),
     ({"name": "X", "ats": "bespoke", "careers_page": "javascript:alert(1)"}, "http(s) URL"),
@@ -3009,7 +3011,7 @@ def test_validation_failures_get_no_escape_hatch(tmp_path, monkeypatch):
     coherent."""
     path, h = _companies_handler(tmp_path)
     _no_sockets(monkeypatch)
-    res = h._api_company({"name": "X", "ats": "workday", "slug": "x",
+    res = h._api_company({"name": "X", "ats": "bespoke", "slug": "x",
                           "check_method": "api", "force": True})
     assert res["ok"] is False
 

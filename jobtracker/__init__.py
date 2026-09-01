@@ -23,7 +23,14 @@ import os
 # task, the last bounded model role), a posting can carry its own resume and be
 # re-planned from the page, the postings tables group by company, Today opens past its
 # three, and the answer gaps sort by how many employers ask. Three new tables.
-__version__ = "0.3.0"
+#
+# 0.4.0 (2026-08-31) — import plugins: a third registry, for a source of postings that
+# is not a board. Discord is the first, reading one channel over REST with a bot token
+# (this repo's first credential, env-only). Ingestion is append-only, because a poll is
+# not a complete statement of what a feed holds and `sync_postings` would close the
+# group every quiet night. Postings now carry a `dedupe_key`, so one req announced on
+# several roads is one row. One new table, three new columns.
+__version__ = "0.4.0"
 
 
 def build_version() -> str:

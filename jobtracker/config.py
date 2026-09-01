@@ -69,6 +69,28 @@ RESUMES_DIR = Path(os.environ.get("JOBTRACKER_RESUMES", ROOT / "data" / "resumes
 _MAILDIR = os.environ.get("JOBTRACKER_MAILDIR", "").strip()
 MAILDIR = Path(_MAILDIR) if _MAILDIR else None
 
+# Import plugins: which feeds are switched on, and how each is pointed at its source.
+# Curation, like companies.yaml — every writer is a command you typed. Absent means no
+# plugin is configured, which is a normal state and never an error. See docs/plugins.md.
+PLUGINS_YAML = Path(os.environ.get("JOBTRACKER_PLUGINS", ROOT / "plugins.yaml"))
+
+# The Discord bot token, and this repo's first credential. Five rules come with it, and
+# every one of them is a place it could leak from:
+#
+#   * Env only, never plugins.yaml. Gitignored is not the same protection as never on
+#     disk; a config file gets `cat`ed into a terminal and pasted into an issue.
+#   * Never a build ARG — `docker history` on a published image reads those back, which
+#     is already recorded here about the sir-client install.
+#   * Never in a log line's `extra={}`: the JSON formatter promotes those to top-level
+#     keys, so it would land in structured logs.
+#   * Never a span attribute, and therefore **never a query parameter** — `_request`
+#     records `url.full` on every request and logs the URL on every retry. Header only.
+#   * Never echoed by `plugins list`, not even a prefix.
+#
+# Empty means not configured — the MAILDIR rule — and the plugin reports itself
+# unavailable rather than idle, which is a different state from "nothing to do".
+DISCORD_TOKEN = os.environ.get("JOBTRACKER_DISCORD_TOKEN", "").strip() or None
+
 _DEFAULT_DB = ROOT / "data" / "state.db"
 DB_PATH = Path(os.environ.get("JOBTRACKER_DB", _DEFAULT_DB))
 

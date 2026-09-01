@@ -193,7 +193,10 @@ def test_every_entry_in_the_real_companies_yaml_passes_validation():
     (dict(name="X", ats=""), "ats is required"),
     (dict(name="X", ats="banana"), "ats must be one of"),
     (dict(name="X", ats="greenhouse", check_method="sometimes"), "check_method must be"),
-    (dict(name="X", ats="workday", slug="x", check_method="api"), "needs an ats with an adapter"),
+    # `bespoke` names a portal with no public JSON board and so has no adapter. This was
+    # `workday` until 2026-08-31, when Workday got one — the example has to be an ats
+    # that genuinely cannot be fetched, or the test passes for the wrong reason.
+    (dict(name="X", ats="bespoke", slug="x", check_method="api"), "needs an ats with an adapter"),
     (dict(name="X", ats="greenhouse", check_method="api"), "needs a slug"),
     (dict(name="X", ats="greenhouse", slug="a/b", check_method="api"), "not a URL"),
     (dict(name="X", ats="bespoke", tier=9), "tier must be"),
@@ -238,3 +241,46 @@ def test_an_aggregator_without_a_board_url_is_allowed():
     assert curation.validate_new(
         _company(name="Unwired Feed", ats="aggregator", check_method="aggregator"), []
     ) == []
+
+
+def test_a_new_field_lands_in_schema_order_not_at_the_top():
+    """`edit_entry` inserted a not-yet-present key straight after `- name:` until
+    2026-08-31, which put `slug` above `ats` and, on an entry carrying no notes, `notes`
+    above both. CLAUDE.md's field schema says the parser and every awk/grep sweep in this
+    repo depends on that order, so promoting the five Workday entries would have quietly
+    reordered five blocks."""
+    text = (
+        "- name: Target Tech\n"
+        "  ats: workday\n"
+        "  tier: 5\n"
+        "  category: enterprise-backend\n"
+        "  check_method: manual\n"
+        "  careers_page: https://tech.target.com/job-search\n"
+        "  expected_board_name: null\n"
+    )
+    out = curation.edit_entry(
+        text, "Target Tech",
+        {"slug": "target/wd5/targetcareers", "check_method": "api", "notes": "promoted"},
+    )
+    keys = [ln[2:].split(":", 1)[0] for ln in out.splitlines() if ln.startswith("  ")]
+    assert keys == [
+        "ats", "slug", "tier", "category", "check_method", "careers_page",
+        "notes", "expected_board_name",
+    ]
+    assert "  check_method: api\n" in out
+
+def test_a_workday_slug_must_be_a_triple_and_others_still_may_not_hold_a_slash():
+    """The shape rule splits by ats. A Workday board is not identified by any single
+    string — the data centre is in the hostname — so `redhat/wd5/jobs` is the identifier,
+    not a URL smuggled into a slug field. Everyone else keeps the original rule."""
+    existing = []
+    ok = Company(name="X", ats="workday", slug="redhat/wd5/jobs", check_method="api")
+    assert curation.validate_new(ok, existing) == []
+    for bad in ("redhat", "redhat/wd5"):
+        errs = curation.validate_new(
+            Company(name="X", ats="workday", slug=bad, check_method="api"), existing)
+        assert any("tenant triple" in e for e in errs), bad
+    errs = curation.validate_new(
+        Company(name="X", ats="greenhouse", slug="greenhouse/stripe", check_method="api"),
+        existing)
+    assert any("not a URL" in e for e in errs)

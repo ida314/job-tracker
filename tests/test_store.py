@@ -437,3 +437,200 @@ def test_a_dom_reading_does_not_erase_options_the_ats_published(tmp_path):
     row = conn.execute("SELECT type, source FROM form_fields").fetchone()
     assert (row["type"], row["source"]) == ("combobox", "dom")
     conn.close()
+
+
+# -- dedupe: one identity for one req, however it arrived ---------------------------
+def _dp(company, jid, url, check_method="api"):
+    """A posting plus the check_method its company would carry in companies.yaml."""
+    return Posting(company, jid, "Software Engineer", url, "NYC")
+
+
+def test_an_existing_database_gains_the_dedupe_index_without_a_rebuild(tmp_path):
+    """The index is applied AFTER the column migrations, and that ordering is the test.
+
+    `connect` runs `executescript(_SCHEMA)` first, so an index declared there would
+    raise "no such column: dedupe_key" against any database that predates the column —
+    and would pass against every freshly-built one, which is every other database in
+    this suite. The bug would be invisible until it reached the only database that
+    matters. So: build a connection, drop the column back off, reconnect.
+    """
+    db = tmp_path / "old.db"
+    conn = store.connect(db)
+    store.sync_postings(conn, "Acme", [_p("1")], "2026-07-01")
+    conn.commit()
+    conn.execute("DROP INDEX IF EXISTS idx_postings_dedupe_key")
+    conn.execute("ALTER TABLE postings DROP COLUMN dedupe_key")
+    conn.commit()
+    conn.close()
+
+    reopened = store.connect(db)  # must not raise
+    cols = {r["name"] for r in reopened.execute("PRAGMA table_info(postings)")}
+    assert "dedupe_key" in cols
+    indexes = {
+        r[0] for r in reopened.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    assert "idx_postings_dedupe_key" in indexes
+    assert reopened.execute("SELECT COUNT(*) FROM postings").fetchone()[0] == 1
+
+
+def test_an_api_row_keys_on_curated_identity_not_on_whatever_url_its_board_returned():
+    """25 of 45 Greenhouse boards return a careers-site absolute_url. Keyed off that,
+    the row would sit where no feed link could reach it."""
+    conn = _conn()
+    store.sync_postings(
+        conn, "Stripe",
+        [Posting("Stripe", "4567", "SWE", "https://stripe.com/jobs/search?gh_jid=4567")],
+        "2026-07-01", identity=("greenhouse", "stripe"),
+    )
+    key = conn.execute("SELECT dedupe_key FROM postings").fetchone()[0]
+    assert key == "greenhouse:stripe:4567"
+
+
+def test_a_feed_row_with_no_identity_keys_on_its_url():
+    conn = _conn()
+    store.sync_postings(
+        conn, "Simplify",
+        [Posting("Simplify", "abc", "X — SWE", "https://jobs.lever.co/artera-2/eae")],
+        "2026-07-01",
+    )
+    assert conn.execute("SELECT dedupe_key FROM postings").fetchone()[0] == \
+        "lever:artera-2:eae"
+
+
+def test_a_url_that_moves_takes_its_key_with_it():
+    """Plain assignment, not COALESCE like posted_on next door: a Greenhouse board
+    migrating its absolute_url to a careers page is a documented, observed event."""
+    conn = _conn()
+    store.sync_postings(
+        conn, "Acme", [Posting("Acme", "1", "SWE", "https://a.example/jobs/1")], "2026-07-01"
+    )
+    store.sync_postings(
+        conn, "Acme", [Posting("Acme", "1", "SWE", "https://b.example/jobs/1")], "2026-07-02"
+    )
+    assert conn.execute("SELECT dedupe_key FROM postings").fetchone()[0] == \
+        "url:b.example/jobs/1"
+
+
+def test_a_row_closed_as_a_duplicate_is_not_reopened_by_its_own_feed():
+    """Without this guard the whole feature oscillates: the aggregator still lists the
+    duplicate tomorrow, so the closure made at 01:05 is undone at 01:00 and remade at
+    01:05, every night, forever."""
+    conn = _conn()
+    url = "https://jobs.lever.co/acme/xyz"
+    # `ats_job_id` is the uuid in the hosted URL — verified against the live database,
+    # where all 3,487 ats-hosted rows agree and none disagree. The feed row reaches the
+    # same key from the URL alone.
+    store.sync_postings(conn, "Stripe", [Posting("Stripe", "xyz", "SWE", url)], "2026-07-01",
+                        identity=("lever", "acme"))
+    store.sync_postings(conn, "Simplify", [Posting("Simplify", "2", "SWE", url)], "2026-07-01")
+    closed, _ = store.close_duplicates(
+        conn, {"Stripe": "api", "Simplify": "aggregator"}, "2026-07-01"
+    )
+    assert [c["company"] for c in closed] == ["Simplify"]
+
+    # The feed lists it again tomorrow. It must stay closed.
+    store.sync_postings(conn, "Simplify", [Posting("Simplify", "2", "SWE", url)], "2026-07-02")
+    row = conn.execute(
+        "SELECT closed_at, closed_reason FROM postings WHERE company='Simplify'"
+    ).fetchone()
+    assert row["closed_at"] == "2026-07-01"
+    assert row["closed_reason"] == "duplicate"
+
+
+def test_a_posting_closed_by_absence_still_reopens_when_it_comes_back():
+    """The guard above must not break the original behaviour: closure by absence has a
+    NULL reason and is exactly the kind that should reopen."""
+    conn = _conn()
+    store.sync_postings(conn, "Acme", [_p("1")], "2026-07-01")
+    store.sync_postings(conn, "Acme", [], "2026-07-02")
+    store.sync_postings(conn, "Acme", [_p("1")], "2026-07-03")
+    row = conn.execute("SELECT closed_at, closed_reason FROM postings").fetchone()
+    assert row["closed_at"] is None and row["closed_reason"] is None
+
+
+def test_closing_a_duplicate_records_why_and_what_it_duplicates():
+    """DESIGN.md 3.5 — every automated verdict is stored with its reason. "It vanished"
+    is not an answer; "closed because this URL is the same req" is."""
+    conn = _conn()
+    url = "https://jobs.lever.co/acme/xyz"
+    store.sync_postings(conn, "Stripe", [Posting("Stripe", "xyz", "SWE", url)], "2026-07-01",
+                        identity=("lever", "acme"))
+    store.sync_postings(conn, "Discord: #jobs", [Posting("Discord: #jobs", "9", "SWE", url)],
+                        "2026-07-01")
+    store.close_duplicates(conn, {"Stripe": "api", "Discord: #jobs": "plugin"}, "2026-07-02")
+    row = conn.execute(
+        "SELECT closed_reason, duplicate_of_url FROM postings WHERE company='Discord: #jobs'"
+    ).fetchone()
+    assert row["closed_reason"] == "duplicate"
+    assert row["duplicate_of_url"] == url
+
+
+def test_two_api_rows_sharing_a_key_are_reported_and_neither_is_closed():
+    conn = _conn()
+    url = "https://acme.example/careers/search"
+    store.sync_postings(conn, "Acme", [Posting("Acme", "1", "A", url),
+                                       Posting("Acme", "2", "B", url)], "2026-07-01")
+    closed, conflicts = store.close_duplicates(conn, {"Acme": "api"}, "2026-07-02")
+    assert closed == []
+    assert len(conflicts) == 1 and len(conflicts[0]) == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postings WHERE closed_at IS NULL"
+    ).fetchone()[0] == 2
+
+
+def test_the_backfill_is_self_draining_and_a_second_run_is_a_no_op():
+    conn = _conn()
+    store.sync_postings(conn, "Acme", [_p("1"), _p("2")], "2026-07-01")
+    conn.execute("UPDATE postings SET dedupe_key=NULL")
+    assert store.backfill_dedupe_key(conn) == 2
+    assert store.backfill_dedupe_key(conn) == 0
+
+
+def test_the_backfill_prefers_curated_identity_when_it_has_it():
+    conn = _conn()
+    store.sync_postings(
+        conn, "Stripe",
+        [Posting("Stripe", "4567", "SWE", "https://stripe.com/jobs/search")], "2026-07-01"
+    )
+    conn.execute("UPDATE postings SET dedupe_key=NULL")
+    store.backfill_dedupe_key(conn, {"Stripe": ("greenhouse", "stripe")})
+    assert conn.execute("SELECT dedupe_key FROM postings").fetchone()[0] == \
+        "greenhouse:stripe:4567"
+
+
+def test_a_company_nobody_curates_is_reported_not_closed():
+    """Dropping an entry from companies.yaml must not become a way to close live rows.
+
+    Found by running the real pass against a deliberately empty companies.yaml: every
+    company lost both its identity key and its rank, and 795 Databricks postings sharing
+    one careers URL closed each other. The fix is that only a *feed* can be closed by a
+    peer, and an uncurated company is not a feed."""
+    conn = _conn()
+    url = "https://jobs.lever.co/acme/xyz"
+    store.sync_postings(conn, "Tracked", [Posting("Tracked", "xyz", "SWE", url)], "2026-07-01",
+                        identity=("lever", "acme"))
+    store.sync_postings(conn, "Forgotten", [Posting("Forgotten", "2", "SWE", url)], "2026-07-01")
+    closed, conflicts = store.close_duplicates(conn, {"Tracked": "api"}, "2026-07-02")
+    assert closed == []
+    assert len(conflicts) == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postings WHERE closed_at IS NULL"
+    ).fetchone()[0] == 2
+
+
+def test_a_board_that_links_every_req_to_one_careers_page_does_not_collapse():
+    """The live shape this protects: Databricks, Stripe and MongoDB all do exactly this,
+    covering 2,805 open postings between them and ten other boards."""
+    conn = _conn()
+    postings = [
+        Posting("Betterment", str(i), f"Role {i}",
+                f"https://www.betterment.com/careers/current-openings/job?gh_jid={i}")
+        for i in (7184616, 7187115, 7220419)
+    ]
+    store.sync_postings(conn, "Betterment", postings, "2026-07-01")
+    keys = {r[0] for r in conn.execute("SELECT dedupe_key FROM postings")}
+    assert len(keys) == 3
+    closed, _ = store.close_duplicates(conn, {"Betterment": "api"}, "2026-07-02")
+    assert closed == []

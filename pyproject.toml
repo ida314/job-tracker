@@ -1,6 +1,6 @@
 [project]
 name = "jobtracker"
-version = "0.3.0"
+version = "0.4.0"
 description = "Deterministic backend new-grad job-discovery pipeline (Design A)."
 # 3.12 is the floor sir-client sets, and it is the model transport now.
 requires-python = ">=3.12"
@@ -23,7 +23,17 @@ browser = ["playwright>=1.40"]
 jobtracker = "jobtracker.cli:main"
 
 [tool.setuptools]
-packages = ["jobtracker", "jobtracker.sources", "jobtracker.llm", "jobtracker.tasks"]
+packages = [
+    "jobtracker",
+    "jobtracker.sources",
+    "jobtracker.llm",
+    "jobtracker.tasks",
+    # Import plugins. A subpackage left out of this list is silently absent from the
+    # container image, where the failure looks like a feed that imports nothing.
+    "jobtracker.plugins",
+    "jobtracker.plugins.discord",
+    "jobtracker.plugins.discord.formats",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

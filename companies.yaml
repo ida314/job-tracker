@@ -334,19 +334,12 @@
   expected_board_name: kong
 - name: Red Hat
   ats: workday
-  slug: redhat / wd5 / jobs
+  slug: redhat/wd5/jobs
   tier: 2
   category: infra-opensource
-  check_method: manual
+  check_method: api
   careers_page: https://redhat.wd5.myworkdayjobs.com/jobs
-  notes: 2026-08-13 — added. Workday tenant `redhat.wd5`, site `jobs`, read off redhat.com/en/jobs;
-    greenhouse/lever/ashby `redhat` all 404, so there is no keyless JSON board — manual by rule.
-    IBM-owned since 2019 but, unlike HashiCorp, has NOT moved to IBM Careers; it still runs its
-    own Workday, so re-read the careers page before assuming a migration. Tier 2 on the work
-    rather than the logo — RHEL, OpenShift, Ansible and Ceph are the product, so backend and
-    distributed systems are the core engineering, not a supporting function. Check locations by
-    hand — much of that engineering is in Brno and Pune, and the US footprint is Raleigh and
-    Boston, with no NYC presence.
+  notes: '2026-08-13 — added as manual. 2026-08-31 — promoted to api: the Workday `cxs` endpoint is keyless and unauthenticated, and `redhat/wd5/jobs` returns 122 reqs. The 2026-08-13 note claimed no keyless JSON board existed because greenhouse|lever|ashby/redhat all 404; that ruled out three ATSes, not Workday''s own API, which nobody had looked for. IBM-owned since 2019 but, unlike HashiCorp, has NOT moved to IBM Careers. Tier 2 on the work rather than the logo — RHEL, OpenShift, Ansible and Ceph are the product, so backend and distributed systems are the core engineering. Much of that engineering is in Brno and Pune; the US footprint is Raleigh and Boston, with no NYC presence, and location ranks rather than gates.'
   expected_board_name: null
 - name: Coralogix
   ats: bespoke
@@ -390,11 +383,12 @@
   expected_board_name: null
 - name: Capital One
   ats: workday
+  slug: capitalone/wd12/Capital_One
   tier: 3
   category: fintech-eng
-  check_method: manual
+  check_method: api
   careers_page: https://www.capitalonecareers.com
-  notes: Large structured new-grad TDP (Technology Development Program). Real backend/AWS learning.
+  notes: Large structured new-grad TDP (Technology Development Program). Real backend/AWS learning. 2026-08-31 — promoted to api; tenant triple read off capitalonecareers.com, which links capitalone.wd12.myworkdayjobs.com/Capital_One. Note wd12, not wd5 — the data centre is not derivable from the tenant name, which is why the slug is a triple.
   expected_board_name: null
 - name: JPMorgan Chase
   ats: workday
@@ -514,7 +508,7 @@
   category: bigtech
   check_method: manual
   careers_page: https://www.amazon.jobs/en/teams/internships-for-students
-  notes: SDE I new-grad, huge cohort, structured onboarding. Applies year-round.
+  notes: 'SDE I new-grad, huge cohort, structured onboarding. Applies year-round. 2026-08-31 — investigated and deliberately left manual. amazon.jobs/en/search.json IS a keyless JSON board (result_limit up to 100, descriptions and qualifications inline, so no detail fetch), but the board cannot be read: offset paging is hard-capped and page 101 answers ''Cannot return more than 10000 results at once'', so a full walk is impossible and every night would end FETCH_FAILED. It is also over 10,000 reqs of overwhelmingly warehouse and operations roles, and took ~9 minutes before failing. Narrowing it with base_query or a category facet would be a role gate applied before any title is read — the locations_exclude mistake — so the honest state is manual. An adapter was written and removed; re-adding it is easy and still would not solve the 10,000 ceiling.'
   expected_board_name: null
 - name: Microsoft
   ats: bespoke
@@ -582,13 +576,12 @@
   expected_board_name: Coinbase
 - name: Nvidia
   ats: workday
-  slug: nvidia / wd5 / NVIDIAExternalCareerSite
+  slug: nvidia/wd5/NVIDIAExternalCareerSite
   tier: 4
   category: bigtech
-  check_method: manual
+  check_method: api
   careers_page: https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite
-  notes: Workday tenant known (nvidia/wd5). Auto-check only if agent supports Workday facet API; else
-    manual.
+  notes: '2026-08-31 — promoted to api. The previous note said ''auto-check only if agent supports Workday facet API; else manual'' — it does now, and the facet API is not needed: an empty appliedFacets returns the whole board. ~2,000 open reqs, so this is the largest Workday board tracked and ~100 paged requests a night.'
   expected_board_name: null
 - name: Dropbox
   ats: greenhouse
@@ -701,11 +694,12 @@
   expected_board_name: Faire
 - name: Workday
   ats: workday
+  slug: workday/wd5/Workday
   tier: 5
   category: enterprise-saas
-  check_method: manual
+  check_method: api
   careers_page: https://www.workday.com/en-us/company/careers.html
-  notes: Ironically Workday itself. Large new-grad program.
+  notes: Ironically Workday itself. Large new-grad program. 2026-08-31 — promoted to api, 359 reqs; the tenant triple was read off its own careers page.
   expected_board_name: null
 - name: Intuit
   ats: workday
@@ -725,10 +719,12 @@
   expected_board_name: null
 - name: Target Tech
   ats: workday
+  slug: target/wd5/targetcareers
   tier: 5
   category: enterprise-backend
-  check_method: manual
+  check_method: api
   careers_page: https://tech.target.com/job-search
+  notes: 2026-08-31 — promoted to api. tech.target.com names no ATS in its static HTML; the triple target/wd5/targetcareers was confirmed by fetching it (2,000 reqs). A guessed triple that 404s is indistinguishable from a dead board, so it was verified before being written.
   expected_board_name: null
 - name: Five9
   ats: greenhouse

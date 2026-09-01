@@ -28,6 +28,7 @@ Subcommands:
                 writes to the mailbox. `work --task inbox` is what reads the candidates
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
   repair        read careers pages for broken boards' new slugs; --write applies
+  plugins       list, enable, disable, configure or purge an import plugin
   add-company   append a curated entry to companies.yaml
   forget-learned  sweep every resolved label the rules and your aliases cannot
                 explain (the one-shot for a database that ran prefill's model pass)
@@ -282,6 +283,254 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
     )
 
 
+def _active_plugins(plugins_path) -> list:
+    """The (plugin, settings) pairs a run should actually read from.
+
+    Enabled-but-unavailable is logged rather than passed over silently, because it is a
+    different state from switched off: one is a decision you made, the other is a token
+    you meant to set. Reporting them the same way is how a feed quietly stops importing.
+    """
+    from . import plugins as plugins_mod
+    from .plugins import settings as plugin_settings
+
+    try:
+        configured = plugin_settings.load_settings(plugins_path)
+    except plugin_settings.InvalidSettings as exc:
+        # Refuse to guess. A malformed plugins.yaml is a curated file that says something
+        # unactionable, and silently reading it as "no plugins" would turn a typo into a
+        # feed that stopped importing with no error anywhere.
+        log.error("plugins.yaml is invalid, so no plugin ran: %s", exc)
+        return []
+
+    active = []
+    for plugin in plugins_mod.all_plugins():
+        settings = {**plugin_settings.DEFAULTS, **configured.get(plugin.name, {})}
+        if not settings.get("enabled"):
+            continue
+        why = plugin.unavailable_reason(settings)
+        if why:
+            log.warning("plugin %s is enabled but cannot run: %s", plugin.name, why)
+            continue
+        active.append((plugin, settings))
+    return active
+
+
+def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degraded) -> None:
+    """Read each active feed and fold it into the run, append-only.
+
+    Deliberately a separate loop from the board loop above rather than another entry in
+    `results`. The two differ at every step that matters: a poll is not a complete
+    statement of what a feed holds, so `append_postings` never closes by absence; and
+    zero new items is the normal answer, so `evaluate_plugin` never reads it as
+    SUSPECT_EMPTY. Folding them together would mean re-deciding both of those per row.
+    """
+    from . import plugins as plugins_mod
+    from .health import evaluate_plugin
+
+    for plugin, settings in active:
+        company = plugin.company(settings)
+        state = store.get_plugin_state(conn, plugin.name)
+        fetch = plugins_mod.collect(plugin, fetcher, settings, state, today)
+        log.info(
+            "plugin %s: %s",
+            plugin.name,
+            f"FAIL {fetch.error}"
+            if fetch.error
+            else f"{fetch.read} read, {fetch.imported} parsed, "
+                 f"{fetch.unparsed} unreadable, {fetch.skipped} not from a bot",
+        )
+
+        health = evaluate_plugin(company.name, fetch, store.get_health(conn, company.name), today)
+        store.upsert_health(conn, health, today)
+        boards_total.add(1, {"health.status": health.status.value, "ats": company.ats})
+        if health.status.value != "ok":
+            stats["failed"] += 1
+            log.warning("%s unhealthy: %s (%s)", company.name, health.status.value, health.detail)
+            if is_degraded(health):
+                degraded.append(f"{company.name}={health.status.value}")
+            continue
+
+        inserted, suppressed = store.append_postings(
+            conn, company.name, fetch.postings, today
+        )
+        stats["new_postings"] += len(inserted)
+        for dup in suppressed:
+            log.info("plugin %s: skipped %s — already tracked", plugin.name, dup.title[:60])
+        if suppressed:
+            log.info(
+                "plugin %s: %d announcement(s) were reqs already tracked and were not imported",
+                plugin.name, len(suppressed),
+            )
+
+        # Every downstream query is postings JOIN verdicts, so a posting with no verdict
+        # is in the table and absent from the product.
+        for posting in fetch.postings:
+            verdict = apply_override(match(posting, criteria), overrides)
+            store.record_verdict(conn, verdict, today)
+            if verdict.decision.value == "match" and posting in inserted:
+                stats["matches"] += 1
+
+        days = int(settings.get("expire_after_days") or 0)
+        if days:
+            floor = (date.fromisoformat(today) - timedelta(days=days)).isoformat()
+            aged = store.close_stale_postings(conn, company.name, floor, today)
+            if aged:
+                log.info(
+                    "plugin %s: closed %d posting(s) older than %d days — a channel "
+                    "announces and never retracts, so age is the only signal it has",
+                    plugin.name, aged, days,
+                )
+
+        # Last, and inside the run's transaction. If anything above raised, neither the
+        # postings nor the cursor landed and tonight's messages are re-read tomorrow —
+        # which `append_postings` makes idempotent.
+        if fetch.cursor:
+            store.set_plugin_state(conn, plugin.name, fetch.cursor, _now())
+
+
+# -- plugins -----------------------------------------------------------------------
+def cmd_plugins(args: argparse.Namespace) -> int:
+    """Switch an import feed on or off, point it at a source, or remove what it added.
+
+    The switch is a command rather than a page because turning a feed on is curation —
+    the same class of act as adding a company — and this repo's invariant is that curated
+    files are only ever written by something you did in the foreground (DESIGN.md 2.3).
+    """
+    from . import plugins as plugins_mod
+    from .plugins import settings as plugin_settings
+
+    path = Path(args.plugins) if args.plugins else config.PLUGINS_YAML
+    action = args.action
+
+    if action == "list":
+        return _plugins_list(args, path)
+
+    if not args.name:
+        print(f"which plugin? one of: {', '.join(plugins_mod.plugin_names())}", file=sys.stderr)
+        return 1
+    plugin = plugins_mod.get_plugin(args.name)
+    if plugin is None:
+        print(
+            f"unknown plugin {args.name!r} — known: {', '.join(plugins_mod.plugin_names())}",
+            file=sys.stderr,
+        )
+        return 1
+
+    if action == "purge":
+        return _plugins_purge(args, plugin)
+
+    try:
+        if action in ("enable", "disable"):
+            settings = plugin_settings.set_enabled(path, plugin.name, action == "enable")
+        else:  # set
+            if not args.options:
+                print("nothing to set — pass key=value pairs", file=sys.stderr)
+                return 1
+            options = {}
+            for pair in args.options:
+                if "=" not in pair:
+                    print(f"expected key=value, got {pair!r}", file=sys.stderr)
+                    return 1
+                key, _, value = pair.partition("=")
+                options[key.strip()] = plugin_settings.coerce(key.strip(), value)
+            settings = plugin_settings.set_options(path, plugin.name, options)
+    except plugin_settings.InvalidSettings as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    except safewrite.RefusedWrite as exc:
+        print(f"refused invalid plugins.yaml, nothing was written: {exc}", file=sys.stderr)
+        return 1
+
+    state = "enabled" if settings.get("enabled") else "disabled"
+    print(f"{plugin.name}: {state}  ({path})")
+    why = plugin.unavailable_reason(settings)
+    if why:
+        # Enabled and unable to run is a real state and worth naming here, or the next
+        # nightly run is the first thing that tells you.
+        print(f"  cannot run yet: {why}")
+    elif action == "enable":
+        days = settings.get("backfill_days")
+        print(f"  the next `check` will read the last {days} day(s), then only what is new")
+    return 0
+
+
+def _plugins_list(args: argparse.Namespace, path: Path) -> int:
+    from . import plugins as plugins_mod
+    from .plugins import settings as plugin_settings
+    from .plugins.discord import day_of
+
+    try:
+        configured = plugin_settings.load_settings(path)
+    except plugin_settings.InvalidSettings as exc:
+        print(f"plugins.yaml is invalid: {exc}", file=sys.stderr)
+        return 1
+
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    try:
+        for plugin in plugins_mod.all_plugins():
+            settings = {**plugin_settings.DEFAULTS, **configured.get(plugin.name, {})}
+            company = plugin.company(settings)
+            counts = store.plugin_posting_counts(conn, company.name)
+            state = "enabled" if settings.get("enabled") else "disabled"
+            print(f"{plugin.name}  [{state}]  {plugin.summary}")
+            why = plugin.unavailable_reason(settings)
+            if why:
+                print(f"  cannot run: {why}")
+            print(f"  group   : {company.name}")
+            if settings.get("label"):
+                print(f"  label   : {settings['label']}")
+            # The channel id is printed; the token never is, not even a prefix.
+            if settings.get("channel_id"):
+                print(f"  channel : {settings['channel_id']}")
+            cursor = store.get_plugin_state(conn, plugin.name).get("cursor")
+            if cursor:
+                print(f"  read to : {day_of(cursor) or cursor}")
+            else:
+                print(f"  read to : nothing yet — first run covers "
+                      f"{settings.get('backfill_days')} day(s)")
+            print(f"  postings: {counts['total']} total · {counts['open']} open · "
+                  f"{counts['applied']} applied")
+            print()
+    finally:
+        conn.close()
+    return 0
+
+
+def _plugins_purge(args: argparse.Namespace, plugin) -> int:
+    """Remove what a feed added. Dry by default; `--write` applies.
+
+    Your own rulings and applications are never touched — see `store._PURGE_KEEPS`. They
+    are reported so the number is not a surprise.
+    """
+    from .plugins import settings as plugin_settings
+
+    settings = plugin_settings.settings_for(plugin.name, args.plugins)
+    company = plugin.company(settings).name
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    try:
+        counts = store.plugin_posting_counts(conn, company)
+        blockers = store.purge_blockers(conn, company)
+        print(f"{plugin.name} -> {company}")
+        print(f"  {counts['total']} posting(s), {counts['open']} still open")
+        if blockers:
+            print(f"  {len(blockers)} of them you applied to or attached a resume to;")
+            print("  those applications and your own judgments are kept either way:")
+            for b in blockers[:10]:
+                print(f"    - {b['ats_job_id']} {b.get('title') or ''} [{b.get('status')}]")
+        if not args.write:
+            print("\n  nothing was removed. Re-run with --write to apply.")
+            return 0
+        removed = store.purge_company(conn, company, plugin=plugin.name)
+        conn.commit()
+        for table, n in sorted(removed.items()):
+            print(f"  removed {n} row(s) from {table}")
+        print("  kept: your judgments (decisions, overrides) and your applications")
+        print("  the cursor was cleared, so re-enabling starts a fresh backfill")
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     companies = config.load_companies(args.companies)
     criteria = load_criteria(args.criteria)
@@ -313,6 +562,12 @@ def cmd_check(args: argparse.Namespace) -> int:
         for c in companies
         if c.check_method == "aggregator" and c.board_url and get_source(c.ats)
     ]
+
+    # Import plugins: feeds that are not boards in companies.yaml (docs/plugins.md).
+    # A disabled plugin, an absent plugins.yaml and a missing credential all mean
+    # "contributes nothing" — which is why the switch is one comprehension here and not
+    # a branch anywhere below. Nothing downstream learns that plugins exist.
+    active_plugins = _active_plugins(getattr(args, "plugins", None))
 
     log.info(
         "loaded %d companies: %d api + %d aggregator fetchable, %d manual (never scraped)",
@@ -373,7 +628,13 @@ def cmd_check(args: argparse.Namespace) -> int:
                     replace(p, posted_on=source.normalize_posted_at(p.posted_at, today))
                     for p in postings
                 ]
-            new_postings, _ = store.sync_postings(conn, company.name, postings, today)
+            # The curated (ats, slug) is what an api row keys on for dedupe: most
+            # boards do not return a URL on their own ATS's host, so the URL alone
+            # would leave the majority of tracked reqs unreachable by a feed link.
+            identity = (company.ats, company.slug) if company.slug else None
+            new_postings, _ = store.sync_postings(
+                conn, company.name, postings, today, identity=identity
+            )
             stats["new_postings"] += len(new_postings)
             # `postings`, not `res.postings`: new_postings holds the normalized copies,
             # and Posting is a frozen dataclass compared by value, so the membership
@@ -391,6 +652,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             if is_degraded(health):
                 degraded.append(f"{company.name}={health.status.value}")
 
+    # Plugin postings are deliberately NOT added to `wanted`. They arrive with their
+    # description already stored by `append_postings`, and `_cache_descriptions`' "this
+    # source has no detail endpoint" branch writes '' through a bare UPDATE — which would
+    # erase the message text and take the posting out of the ranking with it.
+    _run_plugins(conn, fetcher, active_plugins, criteria, overrides, today, stats, degraded)
+
     try:
         _cache_descriptions(conn, fetcher, wanted, args.max_descriptions, today)
     finally:
@@ -404,6 +671,44 @@ def cmd_check(args: argparse.Namespace) -> int:
     )
     if filled:
         log.info("normalized posted_at -> posted_on for %d stored posting(s)", filled)
+
+    # One identity for one req, however it arrived (dedupe.py). Two passes, and the
+    # ordering matters: keys first for rows that predate the column, then one closure
+    # sweep over the whole open set.
+    #
+    # The sweep is deliberately NOT inside the board loop above. A shared key's winner
+    # can be fetched later in the same run than its loser, and boards are fetched in
+    # companies.yaml order — so deciding per board would make which row survives depend
+    # on the ordering of a curated file.
+    keyed = store.backfill_dedupe_key(
+        conn, {c.name: (c.ats, c.slug) for c in companies if c.slug}
+    )
+    if keyed:
+        log.info("derived dedupe keys for %d stored posting(s)", keyed)
+
+    closed_dupes, conflicts = store.close_duplicates(
+        conn, {c.name: c.check_method for c in companies}, today
+    )
+    for group in conflicts:
+        # Two api rows sharing a key is a finding, not a duplicate — almost certainly a
+        # key too coarse to tell two live reqs apart. Neither row was touched.
+        log.warning(
+            "dedupe: %d api postings share one key and none were closed: %s",
+            len(group),
+            ", ".join(f"{r['company']}/{r['ats_job_id']}" for r in group),
+        )
+    for dup in closed_dupes:
+        log.info(
+            "dedupe: closed %s/%s — same req as %s",
+            dup["company"], dup["ats_job_id"], dup["title_of"],
+        )
+    if closed_dupes:
+        # Said out loud because the first run shifts every count on the dashboard at
+        # once, and a legitimate cleanup that says nothing reads as a regression at 2am.
+        log.info(
+            "dedupe: %d posting(s) closed as duplicates of a row already tracked",
+            len(closed_dupes),
+        )
 
     store.record_run(conn, started, _now(), stats)
     conn.commit()
@@ -1121,16 +1426,44 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _unprefillable_reason(ctx, row) -> str | None:
+    """Why this pick could never have had a plan, or None if it could have.
+
+    A posting from a feed — an import plugin, or an aggregator — links straight to some
+    employer's own form. There is no board to publish its questions and no per-company
+    form to learn, so no run will ever produce a plan for it, and reporting it as NOT
+    READY would make `prepare` exit 2 every night a feed posting reached the top three.
+
+    That is the trap this repo names twice: gaps must never cause exit 2, because a unit
+    permanently red for something only the user can clear is the same as no signal at all
+    — the dbt Labs rule. So these are reported and do not count against `ready`, while a
+    pick that *could* have had a plan and does not still fails the run.
+    """
+    company = ctx.companies.get(row["company"])
+    if company is None:
+        # Not curated: an import plugin's group, by construction (docs/plugins.md).
+        return "apply on the employer's own page — this came from a feed, not a board"
+    if company.check_method in ("aggregator", "plugin"):
+        return "apply on the employer's own page — this came from a feed, not a board"
+    return None
+
+
 def _report_readiness(conn, picks, ctx) -> int:
     """Print whether each pick can actually be applied to, and exit accordingly."""
     plans = store.plans_by_posting(conn)
     ready = 0
+    unprefillable = 0
     lines: list[str] = []
 
     for i, row in enumerate(picks, 1):
         plan = plans.get((row["company"], row["ats_job_id"]))
         head = f"  {i}. {row['company']} — {row['title'][:52]}"
         if plan is None:
+            why = _unprefillable_reason(ctx, row)
+            if why:
+                unprefillable += 1
+                lines.append(f"{head}\n       {why}")
+                continue
             lines.append(f"{head}\n       NOT READY — {_why_no_plan(ctx, row)}")
             continue
         ready += 1
@@ -1138,10 +1471,14 @@ def _report_readiness(conn, picks, ctx) -> int:
         tail = f"{plan['gaps']} need you" if plan["gaps"] else "nothing left to type"
         lines.append(f"{head}\n       prefill {filled}/{plan['fields']} fields · {tail}")
 
-    print(f"Tomorrow: {ready}/{len(picks)} ready to apply to\n")
+    prefillable = len(picks) - unprefillable
+    summary = f"Tomorrow: {ready}/{prefillable} ready to apply to"
+    if unprefillable:
+        summary += f" ({unprefillable} apply on the employer's own page)"
+    print(summary + "\n")
     print("\n".join(lines))
 
-    if ready < len(picks):
+    if ready < prefillable:
         print("\nA pick with no plan opens as a blank form. See docs/prefill.md.")
         return EXIT_DEGRADED
     return EXIT_OK
@@ -1875,6 +2212,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="cap per-posting description fetches this run (default: 400). The "
              "remainder is picked up tomorrow; only Greenhouse costs a request.",
     )
+    c.add_argument("--plugins", default=None,
+                   help=f"path to plugins.yaml (default: {config.PLUGINS_YAML})")
     c.set_defaults(func=cmd_check)
 
     v = sub.add_parser("verify-slugs", help="fetch board identities; --write seeds them")
@@ -2029,6 +2368,16 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--min-count", type=int, default=3,
                    help="rejects a phrase needs before it is suggested (default: 3)")
     e.set_defaults(func=cmd_eval)
+
+    pl = sub.add_parser("plugins", help="list, enable, disable or purge an import plugin")
+    pl.add_argument("action", choices=["list", "enable", "disable", "set", "purge"])
+    pl.add_argument("name", nargs="?", default=None)
+    pl.add_argument("options", nargs="*", help="key=value pairs, for `set`")
+    pl.add_argument("--plugins", default=None,
+                    help=f"path to plugins.yaml (default: {config.PLUGINS_YAML})")
+    pl.add_argument("--write", action="store_true", help="with `purge`: actually remove")
+    pl.add_argument("--db", default=None)
+    pl.set_defaults(func=cmd_plugins)
 
     d2 = sub.add_parser("decide", help="record your judgment on one posting")
     d2.add_argument("company")

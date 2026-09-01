@@ -23,12 +23,13 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from urllib.parse import urlparse
 
 import requests
 from opentelemetry import context as otel_context, metrics, trace
 
-from .models import Company, FetchResult
+from .models import Company, FetchResult, Posting
 from .sources import get_source
 
 log = logging.getLogger(__name__)
@@ -77,7 +78,24 @@ TIMEOUT = 20
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.5
 RETRY_STATUS = {429, 500, 502, 503, 504}
+# A host that answers 429 usually says how long to wait, in a standard header. Honouring
+# it is strictly better than our own backoff — Discord's buckets routinely ask for longer
+# than 1.5s/3.0s, so the existing ladder burns all three attempts and reports FETCH_FAILED
+# for a request that would have succeeded. Capped, because a hostile or buggy header must
+# not be able to hang a nightly batch job.
+MAX_RETRY_AFTER = 30.0
 USER_AGENT = "jobtracker/0.1 (+https://github.com/; backend-newgrad-tracker)"
+# Ceiling on requests for one paged board. Workday caps a page at 20 rows, so Nvidia's
+# ~2,000 reqs is ~100 requests. Measured 2026-08-31: the `cxs` endpoint answers in ~2.4s,
+# which is latency and not our pacing (a 7-page Red Hat run reported 16.8s wall and 0.0s
+# slept in the limiter), so a 2,000-req board costs ~4 minutes and the big boards run in
+# parallel rather than faster.
+#
+# The cap is a backstop, not a filter, and it is not what ends a normal walk — the two
+# rules in `_fetch_paged` are. Hitting it is logged as a warning, because a truncated
+# board is a fact about the run: postings we did not see would otherwise be closed as
+# though they had disappeared.
+MAX_PAGES = 200
 
 
 class _HostRateLimiter:
@@ -138,9 +156,15 @@ class Fetcher:
             self._retries += 1
 
     # -- single request with backoff -------------------------------------------------
-    def _request_json(self, url: str, method: str = "GET"):
+    def _request_json(
+        self,
+        url: str,
+        method: str = "GET",
+        body: dict | None = None,
+        headers: dict | None = None,
+    ):
         """Return (status_code, parsed_json, error). Retries transient failures."""
-        return self._request(url, method, want="json")
+        return self._request(url, method, want="json", body=body, headers=headers)
 
     def _request_text(self, url: str, method: str = "GET"):
         """Return (status_code, body_text, error). For non-JSON feeds (aggregator READMEs).
@@ -151,7 +175,14 @@ class Fetcher:
         """
         return self._request(url, method, want="text")
 
-    def _request(self, url: str, method: str = "GET", want: str = "json"):
+    def _request(
+        self,
+        url: str,
+        method: str = "GET",
+        want: str = "json",
+        body: dict | None = None,
+        headers: dict | None = None,
+    ):
         last_error = "unknown error"
         status: int | None = None
         host = urlparse(url).netloc
@@ -176,13 +207,22 @@ class Fetcher:
                     rate_limited_seconds.add(paced, {"server.address": host})
                 log.debug("%s %s (attempt %d/%d)", method, url, attempt + 1, self._max_retries)
                 try:
-                    resp = self._session.request(method, url, timeout=self._timeout)
+                    # Per-request, never on the session. A session header would carry a
+                    # plugin's bearer token to every board in companies.yaml. `requests`
+                    # merges these over the session's, which is also how a caller
+                    # overrides User-Agent for a host that mandates its own shape.
+                    resp = self._session.request(
+                        method, url, timeout=self._timeout, json=body, headers=headers
+                    )
                     status = resp.status_code
                     span.set_attribute("http.response.status_code", status)
                     if status in RETRY_STATUS:
                         last_error = f"HTTP {status}"
                         span.add_event("retry", {"attempt": attempt + 1, "reason": last_error})
-                        self._retry_after(attempt, url, last_error)
+                        self._retry_after(
+                            attempt, url, last_error,
+                            self._parse_retry_after(resp.headers.get("Retry-After")),
+                        )
                         continue
                     if status != 200:
                         return self._fail(span, status, f"HTTP {status}", attempt)
@@ -216,9 +256,26 @@ class Fetcher:
         span.set_status(trace.Status(trace.StatusCode.ERROR, error))
         return status, None, error
 
-    def _retry_after(self, attempt: int, url: str, reason: str) -> None:
+    @staticmethod
+    def _parse_retry_after(raw: object) -> float | None:
+        """Seconds from a `Retry-After` header, or None if it does not say a number.
+
+        RFC 9110 also allows an HTTP-date there. We ignore that form deliberately rather
+        than parsing it: it is rare, it needs a clock comparison, and falling back to the
+        existing backoff is a correct answer. Read from the *header* rather than a JSON
+        body so this stays `want`-agnostic and works for a text fetch too.
+        """
+        try:
+            seconds = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds > 0 else None
+
+    def _retry_after(
+        self, attempt: int, url: str, reason: str, retry_after: float | None = None
+    ) -> None:
         """Log and sleep between attempts. Silent retries hide creeping breakage."""
-        backoff = BACKOFF_BASE * (2**attempt)
+        backoff = min(retry_after, MAX_RETRY_AFTER) if retry_after else BACKOFF_BASE * (2**attempt)
         if attempt + 1 < self._max_retries:
             self._count_retry()
             # Low-cardinality attributes only: host, not url. A per-URL counter would mint
@@ -256,6 +313,33 @@ class Fetcher:
                 span.set_status(trace.Status(trace.StatusCode.ERROR, error))
                 return None, error
             return text, None
+
+    def fetch_json(
+        self, url: str, headers: dict | None = None
+    ) -> tuple[int | None, object | None, str | None]:
+        """One paced JSON GET with caller-supplied headers, as `(status, payload, error)`.
+
+        The entry point for an import plugin, so nothing outside this module has to reach
+        into a `_`-prefixed method to talk to a feed. Everything is inherited: the
+        per-host governor, the retry policy, `Retry-After`, and the trace shape.
+
+        It returns the **status** as well, unlike `fetch_page`. For a credentialed feed
+        the code is the finding: 401 is a bad token, 403 is a permission the bot was not
+        granted, 429 is pacing. Collapsing those into one error string would hide the
+        only thing that tells you which of them to go and fix.
+
+        `headers` may carry a credential, so note what is safe about that: `_request`
+        records `url.full` as a span attribute and logs the URL on every retry, but never
+        headers. **A token must therefore never move into a query parameter**, or it
+        lands in traces and logs the same day.
+        """
+        with tracer.start_as_current_span("fetch.feed") as span:
+            span.set_attribute("url.full", url)
+            span.set_attribute("server.address", urlparse(url).netloc)
+            status, payload, error = self._request_json(url, headers=headers)
+            if error:
+                span.set_status(trace.Status(trace.StatusCode.ERROR, error))
+            return status, payload, error
 
     # -- one company -----------------------------------------------------------------
     def fetch_job_detail(self, company: Company, ats_job_id: str):
@@ -319,6 +403,72 @@ class Fetcher:
             span.set_attribute("form.fields", len(fields))
             return fields
 
+    def _fetch_paged(self, source, company: Company):
+        """Walk a paged board. Returns (status, postings, first_page, error).
+
+        `first_page` is handed back so identity can be read from it. Without it the
+        paged branch would call `identity_from_jobs(None)` and every paged board would
+        report no identity — which for Workday is the right answer for its own reasons,
+        and for Amazon would be a signal silently thrown away.
+
+        Two stopping rules, and the second is not redundant.
+
+        **A short page.** The obvious end of results, and the only one that is true on
+        every page — `total` is not. Workday reports `total: 0` on every request carrying
+        a non-zero offset, the figure being populated on page one alone, so a loop
+        bounded by it reads the second request as the end of the board and silently keeps
+        20 of 2,000 reqs.
+
+        **A page that is all postings we already hold.** Measured against Nvidia
+        2026-08-31: an offset past the end does not return a short page and does not
+        error — it *wraps to the beginning*. offset=2000, 3000, 4000 and 5000 all return
+        the same first row as offset=0, with `total` helpfully repopulated. So the first
+        rule never fires on that board, and the loop ran to the page cap collecting 4,000
+        postings for a board of 2,000, the second half being the first half again. Ids
+        are the check because they are what identifies a posting; a page that adds none
+        has told us nothing new, whatever it says about itself.
+        """
+        postings: list[Posting] = []
+        seen: set[str] = set()
+        status = None
+        first_page = None
+        for page in range(MAX_PAGES):
+            offset = page * source.page_size
+            status, raw, error = self._request_json(
+                source.jobs_page_url(company.slug, offset),
+                source.jobs_method,
+                body=source.jobs_body(company.slug, offset),
+            )
+            if error is not None:
+                return status, [], None, error
+            # Ask the adapter whether this is a page at all before believing its row
+            # count. A 200 carrying an unrecognized shape is not an empty board.
+            bad = source.jobs_page_error(raw)
+            if bad is not None:
+                return status, [], None, f"page {page + 1}: {bad}"
+            if first_page is None:
+                first_page = raw
+            batch = source.parse_jobs(company.name, raw)
+            fresh = [p for p in batch if p.ats_job_id not in seen]
+            seen.update(p.ats_job_id for p in fresh)
+            postings.extend(fresh)
+            if not fresh:
+                log.debug(
+                    "%s: page %d repeated postings already held — end of board",
+                    company.name,
+                    page + 1,
+                )
+                return status, postings, first_page, None
+            if len(batch) < source.page_size:
+                return status, postings, first_page, None
+        log.warning(
+            "%s: stopped at the %d-page cap with %d postings; the board may be truncated",
+            company.name,
+            MAX_PAGES,
+            len(postings),
+        )
+        return status, postings, first_page, None
+
     def fetch_company(self, company: Company) -> FetchResult:
         # Span names should be low-cardinality — "fetch.company", never
         # f"fetch {company.name}". The company goes in an *attribute*, which is the
@@ -338,16 +488,36 @@ class Fetcher:
                 result.error = "empty slug"
                 return self._finish(span, result)
 
-            status, raw, error = self._request_json(
-                source.jobs_url(company.slug), source.jobs_method
-            )
-            result.status_code = status
-            if error is not None:
-                result.error = error
-                return self._finish(span, result)
+            raw = None
+            if source.page_size:
+                status, postings, raw, error = self._fetch_paged(source, company)
+                result.status_code = status
+                if error is not None:
+                    result.error = error
+                    return self._finish(span, result)
+                result.ok = True
+                result.postings = postings
+            else:
+                status, raw, error = self._request_json(
+                    source.jobs_url(company.slug), source.jobs_method
+                )
+                result.status_code = status
+                if error is not None:
+                    result.error = error
+                    return self._finish(span, result)
+                result.ok = True
+                result.postings = source.parse_jobs(company.name, raw)
 
-            result.ok = True
-            result.postings = source.parse_jobs(company.name, raw)
+            # A posting whose payload could not name its own URL (Workday sends a
+            # site-relative path and no host) gets one built from the slug. Guarded on
+            # emptiness so this is a no-op for every adapter that already has one.
+            if result.postings and not result.postings[0].url:
+                result.postings = [
+                    replace(p, url=source.posting_url(company.slug, p.ats_job_id))
+                    if not p.url
+                    else p
+                    for p in result.postings
+                ]
 
             # Identity: a dedicated endpoint (Greenhouse) or derived from the payload.
             id_url = source.identity_url(company.slug)

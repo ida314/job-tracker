@@ -39,12 +39,65 @@ def iso_day(raw: object) -> Optional[str]:
 class Source:
     ats: str = ""
     jobs_method: str = "GET"
+    # Rows per request, for boards that will not return a whole board in one call.
+    # 0 means "one request returns everything", which is true of Greenhouse, Lever and
+    # Ashby and is why this stayed unused until Workday. See `jobs_body` below.
+    page_size: int = 0
 
     def jobs_url(self, slug: str) -> str:
         raise NotImplementedError
 
+    def jobs_page_url(self, slug: str, offset: int) -> str:
+        """The URL for one page of results.
+
+        Paged boards split into two kinds and both are in use here: Workday carries the
+        offset in a POST body and reuses one URL, so it takes this default; Amazon is a
+        GET and carries the offset in the query string, so it overrides. Ignored entirely
+        when `page_size` is 0.
+        """
+        return self.jobs_url(slug)
+
+    def jobs_body(self, slug: str, offset: int) -> Optional[dict]:
+        """The request body for one page, or None for a GET with no body.
+
+        Only meaningful when `page_size` is set. The adapter owns the body shape the
+        same way it owns the URL — `fetch.py` sends whatever this returns and knows
+        nothing about facets, offsets or vendor pagination vocabulary.
+        """
+        return None
+
+    def jobs_page_error(self, raw: object) -> Optional[str]:
+        """Why this payload is not a usable page of results, or None if it is.
+
+        This exists because on a paged board `parse_jobs` returning `[]` is ambiguous in
+        a way it never is for a single-call board: it means either "the last page" or
+        "we asked wrongly and got a shape we do not understand". Workday answers a
+        `limit` above its cap with a payload that simply has no `jobPostings` key —
+        a 200, valid JSON, and zero rows. Read as an empty page that would silently
+        close every posting on the board (DESIGN.md §3.4), so the adapter is given a
+        way to say "that was not an answer" and the fetch becomes FETCH_FAILED.
+
+        This lives on the base class rather than inside one adapter because a second
+        paged vendor, tried the same day, did the same thing independently: amazon.jobs
+        answers an over-cap `result_limit` with `"jobs": null`, and its 10,000-result
+        offset ceiling with a JSON error body. That adapter was dropped for the ceiling;
+        the shape it proved is general.
+        """
+        return None
+
     def parse_jobs(self, company: str, raw: object) -> list[Posting]:
         raise NotImplementedError
+
+    def posting_url(self, slug: str, ats_job_id: str) -> str:
+        """The human-facing URL for a posting, when the payload cannot carry one.
+
+        Greenhouse, Lever and Ashby all ship an absolute URL on the row, so they leave
+        this alone. Workday's bulk row carries only a site-relative `externalPath` and
+        the payload names no host, so the URL can only be built from the slug — which
+        `parse_jobs` is not given. `fetch.py` calls this for any posting that came back
+        without a URL; an empty return leaves it empty.
+        """
+        return ""
 
     # Identity: how we confirm the board belongs to the right company (DESIGN.md §7.2).
     # Greenhouse has a dedicated endpoint; Ashby/Lever derive identity from the payload.
