@@ -76,6 +76,7 @@ _CSS = """
   --serious:     #ec835a;
   --critical:    #d03b3b;
   --accent:      #2a78d6;
+  --link:        #c22b2b;
   /* light: dark -> light; ink flips to near-black at the research band */
   --band-anchor:   #0d366b; --band-anchor-ink:   #fcfcfb;
   --band-applied:  #2a78d6; --band-applied-ink:  #fcfcfb;
@@ -94,6 +95,7 @@ _CSS = """
     --rule:    #383835;
     --border:  rgba(255,255,255,0.10);
     --accent:  #3987e5;
+    --link:    #f07a7a;
     /* dark: light -> dark; ink flips to near-white at the research band */
     --band-anchor:   #cde2fb; --band-anchor-ink:   #0b0b0b;
     --band-applied:  #5598e7; --band-applied-ink:  #0b0b0b;
@@ -112,6 +114,7 @@ _CSS = """
   --rule:    #383835;
   --border:  rgba(255,255,255,0.10);
   --accent:  #3987e5;
+  --link:    #f07a7a;
   /* dark: light -> dark; ink flips to near-white at the research band */
   --band-anchor:   #cde2fb; --band-anchor-ink:   #0b0b0b;
   --band-applied:  #5598e7; --band-applied-ink:  #0b0b0b;
@@ -130,7 +133,7 @@ h1 { font-size: 21px; font-weight: 650; margin: 28px 0 2px; letter-spacing: -0.0
 h2 { font-size: 15px; font-weight: 650; margin: 34px 0 10px; letter-spacing: -0.005em; }
 .sub { color: var(--ink-2); font-size: 13px; margin: 0 0 4px; }
 .note { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
-a { color: var(--accent); text-decoration: none; }
+a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 /* --- stat tiles ------------------------------------------------------------ */
@@ -371,7 +374,7 @@ h2 .sub { font-size: 12.5px; font-weight: 400; color: var(--muted); margin-left:
    wins on /tuning, /settings and /applications. This rule is what styles the class on
    the dashboard page, which loads _CSS alone. */
 .note { font-size: 12.5px; color: var(--ink-2); }
-.note a { color: var(--accent); }
+.note a { color: var(--link); }
 
 /* -- the build stamp ---------------------------------------------------------------- */
 /* Small, monospaced, and always in the same place on every surface, so two tabs can be
