@@ -1409,16 +1409,44 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _unprefillable_reason(ctx, row) -> Optional[str]:
+    """Why this pick could never have had a plan, or None if it could have.
+
+    A posting from a feed — an import plugin, or an aggregator — links straight to some
+    employer's own form. There is no board to publish its questions and no per-company
+    form to learn, so no run will ever produce a plan for it, and reporting it as NOT
+    READY would make `prepare` exit 2 every night a feed posting reached the top three.
+
+    That is the trap this repo names twice: gaps must never cause exit 2, because a unit
+    permanently red for something only the user can clear is the same as no signal at all
+    — the dbt Labs rule. So these are reported and do not count against `ready`, while a
+    pick that *could* have had a plan and does not still fails the run.
+    """
+    company = ctx.companies.get(row["company"])
+    if company is None:
+        # Not curated: an import plugin's group, by construction (docs/plugins.md).
+        return "apply on the employer's own page — this came from a feed, not a board"
+    if company.check_method in ("aggregator", "plugin"):
+        return "apply on the employer's own page — this came from a feed, not a board"
+    return None
+
+
 def _report_readiness(conn, picks, ctx) -> int:
     """Print whether each pick can actually be applied to, and exit accordingly."""
     plans = store.plans_by_posting(conn)
     ready = 0
+    unprefillable = 0
     lines: list[str] = []
 
     for i, row in enumerate(picks, 1):
         plan = plans.get((row["company"], row["ats_job_id"]))
         head = f"  {i}. {row['company']} — {row['title'][:52]}"
         if plan is None:
+            why = _unprefillable_reason(ctx, row)
+            if why:
+                unprefillable += 1
+                lines.append(f"{head}\n       {why}")
+                continue
             lines.append(f"{head}\n       NOT READY — {_why_no_plan(ctx, row)}")
             continue
         ready += 1
@@ -1426,10 +1454,14 @@ def _report_readiness(conn, picks, ctx) -> int:
         tail = f"{plan['gaps']} need you" if plan["gaps"] else "nothing left to type"
         lines.append(f"{head}\n       prefill {filled}/{plan['fields']} fields · {tail}")
 
-    print(f"Tomorrow: {ready}/{len(picks)} ready to apply to\n")
+    prefillable = len(picks) - unprefillable
+    summary = f"Tomorrow: {ready}/{prefillable} ready to apply to"
+    if unprefillable:
+        summary += f" ({unprefillable} apply on the employer's own page)"
+    print(summary + "\n")
     print("\n".join(lines))
 
-    if ready < len(picks):
+    if ready < prefillable:
         print("\nA pick with no plan opens as a blank form. See docs/prefill.md.")
         return EXIT_DEGRADED
     return EXIT_OK
