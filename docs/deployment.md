@@ -114,6 +114,8 @@ is a fact about the company.
 | `DISPLAY` | For `apply-to`/`serve`'s button | Not ours, but load-bearing: Playwright draws a real window on the host running the command. A headless host needs an X display (`Xvfb :100`) or the launch fails. Nobody looks at it — `/apply` is where you type — but it still has to exist |
 | `JOBTRACKER_RESUMES` | No | Where per-posting resumes are stored. Defaults to `./data/resumes`, so a mounted `/data` already covers it |
 | `JOBTRACKER_MAILDIR` | For `mail`/`inbox` | Your job-search mailbox. **Mount it read-only** (`:ro`) — the code never writes to it and the mount should say so too. Absent → `mail` exits 1 and the `inbox` task reports itself unavailable, which is a different state from "nothing to do" |
+| `JOBTRACKER_PLUGINS` | `./plugins.yaml` | Which import feeds are switched on and where they point (docs/plugins.md). Absent means none, which is a normal state. Mount it beside `answers.yaml`. |
+| `JOBTRACKER_DISCORD_TOKEN` | — | The Discord bot token, if the discord plugin is enabled. **A runtime secret, never an `ENV` in the Dockerfile and never a build ARG** — `docker history` reads those back off a published image. Absent means the plugin reports itself unavailable, which is a different state from "nothing to do". |
 
 Every run logs the resolved `companies=`/`criteria=`/`db=` paths as its first line. When
 something behaves as though your config changed nothing, read that line first.

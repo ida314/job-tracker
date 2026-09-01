@@ -5,6 +5,7 @@ import pytest
 from jobtracker.health import (
     EMPTY_ALERT_THRESHOLD,
     evaluate,
+    evaluate_plugin,
     identity_matches,
     is_degraded,
 )
@@ -147,3 +148,85 @@ def test_the_two_counters_are_independent():
         prior, "d", True,
     )
     assert (h.consecutive_empty_runs, h.consecutive_failures) == (3, 2)
+
+
+# -- import plugins: where "empty" means something different ------------------------
+class _Fetch:
+    """A PluginFetch stand-in. Hand-written, per house style."""
+
+    def __init__(self, ok=True, error=None, read=0, imported=0, first_read=False):
+        self.ok = ok
+        self.error = error
+        self.read = read
+        self.imported = imported
+        self.unparsed = 0
+        self.skipped = 0
+        self.first_read = first_read
+
+
+def test_an_incremental_feed_that_read_nothing_is_ok_not_suspect_empty():
+    """7.1 must not be borrowed here. A board is a complete statement of what a company
+    has open, so zero is suspicious. A poll of a message channel returns only what
+    arrived since the last read, and on most nights that is nothing — flagging it would
+    put the feed on the Boards tab every single night (the dbt Labs mistake) and make the
+    night the token expires look exactly like every healthy night."""
+    got = evaluate_plugin("Discord: #jobs", _Fetch(read=0), None, "2026-08-31")
+    assert got.status is HealthStatus.OK
+    assert not is_degraded(got)
+
+
+def test_a_feed_that_could_not_be_read_is_fetch_failed_and_degrades_the_run():
+    """7.3 applies unchanged: a 401, a 403 after the bot is removed, or a timeout is
+    missing data and is worth a red run."""
+    got = evaluate_plugin("Discord: #jobs", _Fetch(ok=False, error="HTTP 401"), None, "2026-08-31")
+    assert got.status is HealthStatus.FETCH_FAILED
+    assert is_degraded(got)
+    assert "401" in got.detail
+
+
+def test_feed_read_failures_streak_so_a_board_that_stopped_answering_is_visible():
+    first = evaluate_plugin("F", _Fetch(ok=False, error="x"), None, "2026-08-31")
+    second = evaluate_plugin("F", _Fetch(ok=False, error="x"), first, "2026-09-01")
+    assert (first.consecutive_failures, second.consecutive_failures) == (1, 2)
+
+
+def test_a_successful_read_resets_the_failure_streak():
+    failed = evaluate_plugin("F", _Fetch(ok=False, error="x"), None, "2026-08-31")
+    ok = evaluate_plugin("F", _Fetch(read=3, imported=1), failed, "2026-09-01")
+    assert ok.status is HealthStatus.OK and ok.consecutive_failures == 0
+    assert ok.last_ok_at == "2026-09-01"
+
+
+def test_an_empty_first_backfill_poll_is_reported_not_recorded_as_no_jobs():
+    """A backfill reaching back days that returns nothing at all is not a quiet channel.
+    On Discord it is very likely a missing Read Message History permission, which answers
+    200 with [] rather than 403 — a real greenhouse/hubspot: reachable, authorized, and
+    empty."""
+    got = evaluate_plugin("Discord: #jobs", _Fetch(read=0, first_read=True), None, "2026-08-31")
+    assert got.status is HealthStatus.SUSPECT_EMPTY
+    assert is_degraded(got)
+    assert "Read Message History" in got.detail
+
+
+def test_a_first_poll_that_did_read_something_is_simply_ok():
+    got = evaluate_plugin("F", _Fetch(read=5, imported=2, first_read=True), None, "2026-08-31")
+    assert got.status is HealthStatus.OK
+
+
+def test_the_detail_line_separates_what_was_read_from_what_was_imported():
+    """"Read 40, imported 3" is a healthy night and so is "read 0"; an error is neither.
+    A single posting count would flatten all three into one ambiguous zero."""
+    got = evaluate_plugin("F", _Fetch(read=40, imported=3), None, "2026-08-31")
+    assert "40 item(s) read" in got.detail and "3 imported" in got.detail
+
+
+def test_a_feed_failure_never_reaches_the_slug_repair_detector():
+    """`repair.detect` skips any company absent from companies.yaml, and a plugin group
+    is deliberately never put there — which is what stops a failing feed sending the
+    repair agent off to scrape a Discord careers page. Pinned, because the fix for a
+    future bug might be to start injecting those companies."""
+    from jobtracker import config, repair
+
+    names = {c.name for c in config.load_companies()}
+    assert not any(n.startswith("Discord:") for n in names)
+    assert hasattr(repair, "detect")

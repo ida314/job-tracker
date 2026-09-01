@@ -115,6 +115,73 @@ def evaluate(
     )
 
 
+def evaluate_plugin(
+    company: str, result, prior: Optional[BoardHealth], now: str
+) -> BoardHealth:
+    """Board health for an incremental feed, where empty is the normal answer.
+
+    This lives beside `evaluate` rather than in `cmd_check` because a second health
+    policy in the CLI is precisely what this module exists to prevent: every invariant
+    in here encodes an observed bug, and they are only enforceable while they are all in
+    one testable place.
+
+    **7.1 does not apply and must not be borrowed.** `evaluate` reads an empty board as
+    SUSPECT_EMPTY because a board is a *complete statement* of what a company has open,
+    so zero means either "nothing is open" or "the board moved". A poll of a message
+    channel is not that statement — it returns only what arrived since the last read, and
+    on most nights nothing arrived. Flagging that would put the feed on the Boards tab
+    every single night, which is the dbt Labs mistake, and worse: it would make the night
+    the token expires look exactly like every healthy night.
+
+    **7.3 applies unchanged**, and is the reason this function exists rather than the
+    caller simply skipping health for plugins. A 401, a 403 after the bot is removed from
+    a channel, a timeout — those are FETCH_FAILED, they streak in `consecutive_failures`,
+    they show on the Boards tab and they degrade the run. Failure is not absence.
+
+    The one exception to "empty is fine" is a **first** read. A backfill that reaches back
+    days and returns nothing at all is not a quiet channel; on Discord it is very likely a
+    missing Read Message History permission, which answers 200 with `[]` rather than 403.
+    That is a real `greenhouse/hubspot` — reachable, authorized, and empty — so it is
+    reported rather than recorded as "no jobs".
+    """
+    prev_failures = prior.consecutive_failures if prior else 0
+    prev_ok_at = prior.last_ok_at if prior else None
+
+    if not getattr(result, "ok", False) or getattr(result, "error", None):
+        return BoardHealth(
+            company,
+            HealthStatus.FETCH_FAILED,
+            observed_board_name=None,
+            last_ok_at=prev_ok_at,
+            detail=getattr(result, "error", None) or "feed read failed",
+            consecutive_failures=prev_failures + 1,
+        )
+
+    if getattr(result, "first_read", False) and not getattr(result, "read", 0):
+        return BoardHealth(
+            company,
+            HealthStatus.SUSPECT_EMPTY,
+            consecutive_empty_runs=1,
+            last_ok_at=prev_ok_at,
+            detail=(
+                "the first read of this feed returned no items at all — check the bot "
+                "can see the channel (Read Message History answers 200 with [], not 403)"
+            ),
+            alerting=True,
+        )
+
+    return BoardHealth(
+        company,
+        HealthStatus.OK,
+        consecutive_empty_runs=0,
+        last_ok_at=now,
+        detail=(
+            f"{result.read} item(s) read, {result.imported} imported, "
+            f"{result.unparsed} unreadable, {result.skipped} skipped"
+        ),
+    )
+
+
 def is_degraded(health: BoardHealth) -> bool:
     """Is this board broken enough to fail the whole run?
 

@@ -1,0 +1,46 @@
+# Import plugins: feeds of postings that are not boards in companies.yaml.
+#
+# Copy this to `plugins.yaml` (gitignored) or just run the commands — every writer is
+# something you typed, and nothing scheduled ever touches this file:
+#
+#   jobtracker plugins list
+#   jobtracker plugins enable discord
+#   jobtracker plugins set discord channel_id=123456789012345678 label=new-grad-jobs
+#   jobtracker plugins disable discord
+#   jobtracker plugins purge discord            # dry run; --write applies
+#
+# THE BOT TOKEN IS NOT IN THIS FILE and must not be put here. It is
+# $JOBTRACKER_DISCORD_TOKEN, in the environment. A config file gets `cat`ed into a
+# terminal and pasted into an issue; gitignored is not the same protection as never on
+# disk. See docs/plugins.md for the full setup, including the Discord permissions and
+# the MESSAGE CONTENT intent — without which every message arrives with its text blank
+# and the channel reports zero jobs while being full of them.
+#
+# Note: unlike answers.yaml, this file round-trips through the YAML writer, so comments
+# you add here do NOT survive the next `plugins enable`. That is an acceptable trade for
+# four scalar keys with no prose in them; this example file is the documented copy.
+
+discord:
+  # Off until you say otherwise. Installing a plugin never starts reading anything.
+  enabled: false
+
+  # Discord's numeric id, not the channel name: turn on Developer Mode
+  # (User Settings -> Advanced), then right-click the channel -> Copy Channel ID.
+  channel_id: ""
+
+  # Only used to build a clickable permalink back to the message. Right-click the
+  # server name -> Copy Server ID.
+  guild_id: ""
+
+  # Names the posting group, so it reads as "Discord: #new-grad-jobs" everywhere.
+  label: ""
+
+  # How far back the FIRST read reaches. After that the stored cursor takes over and
+  # only new messages are read. No extra API call is needed for this: a Discord message
+  # id encodes its own timestamp.
+  backfill_days: 14
+
+  # A channel announces a job and never retracts it, so imported postings close by age
+  # rather than by disappearing from a board. 0 means never expire, which is a real
+  # choice — it means "only ever close for a better-known reason".
+  expire_after_days: 90

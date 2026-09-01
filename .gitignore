@@ -14,6 +14,13 @@ resume.pdf
 resume*.pdf
 cover-letter*.pdf
 
+# import plugins — which feeds you switched on and where they point. Personal config,
+# like answers.yaml: plugins.example.yaml is the tracked file that documents the shape.
+# The bot token is NOT in here; it is $JOBTRACKER_DISCORD_TOKEN. See docs/plugins.md.
+plugins.yaml
+plugins.yaml.bak
+plugins.yaml.candidate
+
 # safe-write leftovers from an interrupted criteria edit
 criteria.yaml.bak
 criteria.yaml.candidate

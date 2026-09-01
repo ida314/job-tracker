@@ -170,3 +170,172 @@ def test_a_source_with_no_detail_endpoint_is_not_retried_forever():
     f2 = _FakeFetcher()
     _cache(conn, f2, [(company, posting)])
     assert f2.requested == []
+
+
+# -- import plugins: the switch, end to end ------------------------------------------
+class _StubFetcher:
+    """One page of Discord-shaped messages, then nothing."""
+
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.calls = 0
+
+    def fetch_json(self, url, headers=None):
+        self.calls += 1
+        return (200, self.pages.pop(0), None) if self.pages else (200, [], None)
+
+
+def _discord_message(mid, content, bot=True):
+    return {
+        "id": str(mid),
+        "timestamp": "2026-08-30T12:00:00+00:00",
+        "author": {"bot": bot},
+        "content": content,
+        "embeds": [],
+    }
+
+
+_SAMPLE = (
+    "## [Software Developer Associate @ Artera]"
+    "(<https://jobs.lever.co/artera-2/eae88c70>)\n"
+    "### Locations:  Seattle, WA\nPosted on: July 31, 2026"
+)
+
+
+def _plugin_run(conn, fetcher, active, today="2026-08-31"):
+    from jobtracker import cli
+
+    stats = {"companies": 0, "ok": 0, "failed": 0, "new_postings": 0, "matches": 0}
+    degraded: list = []
+    cli._run_plugins(
+        conn, fetcher, active, load_criteria(config.CRITERIA_YAML),
+        store.load_overrides(conn), today, stats, degraded,
+    )
+    conn.commit()
+    return stats, degraded
+
+
+def _enabled_discord():
+    from jobtracker.plugins import get_plugin
+
+    settings = {
+        "enabled": True, "channel_id": "111", "guild_id": "222",
+        "label": "jobs", "backfill_days": 14, "expire_after_days": 90,
+    }
+    return [(get_plugin("discord"), settings)]
+
+
+def test_a_discord_posting_travels_all_the_way_to_a_verdict_and_a_description():
+    conn = store.connect(":memory:")
+    fetcher = _StubFetcher([[_discord_message(1300000000000000001, _SAMPLE)]])
+    stats, degraded = _plugin_run(conn, fetcher, _enabled_discord())
+
+    assert stats["new_postings"] == 1 and degraded == []
+    row = conn.execute(
+        "SELECT p.title, p.posted_on, p.description, v.verdict FROM postings p "
+        "JOIN verdicts v ON v.company=p.company AND v.ats_job_id=p.ats_job_id"
+    ).fetchone()
+    assert row["title"] == "Artera — Software Developer Associate"
+    assert row["posted_on"] == "2026-07-31"  # the bot's date, not the message's
+    assert row["verdict"] == "match"
+    # Without a description the posting is never judged, never scored, and rank.available
+    # filters it out — in the table, absent from the product.
+    assert row["description"]
+
+
+def test_a_quiet_night_closes_nothing_a_plugin_imported():
+    conn = store.connect(":memory:")
+    _plugin_run(conn, _StubFetcher([[_discord_message(1300000000000000001, _SAMPLE)]]),
+                _enabled_discord())
+    _plugin_run(conn, _StubFetcher([]), _enabled_discord(), today="2026-09-01")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postings WHERE closed_at IS NULL"
+    ).fetchone()[0] == 1
+
+
+def test_disabling_a_plugin_leaves_its_postings_exactly_where_they_were():
+    """The whole point of the switch: it stops reading and changes nothing else."""
+    conn = store.connect(":memory:")
+    _plugin_run(conn, _StubFetcher([[_discord_message(1300000000000000001, _SAMPLE)]]),
+                _enabled_discord())
+    before = [dict(r) for r in conn.execute("SELECT * FROM postings ORDER BY ats_job_id")]
+    verdicts_before = [dict(r) for r in conn.execute("SELECT * FROM verdicts")]
+
+    # Disabled: `_active_plugins` yields nothing, so the loop never runs.
+    fetcher = _StubFetcher([[_discord_message(1300000000000000002, _SAMPLE)]])
+    _plugin_run(conn, fetcher, [], today="2026-09-01")
+
+    assert fetcher.calls == 0
+    assert [dict(r) for r in conn.execute("SELECT * FROM postings ORDER BY ats_job_id")] == before
+    assert [dict(r) for r in conn.execute("SELECT * FROM verdicts")] == verdicts_before
+
+
+def test_re_enabling_resumes_from_the_stored_cursor_and_imports_nothing_twice():
+    conn = store.connect(":memory:")
+    page = [_discord_message(1300000000000000001, _SAMPLE)]
+    _plugin_run(conn, _StubFetcher([page]), _enabled_discord())
+    cursor = store.get_plugin_state(conn, "discord")
+    assert cursor == {"cursor": "1300000000000000001"}
+
+    _plugin_run(conn, _StubFetcher([page]), _enabled_discord(), today="2026-09-01")
+    assert conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] == 1
+
+
+def test_a_failed_read_leaves_the_cursor_and_degrades_the_run():
+    class _Broken:
+        def fetch_json(self, url, headers=None):
+            return (401, None, "HTTP 401")
+
+    conn = store.connect(":memory:")
+    stats, degraded = _plugin_run(conn, _Broken(), _enabled_discord())
+    assert degraded and stats["new_postings"] == 0
+    assert store.get_plugin_state(conn, "discord") == {}
+    assert conn.execute(
+        "SELECT last_status FROM board_health WHERE company LIKE 'Discord%'"
+    ).fetchone()[0] == "fetch_failed"
+
+
+def test_an_announcement_of_a_job_already_tracked_is_never_imported():
+    conn = store.connect(":memory:")
+    store.sync_postings(
+        conn, "Artera",
+        [Posting("Artera", "eae88c70", "Software Developer Associate",
+                 "https://jobs.lever.co/artera-2/eae88c70")],
+        "2026-08-01", identity=("lever", "artera-2"),
+    )
+    _plugin_run(conn, _StubFetcher([[_discord_message(1300000000000000001, _SAMPLE)]]),
+                _enabled_discord())
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postings WHERE company LIKE 'Discord%'"
+    ).fetchone()[0] == 0
+    assert conn.execute("SELECT closed_at FROM postings").fetchone()[0] is None
+
+
+def test_with_no_plugins_configured_the_run_reads_no_feed_at_all(tmp_path):
+    from jobtracker import cli
+
+    assert cli._active_plugins(tmp_path / "absent.yaml") == []
+
+
+def test_a_malformed_plugins_file_stops_the_feed_rather_than_reading_as_no_plugins(tmp_path):
+    """Silently reading it as "nothing configured" would turn a typo into a feed that
+    stopped importing with no error anywhere."""
+    from jobtracker import cli
+
+    path = tmp_path / "plugins.yaml"
+    path.write_text("discord:\n  enabled: yes-please\n")
+    assert cli._active_plugins(path) == []
+
+
+def test_an_enabled_plugin_with_no_token_is_not_read(tmp_path):
+    from jobtracker import cli
+    from jobtracker.plugins import discord as dmod
+
+    path = tmp_path / "plugins.yaml"
+    path.write_text("discord:\n  enabled: true\n  channel_id: '111'\n")
+    original = dmod.config.DISCORD_TOKEN
+    dmod.config.DISCORD_TOKEN = None
+    try:
+        assert cli._active_plugins(path) == []
+    finally:
+        dmod.config.DISCORD_TOKEN = original

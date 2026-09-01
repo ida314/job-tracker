@@ -161,6 +161,10 @@ confirmed against the company name. Current composition of the 100 entries:
 | `manual` | 29 | Never scraped, by rule. Flagged weekly. |
 | `aggregator` | 2 | GitHub new-grad lists, diffed daily. |
 
+**Import plugins are a fourth kind of source, and are not in that table** (2026-08-31).
+They are not entries in `companies.yaml` at all — see "Import plugins" below for why that
+absence is deliberate and load-bearing.
+
 **Five entries promoted from `manual` to `api` on 2026-08-31** — Red Hat, Nvidia, Capital
 One, Workday and Target Tech, onto the new Workday adapter. See the audit under "Rule:
 `manual` companies are never scraped" for why that is a reclassification and not a change
@@ -650,6 +654,96 @@ only propose.
   with JS off). The acknowledgement is accepting or dismissing, not glancing.
 - **`state.db` now holds the text of personal mail.** Gitignored and local; no log line or
   span attribute may carry a subject or a body.
+
+## Import plugins
+
+`jobtracker plugins`, `jobtracker/plugins/`, and one extra loop in `cmd_check`. Full guide
+in `docs/plugins.md`. Added 2026-08-31. Discord is the first, and the third registry in
+this package after `sources/` and `tasks/` — one module plus one import line, module pure,
+`runner.py` owns the socket.
+
+- **A feed is not a board, and that is the whole reason this package exists.**
+  `sync_postings` closes every posting absent from a fetch, and it is right to: a board is
+  a *complete statement* of what a company has open. A poll returns only what arrived
+  since the last read, so on a normal night it returns nothing — routed through
+  `sync_postings`, one quiet evening would close every posting the feed ever imported.
+  `store.append_postings` is the mirror image and never closes by absence. There is a test
+  named after it. Discord could not have been a fifth `Source`.
+- **`append_postings` writes `description` at insert, and that is not an optimization.**
+  Nothing else would ever write it: `_cache_descriptions` builds `wanted` inside
+  `cmd_check`'s board loop and a plugin group is not in it. A NULL description drops the
+  row out of `level.pending()` **and** out of `store.matches_needing_judgment`
+  (`AND p.description IS NOT NULL AND p.description != ''`) — so it is never judged, never
+  scored, and `rank.available()` filters it out. Present in the table, absent from the
+  product. Plugin postings are also kept **out** of `wanted`, because that pass's
+  "no detail endpoint" branch writes `''` through a bare UPDATE and would erase the text.
+- **A verdict is recorded for every plugin posting.** Every downstream query is
+  `postings JOIN verdicts`; without one the posting is invisible everywhere.
+- **Postings close by age, never by absence** (`expire_after_days`, default 90). A channel
+  cannot report that a req was filled. Age is honest because it is a statement about *our
+  observation* — "older than N days and this feed has no way to tell us more" — not an
+  inferred claim about the employer. The better mechanism (check the linked ATS board and
+  close what is gone) is a documented follow-up, not a rejected idea.
+- **`health.evaluate_plugin` can never return `SUSPECT_EMPTY` for a routine poll**, and it
+  lives in `health.py` rather than the CLI because a second health policy in `cli.py` is
+  what that module exists to prevent. §7.1 reads an empty board as suspect because a board
+  is a complete statement; a channel poll is not. Flagging it would put the feed on the
+  Boards tab every night (the dbt Labs mistake) and make the night the token expires look
+  identical to every healthy night. §7.3 is untouched — a 401 is FETCH_FAILED, streaks,
+  and degrades the run.
+- **The one exception is an empty *first* read.** A backfill reaching back two weeks that
+  finds nothing is not a quiet channel; on Discord it is very likely a missing Read
+  Message History permission, which answers **200 with `[]`, not 403**.
+- **Discord has two independent `greenhouse/hubspot`s.** The permission above, and a
+  missing MESSAGE CONTENT intent — which returns every message correctly authored with
+  `content`, `embeds` and `attachments` blank, so every format declines and a channel full
+  of jobs reports zero. `page_error` flags a page where *no* message has content; one
+  blank message is ordinary (an attachment-only post), a whole page is configuration. The
+  intent is listed as a *gateway* intent and this code opens no gateway; it gates the REST
+  payload anyway.
+- **A failed read never advances the cursor**, and **the cursor advances past messages we
+  deliberately skipped**. Both halves matter and they pull opposite ways: stamping on
+  failure loses that window silently, while moving only for imported postings stalls
+  forever on a channel whose recent traffic is all conversation. `page_cursor` reads the
+  **raw** page for the same reason.
+- **A plugin's group is never curation.** Not written to `companies.yaml`, never joined
+  onto a `load_companies` result. Verified that this breaks nothing: `report.py:68,120`,
+  `dashboard.py:1198,1267,1580` and `server._companies` all use `.get` and degrade to tier
+  `—`. The absence is load-bearing in one place — `repair.detect` skips companies it
+  cannot find, which is what stops a failing feed sending the slug-repair agent to scrape
+  a Discord careers page. Injecting them would mean remembering to exclude them again.
+- **`purge` keeps `decisions`, `overrides`, `applications` and `application_events`**, and
+  says so. The first is the corpus `eval` replays — `decisions.title` is denormalized
+  precisely so it does not shrink — and "I applied here" stays true whatever happens to
+  the posting row. Dry by default, `--write` applies.
+- **This is the repo's first credential.** `$JOBTRACKER_DISCORD_TOKEN`, env only: never
+  `plugins.yaml` (a config file gets pasted into issues), never a build ARG
+  (`docker history`), never in `extra={}` (the JSON formatter promotes those to
+  top-level), **never a query parameter** (`_request` records `url.full` as a span
+  attribute and logs the URL on every retry), and never echoed by `plugins list`. Header
+  only, per-request — a *session* header would carry it to every board in
+  `companies.yaml`. Two tests.
+- **`plugins.yaml` is curation, `plugin_state` is observation** (DESIGN.md §3.3). The
+  enabled flag is a decision you made; the cursor is what a run found out. `load_settings`
+  is strict, because §2.1's lesson is that a config format nothing validates is a comment
+  — and a malformed file **stops the feed** rather than reading as "no plugins", which
+  would turn a typo into a feed that silently stopped importing.
+- **Formats are their own registry** (`plugins/discord/formats/`), ordered by a declared
+  `fallback` flag rather than import order. A format returns `None` to fall through; the
+  dispatcher catches exceptions anyway, because "never raises" is a promise one malformed
+  date breaks inside `strptime` and the cost is a poll that dies mid-channel. `flatten`
+  renders an embed's title+url back as `## [title](url)`, so a markdown format keeps
+  working when a bot switches to embeds.
+- **`generic` never guesses an employer.** A guessed employer becomes a company name in a
+  tracker whose discipline is that identity is verified, not inferred.
+- **Sponsorship rides in the description and goes no further.** A criteria token would be
+  a gate applied before any title is read — the `locations_exclude` mistake that discarded
+  390 postings — and in the title it would collide with `clearance` in `exclude_titles`.
+- **`prepare` gained a third outcome** (same change, own commit): a pick whose source
+  could never publish or learn a form is reported as "apply on the employer's own page"
+  and does not count against `ready`. Without it `prepare` exits 2 every night a feed
+  posting reaches the top three — the trap this file names twice. **It was already latent
+  for aggregator postings**; `Aggregator.application_form_url` returns None too.
 
 ## URL dedupe
 

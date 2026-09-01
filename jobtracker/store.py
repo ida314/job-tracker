@@ -377,6 +377,18 @@ CREATE TABLE IF NOT EXISTS mail_proposals (
 -- agreement is real. 'provenance' means identity was derived from a job URL (Ashby,
 -- Lever), where for a candidate slug it merely restates that slug — see repair.py. A
 -- 'provenance' row is a weaker claim and is flagged as such everywhere it is shown.
+-- Import plugins: where each feed's reader got to. Observation, not curation — the
+-- enabled flag and the channel id live in plugins.yaml, because those are things you
+-- chose, while "the last message id I read" is something a run found out (DESIGN.md
+-- 3.3). Keeping them apart is what lets you delete state.db and keep your config.
+CREATE TABLE IF NOT EXISTS plugin_state (
+    plugin     TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin, key)
+);
+
 CREATE TABLE IF NOT EXISTS repair_proposals (
     company        TEXT PRIMARY KEY,
     from_ats       TEXT NOT NULL,
@@ -799,6 +811,210 @@ def close_duplicates(
                 "dedupe_key": key,
             })
     return closed, conflicts
+
+
+# -- import plugins ----------------------------------------------------------------
+def get_plugin_state(conn: sqlite3.Connection, plugin: str) -> dict:
+    return {
+        row["key"]: row["value"]
+        for row in conn.execute(
+            "SELECT key, value FROM plugin_state WHERE plugin=?", (plugin,)
+        )
+    }
+
+
+def set_plugin_state(
+    conn: sqlite3.Connection, plugin: str, state: dict, now: str
+) -> None:
+    for key, value in state.items():
+        conn.execute(
+            "INSERT INTO plugin_state (plugin, key, value, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(plugin, key) DO UPDATE SET "
+            "value=excluded.value, updated_at=excluded.updated_at",
+            (plugin, key, value, now),
+        )
+
+
+def clear_plugin_state(conn: sqlite3.Connection, plugin: str) -> None:
+    conn.execute("DELETE FROM plugin_state WHERE plugin=?", (plugin,))
+
+
+def append_postings(
+    conn: sqlite3.Connection,
+    company: str,
+    postings: list[Posting],
+    now: str,
+    identity: Optional[tuple[str, str]] = None,
+) -> tuple[list[Posting], list[Posting]]:
+    """Add what a feed just announced. Never close anything by absence.
+
+    The mirror image of `sync_postings`, and that function's docstring is the reason this
+    one exists. `sync_postings` reconciles a **complete statement** of what a board holds,
+    so a posting missing from it has closed. An incremental poll is not that statement: it
+    returns only what arrived since the last read, and on a normal night that is nothing.
+    Routed through `sync_postings`, one quiet evening would close every posting the feed
+    had ever imported.
+
+    A message is an announcement, not a listing. It never closes; it only ages — which is
+    what `close_stale_postings` is for.
+
+    Returns `(inserted, suppressed)`. Suppressed rows are duplicates of something already
+    tracked and were never written at all: nothing enters `postings`, so nothing enters
+    `verdicts`, the report or the ranking. Refusing at the door is cheaper and quieter
+    than importing and then closing, and the feeds are where the redundancy comes from.
+
+    Two writes here that `sync_postings` does not make, both load-bearing:
+
+      * **`description` is written at insert.** Nothing else would ever write it. The
+        only other writer is `_cache_descriptions`, which builds its work list inside
+        `cmd_check`'s board loop, and a plugin company is not in it. A NULL description
+        drops the row out of `level`'s queue *and* out of `matches_needing_judgment`, so
+        it is never judged, never scored, and `rank.available` filters it out — the
+        posting would be in the table and absent from the product.
+      * **`ON CONFLICT DO NOTHING`**, so re-reading the same messages after an
+        interrupted run imports nothing twice and can never blank a stored description.
+    """
+    existing = {
+        row["ats_job_id"]
+        for row in conn.execute(
+            "SELECT ats_job_id FROM postings WHERE company=?", (company,)
+        )
+    }
+    # One query rather than one per posting: a feed's whole backlog against the open set.
+    taken = {
+        row["dedupe_key"]: row
+        for row in conn.execute(
+            "SELECT dedupe_key, url, company FROM postings "
+            "WHERE closed_at IS NULL AND dedupe_key IS NOT NULL AND company != ?",
+            (company,),
+        )
+    }
+
+    inserted: list[Posting] = []
+    suppressed: list[Posting] = []
+    for p in postings:
+        key = _key_for(p, identity)
+        if p.ats_job_id in existing:
+            conn.execute(
+                "UPDATE postings SET last_seen=?, dedupe_key=? "
+                "WHERE company=? AND ats_job_id=?",
+                (now, key, company, p.ats_job_id),
+            )
+            continue
+        if key and key in taken:
+            suppressed.append(p)
+            continue
+        conn.execute(
+            "INSERT INTO postings (company, ats_job_id, title, location, url, "
+            "posted_at, posted_on, first_seen, last_seen, closed_at, description, "
+            "dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) "
+            "ON CONFLICT(company, ats_job_id) DO NOTHING",
+            (company, p.ats_job_id, p.title, p.location, p.url, p.posted_at,
+             p.posted_on, now, now, p.description, key),
+        )
+        existing.add(p.ats_job_id)
+        if key:
+            taken[key] = {"url": p.url, "company": company}
+        inserted.append(p)
+    return inserted, suppressed
+
+
+def close_stale_postings(
+    conn: sqlite3.Connection, company: str, before_day: str, now: str
+) -> int:
+    """Close a feed's postings older than `before_day`. By age, never by absence.
+
+    A channel cannot tell us a req was filled, so without this a group only ever grows
+    and a year-old announcement stays "open" forever. Age is an honest thing to say here
+    because it is a statement about *our own observation* — "this is older than N days
+    and this feed has no way to tell us more" — rather than an inferred claim about the
+    employer, which is the line DESIGN.md 3.4 draws.
+
+    Rows with a `closed_reason` already set are left alone; they are closed for a
+    better-known reason than age.
+    """
+    cur = conn.execute(
+        "UPDATE postings SET closed_at=?, closed_reason='aged_out' "
+        "WHERE company=? AND closed_at IS NULL "
+        "AND COALESCE(posted_on, first_seen) < ?",
+        (now, company, before_day),
+    )
+    return cur.rowcount
+
+
+def plugin_posting_counts(conn: sqlite3.Connection, company: str) -> dict:
+    """total / open / applied for one feed, for `plugins list`."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS total, "
+        "SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END) AS open "
+        "FROM postings WHERE company=?",
+        (company,),
+    ).fetchone()
+    applied = conn.execute(
+        "SELECT COUNT(*) FROM applications WHERE company=?", (company,)
+    ).fetchone()[0]
+    return {
+        "total": row["total"] or 0,
+        "open": row["open"] or 0,
+        "applied": applied or 0,
+    }
+
+
+# Machine-authored rows keyed by (company, ats_job_id) or by company. Deleting these
+# throws away only what a run produced and could produce again.
+_PURGE_BY_COMPANY = [
+    "postings", "verdicts", "rankings", "deferrals", "prefill_plans",
+    "posting_resumes", "task_attempts", "form_fields", "board_health",
+    "manual_checks",
+]
+
+# Deliberately NOT purged, and each for its own reason:
+#
+#   decisions   — the corpus `jobtracker eval` replays. `decisions.title` is denormalized
+#                 precisely so it does not shrink when a req closes; dropping rows because
+#                 you switched a plugin off would silently weaken the only thing standing
+#                 between "fixed one leak" and "re-broke three".
+#   overrides   — your rulings, pinned decided_by='human'. A model pass may not displace
+#                 one; neither may a purge.
+#   applications / application_events — you applied. That stays true whatever happens to
+#                 the posting row it came from, which is exactly why `all_applications`
+#                 reads the table directly instead of joining `postings`.
+_PURGE_KEEPS = ("decisions", "overrides", "applications", "application_events")
+
+
+def purge_blockers(conn: sqlite3.Connection, company: str) -> list[dict]:
+    """Rows a purge would orphan: ones you applied to, or attached a resume to."""
+    rows = conn.execute(
+        "SELECT a.ats_job_id, a.title, a.status FROM applications a WHERE a.company=?",
+        (company,),
+    ).fetchall()
+    blockers = [dict(r) for r in rows]
+    for r in conn.execute(
+        "SELECT ats_job_id FROM posting_resumes WHERE company=?", (company,)
+    ):
+        if not any(b["ats_job_id"] == r["ats_job_id"] for b in blockers):
+            blockers.append({"ats_job_id": r["ats_job_id"], "title": "", "status": "resume attached"})
+    return blockers
+
+
+def purge_company(
+    conn: sqlite3.Connection, company: str, *, plugin: str | None = None
+) -> dict:
+    """Delete one feed's machine-authored rows. Returns a count per table.
+
+    Keeps everything in `_PURGE_KEEPS` — see the comment there. The caller is expected to
+    have shown `purge_blockers` first; this function does the deletion it is asked for.
+    """
+    counts: dict = {}
+    for table in _PURGE_BY_COMPANY:
+        cur = conn.execute(f"DELETE FROM {table} WHERE company=?", (company,))
+        if cur.rowcount:
+            counts[table] = cur.rowcount
+    if plugin:
+        # Clearing the cursor is what makes re-enabling start a clean backfill rather
+        # than resuming from a point whose postings no longer exist.
+        clear_plugin_state(conn, plugin)
+    return counts
 
 
 # -- runs --------------------------------------------------------------------------
