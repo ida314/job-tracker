@@ -19,12 +19,18 @@ never touch `page`. So a request enqueues a command and returns; the browser thr
 drains the queue inside the poll it was already doing, and the outcome comes back on the
 next snapshot. Nothing here blocks on a browser.
 
-**A command points, it does not write.** The vocabulary is five names, and a command
+**A command points, it does not write.** The vocabulary is seven names, and a command
 carries a field *handle* — an opaque token minted by the discovery pass — never a
-selector, never an expression, never anything the browser thread evaluates. That is the
-same bound the prefill model is held to, for the same reason: there must be no path by
-which text from outside becomes code running on somebody's application form. Nothing in
-this vocabulary can activate anything.
+selector, never an expression, never anything the browser thread evaluates. That is
+`browser.py`'s no-click rule carried across this channel, for the same reason: there must
+be no path by which text from outside becomes code running on somebody's application
+form. Nothing in this vocabulary can activate anything.
+
+(It was also the bound the prefill model was held to, until that pass was removed on
+2026-08-25 — see DESIGN.md §8.1. Worth knowing which way that evidence runs: the model's
+bound held perfectly and its *answers* were wrong anyway. A bound on what something may
+say is not a bound on what a wrong answer does, and the reason this one is worth keeping
+is narrower — it is about code execution, not about judgment.)
 
 **Submitting is therefore not a command.** It activates, which is the one thing the
 sentence above says a command cannot do — so it is a gate on the session rather than a
@@ -77,11 +83,13 @@ CLOSED = "closed"
 # list with a test on it, not an open protocol.
 SET = "set"                # put a value in one field, by handle
 CLEAR = "clear"            # empty one field, by handle
+RESET = "reset"            # empty every field the form is holding, in one pass
 REDISCOVER = "rediscover"  # read the form again; its shape may have changed
 SHOOT = "shoot"            # take a preview screenshot
 HIGHLIGHT = "highlight"    # outline one field, so the preview follows what you edit
+SEARCH = "search"          # ask one combobox what it offers for a query, and read it back
 
-VOCABULARY = frozenset({SET, CLEAR, REDISCOVER, SHOOT, HIGHLIGHT})
+VOCABULARY = frozenset({SET, CLEAR, RESET, REDISCOVER, SHOOT, HIGHLIGHT, SEARCH})
 
 # `CLEAR` is its own name rather than `SET` with an empty value, for two reasons that both
 # bite. A `file` row's value is a path on this machine, so `""` there is not "no text" but
@@ -91,7 +99,30 @@ VOCABULARY = frozenset({SET, CLEAR, REDISCOVER, SHOOT, HIGHLIGHT})
 #
 # It stays inside the vocabulary because it still cannot activate anything: emptying a
 # field is the exact inverse of filling one. Submitting is not, which is why it is a
-# session flag and not a sixth name here — see `Session.request_submit`.
+# session flag and not another name here — see `Session.request_submit`.
+#
+# `RESET` is `CLEAR` over the whole form and is a name of its own rather than a loop of
+# clears from the page, for a reason that is the epoch's: a successful clear re-reads the
+# form, so a shape change part-way through a loop would leave every later handle stale
+# and every later clear correctly dropped. That is half a reset, on a form you are about
+# to send, reported as a whole one. Taken as a single command it names no handle from
+# outside at all — it empties whatever the browser thread is holding at the moment it
+# runs — which is also why it is the one command that carries no epoch and needs none.
+#
+# `SEARCH` is the newest and is inside the vocabulary by the same test as `CLEAR`: it
+# reaches nothing a fill does not. It types a query into a combobox's own search box and
+# reads back what the widget then offers — both halves of which `_pick` already does as
+# the first step of a `SET`. It chooses nothing, commits nothing, and leaves the menu the
+# way it found it; the only thing it changes is what this side *knows*.
+#
+# It exists because one kind of dropdown cannot be read any other way. Greenhouse's
+# "Location (City)" is a react-select whose options are fetched per keystroke, so it has
+# no list to open — measured on Twilio's live form, it is the one combobox of ten with no
+# "Toggle flyout" button in its indicators, because there is nothing to toggle. Its
+# vocabulary is therefore permanently empty, `/apply` rendered it as a text box, and an
+# answer that was not character-for-character one of the suggestions came back "would not
+# take it" with no way to find out what it *would* have taken. A menu you cannot read is
+# a question you cannot answer; this is how the page reads it.
 
 # Row statuses. `refused` is a real outcome and not an error: a dropdown that does not
 # offer the answer we hold is a question we cannot answer, and saying so beats picking
@@ -118,7 +149,7 @@ class Command:
     kind: str
     handle: str = ""
     value: str = ""
-    epoch: int = -1  # -1 means "not tied to a discovery" — SHOOT and REDISCOVER
+    epoch: int = -1  # -1 means "not tied to a discovery" — SHOOT, REDISCOVER, RESET
 
 
 def rows_from(found: list, fields: list, carried: Optional[dict] = None) -> list:
@@ -158,6 +189,19 @@ def rows_from(found: list, fields: list, carried: Optional[dict] = None) -> list
             "value": value,
             "status": status,
             "question_key": question_key,
+            # What the widget offered the last time anything looked, and for which query.
+            # Deliberately **not** carried across a reading, unlike the status and the
+            # value: `options` is a vocabulary and belongs to the field, whereas these
+            # are one widget's answer to one query at one moment. A form that has just
+            # been re-read is a form whose menus nobody has opened since, and saying so
+            # is the difference between offering you a stale list and offering you none.
+            #
+            # They are also never written to `form_fields.options`. A place lookup's
+            # suggestions are a function of what you typed, so storing them would teach
+            # the employer's form a vocabulary it does not have — and `known_options`
+            # replays that at every later visit.
+            "offered": [],
+            "offered_for": "",
         })
     return rows
 
@@ -305,6 +349,27 @@ class Session:
                     row["value"] = value
                     return
 
+    def offer(self, handle: str, query: str, options: list) -> None:
+        """Record what one combobox offered for one query, so the page can render it.
+
+        Written from two places, and the second is the one that matters. A `search` is
+        somebody asking; a *refused* `set` is the widget having already been asked — it
+        was opened, the query was typed, and its menu did not contain the answer we hold.
+        Throwing that reading away is what made "would not take it" a dead end: the page
+        said no and could not say what yes would have looked like.
+
+        The query is kept beside the options because they only mean anything together.
+        "New York, NY, United States" is not what this field offers; it is what it
+        offered for "new york", and a list rendered without its query is a menu that
+        looks complete and is not.
+        """
+        with self.lock:
+            for row in self.fields:
+                if row["handle"] == handle:
+                    row["offered"] = [str(o) for o in options]
+                    row["offered_for"] = query
+                    return
+
     def retarget(self, url: str) -> None:
         """Say which page the browser actually went to.
 
@@ -371,6 +436,21 @@ class Session:
     def close_requested(self) -> bool:
         with self.lock:
             return self.closing
+
+    def holds(self, company: str, ats_job_id: str) -> bool:
+        """Whether this session is the live window for that posting.
+
+        `CLOSED` is not held, and the distinction is the whole point of asking. A session
+        whose window has gone is a page that can do nothing but say so, so reading it as
+        "you are already there" would send the click to a dead form instead of opening a
+        real one. Everything else — opening, filling, ready, submitted — is a window you
+        can still go back to, which is what the dashboard button needs to know: reopening
+        the job that is already open is the way back to it, not a collision with it.
+        """
+        with self.lock:
+            return (self.phase != CLOSED
+                    and self.company == company
+                    and self.ats_job_id == ats_job_id)
 
     # -- sending it ------------------------------------------------------------------
     def set_submit_control(self, control: Optional[dict]) -> None:

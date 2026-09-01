@@ -1886,6 +1886,136 @@ def known_options(conn: sqlite3.Connection, company: str) -> dict[str, list]:
     return out
 
 
+def _demote_plan_entries(conn: sqlite3.Connection, derivable) -> int:
+    """Turn every stored plan value nothing can account for back into a gap.
+
+    Judged from the **plan entry itself** — its own label, form key and source — and not
+    from the `form_fields` rows the caller just cleared. Those are two different records
+    and they drift: a later DOM visit rewrites `form_fields.question_key` to NULL when a
+    write is refused, so a field whose value came from a guess can have no surviving
+    `form_fields` row that names it. Keying off the join left 7 of 37 wrong values in
+    place at Twilio, all of them in exactly that state.
+
+    `file` and `alternative` entries are exempt. A resume was placed from a path, not
+    from an answer, and a DOM file input can be keyed anything at all (`attach`,
+    `resume_upload`) — running the predicate over it would detach the single most
+    valuable field on the form.
+
+    The entry keeps its place in the plan; the browser still needs to know the field is
+    there. It loses the value, the key that placed it, and any claim to be answered.
+    """
+    changed = 0
+    for row in conn.execute(
+        "SELECT company, ats_job_id, plan FROM prefill_plans"
+    ).fetchall():
+        try:
+            entries = json.loads(row["plan"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(entries, list):
+            continue
+        hit = False
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("value"):
+                continue
+            if entry.get("source") in ("file", "alternative"):
+                continue
+            if derivable(entry.get("label") or "", entry.get("form_key") or ""):
+                continue
+            entry["value"] = None
+            entry["question_key"] = None
+            entry["source"] = "gap"
+            hit = True
+        if hit:
+            changed += 1
+            gaps = sum(1 for e in entries
+                       if isinstance(e, dict) and e.get("value") is None
+                       and e.get("source") != "alternative")
+            conn.execute(
+                "UPDATE prefill_plans SET plan=?, gaps=? "
+                "WHERE company=? AND ats_job_id=?",
+                (json.dumps(entries), gaps, row["company"], row["ats_job_id"]),
+            )
+    return changed
+
+
+def forget_learned(
+    conn: sqlite3.Connection, derivable, write: bool = False
+) -> list[dict]:
+    """Un-learn every resolved label that no rule and no human alias can account for.
+
+    `forget_question` one label at a time; this is the sweep, and it exists because of
+    what was found when the model pass was removed on 2026-08-25. Deleting the code that
+    made those matches removes nothing: `apply` wrote each one onto
+    `form_fields.question_key`, and `known_question_keys` replays it as a deterministic,
+    model-free alias at every company forever. 229 of 383 resolved rows in the live
+    database were explicable only that way, and they included *"Protected Veteran
+    Status"* pointing at `are_you_a_current_mongodb_employee` and every *"do you require
+    sponsorship?"* pointing at a work-authorization answer, whose stored value means the
+    opposite. Removing the model while keeping those would have frozen the worst reading
+    in place and taken away the only thing that could have changed its mind.
+
+    `derivable(label, form_key) -> bool` decides what to keep, and it is supplied by the
+    caller rather than written here: it is a question about `prefill`'s rules and the
+    user's own aliases, and `store` may not import either. Kept means "some rule or some
+    alias a person wrote produces this key" — everything else goes.
+
+    Also the tool for undoing a bad *human* alias in bulk, which is the only kind left.
+    Dry by default; the same three tables move together as in `forget_question`.
+    """
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT company, form_key, label, question_key FROM form_fields "
+            "WHERE question_key IS NOT NULL"
+        )
+        if not derivable(r["label"], r["form_key"])
+    ]
+    if not write:
+        return rows
+
+    for row in rows:
+        conn.execute(
+            "UPDATE form_fields SET question_key=NULL WHERE company=? AND form_key=?",
+            (row["company"], row["form_key"]),
+        )
+    for company in {r["company"] for r in rows}:
+        conn.execute(
+            "UPDATE prefill_plans SET answers_hash='' WHERE company=?", (company,)
+        )
+    # And take the values out of the stored plans, which blanking the hash does not do.
+    #
+    # `forget_question` relies on the blank to put a posting back in
+    # `matches_needing_prefill` so the plan is rebuilt without the bad key. That works
+    # for a posting still in the queue and not for one that has left it — applied,
+    # deferred, closed, or with its score dropped. Measured on the live database: 13 of
+    # 64 plans were in that state, built 2026-08-17, and no `prefill` run would ever
+    # touch them again. `apply-to` and `_api_apply_to` read `get_plan` directly, and
+    # `browser._plan_index` lets a stored plan value beat a fresh `resolve_field` — so
+    # opening any of those thirteen would still have typed what the model guessed,
+    # forever, out of a sweep that reported it had forgotten them.
+    # Unconditionally, and **not** guarded on `rows` being non-empty. These are two
+    # different records of the same decision and either can outlive the other: a later
+    # DOM visit NULLs `form_fields.question_key` when a write is refused, so a database
+    # can hold plans full of guessed values with nothing left in `form_fields` to sweep.
+    # Returning early on an empty `rows` would report "nothing to forget" over exactly
+    # that state.
+    _demote_plan_entries(conn, derivable)
+    # Reopened by the question, never by the key it was pointed at — `forget_question`'s
+    # rule, and for its reason: a gap is filed under a slug of the question text, so
+    # clearing by key would reopen whatever legitimately resolved to that key and leave
+    # the bad question closed.
+    wanted = {normalize_label(r["label"]) for r in rows}
+    for gap in conn.execute("SELECT question_key, ask FROM prefill_gaps").fetchall():
+        if wanted and normalize_label(gap["ask"]) in wanted:
+            conn.execute(
+                "UPDATE prefill_gaps SET resolved_at=NULL WHERE question_key=?",
+                (gap["question_key"],),
+            )
+    conn.commit()
+    return rows
+
+
 def forget_question(
     conn: sqlite3.Connection, target: str, write: bool = False
 ) -> list[dict]:
@@ -1953,6 +2083,45 @@ def known_question_keys(conn: sqlite3.Connection) -> dict[str, str]:
     return {normalize_label(r["label"]): r["question_key"] for r in rows}
 
 
+def learn_question_key(
+    conn: sqlite3.Connection, label: str, question_key: str
+) -> int:
+    """Teach every form that asks `label` that the answer is `question_key`.
+
+    The write behind "this question is my `email`" on `/apply`. For an answer in the
+    `answers:` block the durable record is the alias list in answers.yaml — the user's
+    own file, which `Answers.by_alias` reads — and this would be redundant. For an
+    **identity** key it is the only record there can be: `by_alias` is built from the
+    `answers:` block alone, so a wording attached to `first_name` has nowhere else to
+    live, and without this the same question comes back at the next employer.
+
+    Rows only. It never invents a `form_fields` row, because a label nothing has asked
+    is not a question — and a row minted here would name a company that never asked it.
+    """
+    wanted = normalize_label(label)
+    hit = [
+        r["rowid"]
+        for r in conn.execute("SELECT rowid, label FROM form_fields")
+        if normalize_label(r["label"]) == wanted
+    ]
+    for rowid in hit:
+        conn.execute(
+            "UPDATE form_fields SET question_key=? WHERE rowid=?", (question_key, rowid)
+        )
+    # The plans holding this field were built before the attachment, so they still carry
+    # it as a gap. Blanking the hash is `forget_question`'s move and puts them back in
+    # `matches_needing_prefill`; without it a stored plan beats a fresh `resolve_field`
+    # in `browser._plan_index` and the field stays empty on the page.
+    if hit:
+        conn.execute(
+            "UPDATE prefill_plans SET answers_hash='' WHERE company IN "
+            "(SELECT company FROM form_fields WHERE rowid IN (%s))"
+            % ",".join("?" * len(hit)),
+            hit,
+        )
+    return len(hit)
+
+
 def normalize_label(label: str) -> str:
     """Fold a form label to a comparison key.
 
@@ -1989,10 +2158,38 @@ def record_gap(
     now: str,
     options: Optional[str] = None,
 ) -> bool:
-    """Note a question we have no answer for. True if this is the first sighting.
+    """Note a question we have no answer for. True if it is newly on your list.
 
     Re-seeing a gap appends the company to `seen_on` rather than creating a second row:
     the same question asked by six employers is one thing for you to answer, not six.
+
+    **A resolved gap reopens, carrying the wording that is still unanswered** (added
+    2026-08-25). `question_key` is `slugify(ask)`, which caps at eight words, so several
+    genuinely different questions share one row — measured on the live database, these
+    five did:
+
+        Are you legally authorized to work in the United States?
+        Are you legally authorized to work in the United States for LaunchDarkly?
+        Are you legally authorized to work in the United States for our Company?
+        Are you legally authorized to work in the country in which you are applying?
+        Are you legally authorized to work in the country where this position is located?
+
+    Matching is by the *full* normalized label, so an alias attached to the first fills
+    Twilio's form and none of the other four. Before this, the row was marked resolved
+    and never came back: the question vanished from Settings while four employers' forms
+    kept a blank required field, with the page having said it saved. Failure-as-absence,
+    inside the loop that exists to prevent it — and newly load-bearing, because the model
+    pass used to match the other four without being asked.
+
+    Only the caller knows a field is still unfilled — `record` calls this for
+    `result.gaps` and nothing else — so re-sighting *is* the signal, and `ask` is
+    refreshed to the wording that is still open rather than the one that was answered.
+    That also keeps it out of `close_answered_gaps`' way: the stored wording is by
+    construction one nothing can currently fill, so the two cannot fight over the row.
+
+    Collapsing the five into one row stays right. They are one thing to think about, they
+    share a count and a sort position, and each still needs its own alias because that is
+    what exact-label matching means.
     """
     row = conn.execute(
         "SELECT seen_on, resolved_at FROM prefill_gaps WHERE question_key=?",
@@ -2015,6 +2212,13 @@ def record_gap(
             "UPDATE prefill_gaps SET seen_on=? WHERE question_key=?",
             (",".join(seen), question_key),
         )
+    if row["resolved_at"] is not None:
+        conn.execute(
+            "UPDATE prefill_gaps SET resolved_at=NULL, ask=?, type=?, "
+            "options=COALESCE(?, options) WHERE question_key=?",
+            (ask, field_type, options, question_key),
+        )
+        return True
     return False
 
 

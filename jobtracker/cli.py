@@ -1,13 +1,16 @@
 """Command-line entry point.
 
-The nightly sequence is  check -> work -> rank -> dashboard,  and only `check` touches
-an ATS. Everything after it reads state.db and, at most, the local inference router.
+The nightly sequence is  check -> work -> prepare -> dashboard,  and only `check`
+touches an ATS. `work` is the model's half; `prepare` rescores and prefills and needs no
+model at all. Everything after `check` reads state.db and, at most, the local router.
 
 Subcommands:
   check         the daily pipeline: fetch -> health -> store -> match -> report,
                 caching descriptions so every later pass can run offline
   work          run the next available model task, or the one you name. The scheduler
                 picks by priority, which is the pipeline's own dependency order
+  prefill       work out what goes in every box of the forms worth applying to
+                (no model: it reads answers.yaml, and asks you about what is missing)
   prepare       make tomorrow's picks ready: rescore, then prefill the top N
   apply-to      open an application in a browser with your answers already filled in
   resolve       alias for `work --task level`  (kept: it is in muscle memory and cron)
@@ -27,6 +30,8 @@ Subcommands:
   repair        read careers pages for broken boards' new slugs; --write applies
   plugins       list, enable, disable, configure or purge an import plugin
   add-company   append a curated entry to companies.yaml
+  forget-learned  sweep every resolved label the rules and your aliases cannot
+                explain (the one-shot for a database that ran prefill's model pass)
   forget-question  un-learn a form label's resolved answer key
   migrate       backend-newgrad-2027-tracker.md -> companies.yaml (one-time)
 
@@ -38,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -46,7 +52,6 @@ import time
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 from opentelemetry import metrics
 
@@ -1131,9 +1136,10 @@ def cmd_work(args: argparse.Namespace) -> int:
     """Run the next available model task, or the one you name.
 
     Selection is by priority, and priority is the pipeline's dependency chain: `level`
-    turns uncertain postings into matches, `judge` scores matches, `prefill` works down
-    scored matches. Draining the earliest stage that has work is therefore the same
-    instruction as never starving a later one.
+    turns uncertain postings into matches and `judge` scores them. Draining the earliest
+    stage that has work is therefore the same instruction as never starving a later one.
+    (`prefill` was the third link until 2026-08-25. It needs no model, and this command
+    refuses to run at all without one, so it is `jobtracker prefill` now.)
 
     Never fails for want of a model. With none configured or reachable it reports the
     queue and changes nothing, which makes it safe to run before the router is up.
@@ -1192,19 +1198,15 @@ def cmd_work(args: argparse.Namespace) -> int:
         log.info("work complete: %s", report.summary())
         print(report.summary())
 
-        # Refresh the derived score before returning, so the next task in the chain sees
-        # what this one produced. `judge` writes a ranking with a NULL score and
-        # `prefill` only queues postings that have one, so without this a `work` loop
-        # drains level, drains judge, and then reports "prefill: nothing to do" forever.
+        # Refresh the derived score before returning, so whatever consumes this run sees
+        # what it produced. `judge` writes a ranking with a NULL score, and both `today`
+        # and `prefill` only consider postings that have one — so without this a `work`
+        # loop drains level, drains judge, and leaves the score NULL until something
+        # else happens to rescore. Scoring is not a task (no model, must always run),
+        # which is exactly why the runner has to close the link itself.
         if ctx.profile is not None:
             scored, _ = _rescore(conn, ctx.profile, ctx.criteria, ctx.tiers, today)
             log.debug("rescored %d open match(es)", scored)
-
-        if report.task == "prefill":
-            outstanding = _refresh_gap_stubs(conn, ctx)
-            if outstanding:
-                print(f"  {outstanding} question(s) still need an answer from you — "
-                      f"see the end of {ctx.answers_path}, or the Settings tab.")
         return 0
     finally:
         if fetcher is not None:
@@ -1335,32 +1337,42 @@ def cmd_rank(args: argparse.Namespace) -> int:
     return 0
 
 
-# -- prepare -----------------------------------------------------------------------
-async def _prefill_picks(args, conn, ctx, picks) -> Optional[object]:
-    """Build a prefill plan for exactly these postings. None if no router."""
-    from . import llm as llm_pkg
-    from .tasks import DEFAULT_CONCURRENCY, get_task, run_task
+# -- prefill -----------------------------------------------------------------------
+def cmd_prefill(args: argparse.Namespace) -> int:
+    """Work out what goes in every box of every form worth applying to.
 
-    task = get_task("prefill")
-    wanted = {(p["company"], p["ats_job_id"]) for p in picks}
-    units = [u for u in task.pending(conn, ctx) if (u.company, u.ats_job_id) in wanted]
-    if not units:
-        return None
+    Deterministic, and deliberately not a `work` task: it asks nothing of a model, so
+    gating it behind a reachable router — which is what living in that queue would have
+    meant — would silently build no plans on a night the GPU was down. Same argument
+    that has always kept scoring out of the queue.
+    """
+    from . import prefill as prefill_mod
 
-    base_url = llm_pkg.resolve_base_url(getattr(args, "llm_url", None))
-    client = llm_pkg.LlmClient(model=getattr(args, "llm_model", None), base_url=base_url)
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = args.since or _today()
+    fetcher = Fetcher()
     try:
-        if not await client.probe():
-            return None
-        return await run_task(
-            conn, task, client, ctx,
-            units=units,
-            concurrency=args.concurrency or DEFAULT_CONCURRENCY,
-        )
+        ctx = _build_context(args, today, fetcher=fetcher)
+        reason = prefill_mod.unavailable_reason(ctx)
+        if reason:
+            print(f"error: {reason}", file=sys.stderr)
+            return 1
+
+        report = prefill_mod.build_plans(conn, ctx, fetcher=fetcher, limit=args.limit)
+        log.info("prefill complete: %s", report.summary())
+        print(report.summary())
+
+        outstanding = _refresh_gap_stubs(conn, ctx)
+        if outstanding:
+            print(f"  {outstanding} question(s) still need an answer from you — "
+                  f"see the end of {ctx.answers_path}, or the Settings tab.")
+        return EXIT_OK
     finally:
-        await client.aclose()
+        fetcher.close()
+        conn.close()
 
 
+# -- prepare -----------------------------------------------------------------------
 def cmd_prepare(args: argparse.Namespace) -> int:
     """Make tomorrow morning's picks ready to apply to.
 
@@ -1398,9 +1410,14 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             print(f"No answer bank at {ctx.answers_path} — cannot prefill.")
             print("  cp answers.example.yaml answers.yaml, then fill it in.")
         else:
-            report = asyncio.run(_prefill_picks(args, conn, ctx, picks))
-            if report is not None:
-                log.info("prepare: %s", report.summary())
+            # No router, no probe, no event loop. Before 2026-08-25 this went through an
+            # `LlmClient.probe()` that returned None on failure, so a box with no GPU
+            # prepared nothing and every pick reported "no plan" — the failure this
+            # command exists to catch, produced by the command itself.
+            from . import prefill as prefill_mod
+            only = [(p["company"], p["ats_job_id"]) for p in picks]
+            report = prefill_mod.build_plans(conn, ctx, fetcher=fetcher, only=only)
+            log.info("prepare: %s", report.summary())
             _refresh_gap_stubs(conn, ctx)
 
         return _report_readiness(conn, picks, ctx)
@@ -1409,7 +1426,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         conn.close()
 
 
-def _unprefillable_reason(ctx, row) -> Optional[str]:
+def _unprefillable_reason(ctx, row) -> str | None:
     """Why this pick could never have had a plan, or None if it could have.
 
     A posting from a feed — an import plugin, or an aggregator — links straight to some
@@ -1534,9 +1551,11 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
 
         plan = store.get_plan(conn, args.company, args.job_id)
         if plan is None:
-            # Not fatal. The browser re-derives every rules-resolvable field itself, so
-            # a plan is a head start rather than a prerequisite; without one you simply
-            # lose the model's question-matching for this form.
+            # Not fatal, and since 2026-08-25 barely even a downgrade. The browser
+            # re-derives every field through the same `resolve_field`, so a plan is a
+            # head start rather than a prerequisite. What a stored plan still carries
+            # that a live pass does not is the option list each value was checked
+            # against — see `PlanEntry.as_dict`.
             log.info("no prefill plan stored — filling from the rules alone")
 
         plan_json = plan["plan"] if plan else None
@@ -1545,7 +1564,7 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
         # disagree about which file goes out under your name.
         override = resumes.override_for(conn, args.company, args.job_id)
         if override is not None:
-            from .tasks.prefill import retarget_resume
+            from .prefill import retarget_resume
 
             answers = replace(answers, resume=override)
             plan_json = retarget_resume(plan_json, str(override))
@@ -2010,6 +2029,64 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 # -- forget-question ----------------------------------------------------------------
+def cmd_forget_learned(args: argparse.Namespace) -> int:
+    """Un-learn every resolved label no rule and no alias of yours accounts for.
+
+    The one-shot for a database that ran the prefill model pass, and the bulk form of
+    `forget-question` afterwards. Deleting that code removed nothing it had already
+    decided: each match was written onto `form_fields.question_key`, which
+    `known_question_keys` replays as a deterministic alias at every company. See
+    `jobtracker/prefill.py`'s module docstring for what it had actually matched.
+
+    Dry by default, and it prints the label -> key pairs grouped by key, because 122
+    lines of "this question meant that answer" is the only form in which this is
+    reviewable at all.
+    """
+    from . import prefill as prefill_mod
+
+    conn = store.connect(args.db or config.DB_PATH)
+    try:
+        answers, answers_path = _load_answers(
+            Path(args.answers) if args.answers else None)
+        if answers is None and not args.force:
+            print(f"error: no answer bank at {answers_path} — "
+                  "without it every alias you wrote looks like a guess and would be "
+                  "swept. Pass --force if that is really what you want.",
+                  file=sys.stderr)
+            return 1
+
+        rows = store.forget_learned(
+            conn, prefill_mod.derivable_key(answers), write=args.write
+        )
+        if not rows:
+            # A `--write` with no `form_fields` rows to clear is still not a no-op: the
+            # stored plans are swept too, and a database can hold guessed values with
+            # nothing left in `form_fields` naming them.
+            print("nothing learned that the rules and your aliases cannot account for.")
+            if args.write:
+                print("  (stored plans were swept as well — see docs/prefill.md.)")
+            return 0
+
+        by_key = collections.defaultdict(list)
+        for row in rows:
+            by_key[row["question_key"]].append(row)
+        verb = "forgot" if args.write else "would forget"
+        print(f"{verb} {len(rows)} resolved field(s) across {len(by_key)} key(s):\n")
+        for key, group in sorted(by_key.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            print(f"  {key}  ({len(group)} field(s))")
+            for label in sorted({r["label"] for r in group}):
+                print(f"      <- {label[:78]}")
+            print()
+        if args.write:
+            print("Those gaps are open again and the affected plans rebuild on the next")
+            print("`jobtracker prefill`. Answer each once in Settings, or as you apply.")
+        else:
+            print("Nothing was changed. Re-run with --write to apply.")
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_forget_question(args: argparse.Namespace) -> int:
     """Un-learn the answer key a form label was resolved to.
 
@@ -2188,7 +2265,7 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--criteria", default=str(config.CRITERIA_YAML))
     w.add_argument("--profile", default=str(config.PROFILE_YAML))
     w.add_argument("--answers", default=None,
-                   help=f"answer bank for prefill (default: {config.ANSWERS_YAML})")
+                   help=f"answer bank (default: {config.ANSWERS_YAML})")
     w.add_argument("--db", default=None)
     w.add_argument("--since", default=None)
     w.add_argument("--budget", type=int, default=None,
@@ -2226,6 +2303,21 @@ def build_parser() -> argparse.ArgumentParser:
     _llm_flags(rk)
     rk.set_defaults(func=cmd_rank)
 
+    pf = sub.add_parser(
+        "prefill",
+        help="work out what goes in every box of the forms worth applying to",
+    )
+    pf.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    pf.add_argument("--profile", default=str(config.PROFILE_YAML))
+    pf.add_argument("--answers", default=None)
+    pf.add_argument("--db", default=None)
+    pf.add_argument("--since", default=None)
+    pf.add_argument("--limit", type=int, default=None,
+                    help="plan at most N postings")
+    # No `_llm_flags`: this pass opens no socket to a model. It was `work --task
+    # prefill` until 2026-08-25 — see jobtracker/prefill.py.
+    pf.set_defaults(func=cmd_prefill)
+
     pr = sub.add_parser(
         "prepare",
         help="make tomorrow's picks ready to apply to (rescore + prefill the top N)",
@@ -2237,8 +2329,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--since", default=None)
     pr.add_argument("--count", type=int, default=3,
                     help="how many picks to prepare (default: 3, matching `today`)")
-    pr.add_argument("--concurrency", type=int, default=None)
-    _llm_flags(pr)
+    # `_llm_flags` was dropped on 2026-08-25 with prefill's model pass. `prepare`
+    # rescores and plans, and neither needs a router.
     pr.set_defaults(func=cmd_prepare)
 
     at = sub.add_parser(
@@ -2369,6 +2461,18 @@ def build_parser() -> argparse.ArgumentParser:
     fq.add_argument("--write", action="store_true",
                     help="apply it; without this the changes are only listed")
     fq.set_defaults(func=cmd_forget_question)
+
+    fl = sub.add_parser(
+        "forget-learned",
+        help="un-learn every resolved label no rule and no alias of yours accounts for",
+    )
+    fl.add_argument("--answers", default=None)
+    fl.add_argument("--db", default=None)
+    fl.add_argument("--write", action="store_true",
+                    help="apply it; without this the changes are only listed")
+    fl.add_argument("--force", action="store_true",
+                    help="run with no answer bank, sweeping aliases you wrote too")
+    fl.set_defaults(func=cmd_forget_learned)
 
     a = sub.add_parser("add-company", help="append a curated entry")
     a.add_argument("--name", required=True)

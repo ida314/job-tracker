@@ -297,11 +297,16 @@ postings today."
 ## 8. Where the model still earns its place
 
 The rewrite does not eliminate the language model. It relocates it from the runtime to
-bounded roles — two when this was written, five now. Since 2026-08-13 they share one
-mechanism: each is a **task** (docs/tasks.md), which is a prompt, a schema, a parser, a
-query for what still needs asking, and a write. A scheduler picks between them by
-priority, and priority is the pipeline's own dependency order. The bounds below did not
-change; what changed is that they are now stated once instead of three times.
+bounded roles — two when this was written, five by 2026-08-16, **four now**. Since
+2026-08-13 they share one mechanism: each is a **task** (docs/tasks.md), which is a
+prompt, a schema, a parser, a query for what still needs asking, and a write. A scheduler
+picks between them by priority, and priority is the pipeline's own dependency order.
+
+The count went down for the first time on 2026-08-25, and how it went down is worth more
+than the number. **Question matching was the most tightly bounded role on this list and
+it was still removed** — see the note after role 4's slot below. A bound is a limit on
+what a wrong answer can damage, not a reason to expect a right one, and this section is
+about roles where the model earns its place, not roles where it is safely contained.
 
 1. **Ambiguity resolution** (§6) — schema-constrained, on the residual only.
    **Implemented** as the `level` task (`jobtracker work --task level`, or `resolve`);
@@ -399,26 +404,11 @@ change; what changed is that they are now stated once instead of three times.
      that matching already accepted, in a separate table, so a bad judgment costs you one
      misplaced row and never a wrong match.
 
-4. **Question matching** (added 2026-08-13) — **implemented** as the `prefill` task; see
-   `docs/prefill.md`. An application form asks a question in the employer's words; the
-   answer bank holds it in yours. Deciding that *"Who is your current or previous
-   employer?"* and `current_employer` are the same question is exactly the fuzzy string
-   problem §3.2 reserves for a model, and exactly the kind of rule you cannot finish
-   writing.
+4. **Inbox reading** (added 2026-08-16) — **implemented** as the `inbox` task; see
+   `docs/mail.md`. Numbered fifth until 2026-08-25, when the role that had been fourth
+   was removed.
 
-   It is the most tightly bounded of them all — role 5 below has an enum too, but it also
-   returns a quote, and this one returns no text at all. Its schema is an **enum of keys the
-   candidate already wrote, plus `none`**, so the model cannot produce text: there is no
-   code path by which a sentence it composed reaches a form field. It names a key; the
-   value comes from `answers.yaml`. A key it names still has to fit the field — a
-   dropdown that does not offer the stored answer is a gap, not a fill.
-
-   And it is asked only about what the rules could not place. A canonical field name or
-   a question already answered elsewhere resolves with no call at all, so the steady
-   state is zero model calls per form.
-
-5. **Inbox reading** (added 2026-08-16) — **implemented** as the `inbox` task; see
-   `docs/mail.md`. An employer's reply is prose, arriving on no schedule, saying "we'd
+   An employer's reply is prose, arriving on no schedule, saying "we'd
    like to find time to chat" or "we've decided to move forward with other candidates".
    No rule finishes reading that, and until something did, `applications` had exactly one
    writer — you — and `next_action` went stale first.
@@ -433,10 +423,64 @@ change; what changed is that they are now stated once instead of three times.
 
    Three bounds on the answer, and the third is new to this list. Its `status` is an enum
    of the seven application stages plus `none`. Its `application` is an enum of ids the
-   narrower offered, the §8.4 shape again. And its one free-text field, a quote, must
+   narrower offered, the same shape the removed role had. And its one free-text field,
+   a quote, must
    **appear in the message verbatim** — `repair`'s rule that a proposed slug must appear
    on the page it was read from, applied to prose. That is what keeps a fabricated
    rejection off the review list.
+
+### 8.1 The role that was removed, and why the bound was not enough
+
+**Question matching**, added 2026-08-13 as role 4 and removed 2026-08-25. An application
+form asks a question in the employer's words; the answer bank holds it in yours. Deciding
+that *"Who is your current or previous employer?"* and `current_employer` are the same
+question is exactly the fuzzy string problem §3.2 reserves for a model, and exactly the
+kind of rule you cannot finish writing. It ran only on what the rules could not place, so
+the steady state was zero calls per form.
+
+It was the most tightly bounded role this section ever described. Its schema was an
+**enum of keys the candidate had already written, plus `none`** — it returned no text at
+all, so there was no code path by which a sentence it composed could reach a form field.
+It named a key; the value came from `answers.yaml`. A key it named still had to fit the
+field, so a dropdown that did not offer the stored answer was a gap rather than a fill.
+
+Every one of those bounds held, and the feature was still wrong. Measured against the
+live database before removal — 2,462 plan entries across 64 postings — it had decided:
+
+| Question on a real form | Answer it pointed at |
+|---|---|
+| Protected Veteran Status* | `are_you_a_current_mongodb_employee` |
+| Are you at least 18 years of age? | a work-eligibility answer |
+| Do you now, or will you in the future, require sponsorship…? | a work-**authorization** answer, whose stored value means the opposite |
+| Please share an example of how you would support a frustrated customer | `email` |
+| Do you opt-in to receive WhatsApp messages from Stripe Recruiting? | `are_you_a_current_mongodb_employee` |
+| Voluntary Self-Identification of Gender* | `pronouns` |
+
+Three things this says, and only the first was anticipated anywhere above.
+
+**A bound on the output is not a bound on the harm.** "It cannot produce text" was read
+as "the worst case is a missing answer". The worst case was the candidate's email address
+in an essay box and an inverted answer to a sponsorship question — both text the candidate
+wrote, both in the wrong field, and §7.3's failure-is-absence guarantee does not reach a
+wrong answer that came from a right one.
+
+**The guesses outlived the guesser.** `apply` wrote every match onto
+`form_fields.question_key`, which `known_question_keys` replays as a *deterministic,
+model-free* alias at every company. 229 of 383 resolved fields were explicable only that
+way. Deleting the model would have frozen its worst readings permanently while removing
+the only thing that could have varied them — so removal had to come with a sweep
+(`jobtracker forget-learned`). **A model that writes into a cache the rules then read
+back is not off the main loop; it is on it, one night later.** Nothing in §8's original
+framing catches this, and it is the durable lesson: ask where an answer is *stored*, not
+just where it is produced.
+
+**The replacement is the same choice, made by a person.** The enum did not go away — it
+is a `<datalist>` on `/apply` and on the Settings gap cards, offering the same keys.
+Where the model attached a question to an answer, the candidate does, at the moment they
+are looking at the form and know which it is. The cost is real and was accepted with the
+numbers in hand: fill rate fell from ~61% of plan entries to ~21% until the bank is grown
+by hand. That is the correct trade, because those fills were mostly not answers anyone
+gave.
 
    Then it proposes, and nothing else. Accepting is a separate human action and the only
    path from the mailbox into `applications`; even the event note is composed by Python,
@@ -448,12 +492,17 @@ change; what changed is that they are now stated once instead of three times.
    rendered-image newsletter, an agency sending from a domain you never applied at, a
    forwarded thread whose context is below the fold.
 
-   The general principle across all five: the model is allowed to *read*, never to
+   The general principle across all four: the model is allowed to *read*, never to
    *decide*. Level extraction reads a description for a fact the title omitted; ranking
-   reads it for a fit judgment no rule could encode; question matching reads a label and
-   points at an answer already written; inbox reading reads a reply and proposes what it
-   meant. In every case deterministic code holds the verdict, the ordering, the text, and
-   the reason.
+   reads it for a fit judgment no rule could encode; inbox reading reads a reply and
+   proposes what it meant. In every case deterministic code holds the verdict, the
+   ordering, the text, and the reason.
+
+   The role removed in §8.1 is the one that did not fit this sentence, and it took until
+   after it shipped to notice. *Question matching* read a label and **pointed at an
+   answer** — which is not reading, and the value it selected went straight into a form
+   with no deterministic code between the two. The principle was sound; the role had been
+   filed under the wrong half of it.
 
 ---
 
@@ -498,7 +547,8 @@ Planned expansion, in descending value-per-hour:
 | Tuning UI (`jobtracker serve`) | **Complete** — stdlib only, localhost, writes back. Five pages; `/companies` is the one that appends to curated data |
 | Ambiguity pass (§6) — local, provider-pluggable | **Complete** — `docs/llm.md`; vLLM first |
 | Slug-repair agent (§8) | **Complete** — `docs/repair.md`; regex-first, model as fallback |
-| Inbox reading (§8.5) | **Complete** — `docs/mail.md`; local Maildir, read-only, proposes only |
+| Inbox reading (§8.4) | **Complete** — `docs/mail.md`; local Maildir, read-only, proposes only |
+| Question matching (was §8.4) | **Removed 2026-08-25** — see §8.1; the bound held and the answers were wrong anyway. `jobtracker prefill` is rules-only |
 | Aggregator sources (§9) | Deferred — still never fetched |
 
 The verified slug data is the asset worth preserving from version 1. The audit that
@@ -516,8 +566,9 @@ Associate), so a MATCH now additionally requires an engineering signal — this 
 from 129 (mostly noise) to 27 genuine SWE entry/new-grad roles, leaving 1,109 UNCERTAIN to
 read by hand.
 
-**Since that run.** All three model roles in §8 are implemented and local. Two things the
-first live run could not have shown:
+**Since that run.** Every model role in §8 is implemented and local — five of them were,
+and one has since been removed on the evidence of what it actually decided (§8.1). Two
+things the first live run could not have shown:
 
 The engineering gate was necessary but not sufficient. Stripe's *"Seller Systems
 Operations Associate (Night Shift)"* matched on `level:associate+role:systems` — the

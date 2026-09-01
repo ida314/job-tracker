@@ -3,14 +3,23 @@
 Two halves, and the split is what makes the second one optional:
 
 ```
-work --task prefill    offline.  Read the form, place the answers, name what is missing.
+prefill                offline.  Read the form, place the answers, name what is missing.
 prepare                offline.  Do that for exactly the postings `today` will surface.
 Rebuild prefill        offline.  The same, for one posting, on demand, from the page.
 apply-to COMPANY JOB   a browser. Carry that plan to the page, attach the resume, stop.
+forget-learned         offline.  Un-learn every match no rule and no alias explains.
 ```
 
-The first runs in the nightly queue and needs no browser. The second is on demand, needs
-Playwright, and is the only part that ever opens a window.
+The first needs no browser and **no model** — it reads a form and an answer bank, and
+that is all. The second is on demand, needs Playwright, and is the only part that ever
+opens a window.
+
+> **`jobtracker prefill` was `jobtracker work --task prefill` until 2026-08-25.** It left
+> the task queue when its model pass was deleted, and that was required rather than
+> cosmetic: `cmd_work` returns early when no router is configured, so a pass that needs no
+> model would have gone on being gated behind one. `prepare` had exactly that bug — on a
+> box with no GPU it built nothing and every pick reported "no plan", which is the failure
+> `prepare` exists to catch, produced by `prepare` itself.
 
 ## Why it cannot be a link
 
@@ -96,29 +105,46 @@ employer's form permanently.
 
 This is a real coverage limit and it is surfaced rather than hidden: a company whose form
 we neither hold nor can fetch is **not counted as pending prefill work**, because it is
-waiting on a browser visit, not on a model.
+waiting on a browser visit, not on anything this pass can do.
 
-## The three passes
+## The two passes
 
-Only the last one costs a model call, and most nights there are none.
+Neither costs a model call. Neither opens a socket to anything but the ATS.
 
 1. **exact** — a canonical ATS field name, or a label that means an identity field.
    `first_name`, `email`, and "Email Address" on a form that names nothing all land here.
 2. **alias** — the normalized question text matched against a question already answered,
    here or at any other company. Pure string matching.
-3. **model** — asked only about a label neither pass recognized: *"which of these answer
-   keys, if any, answers this question?"* It replies with a key or `none`.
 
-The model's role is bounded harder here than anywhere else in this repo. Its schema is an
-enum of keys you already wrote plus `none`, so **it cannot produce text**. There is no
-code path by which a sentence the model composed reaches a form field. It is the fourth
-bounded model role in DESIGN.md §8, and the narrowest: level extraction reads a
-description for a fact, ranking reads one for a judgment, this one only points.
+Anything else is a **gap**: named, attributed to the companies that asked it, and put in
+front of you to answer once. A fill also has to survive the rules — if the field is a
+dropdown and the stored answer is not one of its options, that is a gap too. Typing "Yes"
+into a menu offering "Authorized" and "Not authorized" would either fail silently or pick
+the wrong entry, and both are worse than being asked.
 
-A key it names still has to survive the rules: if the field is a dropdown and the stored
-answer is not one of its options, it is a **gap**, not a fill. Typing "Yes" into a menu
-offering "Authorized" and "Not authorized" would either fail silently or pick the wrong
-entry, and both are worse than being asked.
+### There was a third pass, and it was removed
+
+Between 2026-08-13 and 2026-08-25 a model was asked, about any label the two passes did
+not recognize: *"which of these answer keys, if any, answers this question?"* It replied
+with a key or `none`. Its schema was an enum of keys you had already written, so **it
+could not produce text** — there was no code path by which a sentence it composed reached
+a form field. It was the most tightly bounded model role in this repo.
+
+It was removed anyway, and the reasoning is in DESIGN.md §8.1 because it generalizes past
+this feature. The short version is what it had actually decided, measured on the live
+database: *"Protected Veteran Status"* answered from a current-employer question,
+*"Are you at least 18 years of age?"* from a work-eligibility answer, every *"do you now
+or will you in the future require sponsorship?"* from a work-**authorization** answer
+whose stored value means the opposite, and — worst — *"Please share an example of how you
+would support a frustrated customer"* answered with the candidate's email address. A
+bound on what the model can *say* is not a bound on what a wrong answer can *do*.
+
+**What replaced it is the same choice, made by you.** The enum is a `<datalist>` now,
+offered on every `/apply` row and every Settings gap card, holding exactly the keys the
+model used to choose between. See "Answering a question once" below.
+
+**A database that ran it needs `jobtracker forget-learned`.** Deleting the pass does not
+delete its decisions — see "Un-learning what was guessed".
 
 ## The gap loop
 
@@ -140,7 +166,7 @@ never correctness. The stub block in `answers.yaml` uses the same ordering, beca
 are renderings of one table and should not disagree about what to do first.
 
 ```yaml
-# ===== unanswered questions · regenerated by `jobtracker work --task prefill` =====
+# ===== unanswered questions · regenerated by `jobtracker prefill` =====
 #
 # how_did_you_hear_about_this_role:
 #   value: ""
@@ -151,6 +177,129 @@ are renderings of one table and should not disagree about what to do first.
 Commented out, deliberately: a live key with an empty value would load as an answer and
 be typed into a form. Uncomment it, fill it in, and the next run stops listing it — and
 fills that field at every employer that asks it, forever.
+
+**A gap is re-examined, not only recorded** (2026-08-25). `close_answered_gaps` runs at
+the end of every `prefill` and resolves any open gap the bank can now answer, through the
+same `resolve_field` the plan uses and with the stored options attached, so a dropdown
+that does not offer your answer stays listed. Before that, only `/api/answer` closed a
+gap, and only the exact key you had just written: an identity field filled in Settings, a
+value edited by hand, an alias attached to a different key, or `LABEL_ALIASES` gaining the
+wording all left the question on the page forever. Measured right after the first
+`forget-learned` run: 11 of 200 open gaps were already answerable, and "Phone", "LinkedIn
+Profile" and "Website" were near the top of the most-asked list.
+
+**One row can be several questions, and it says so** (2026-08-25). `question_key` is
+`slugify(ask)`, which caps at eight words, so these five share a row:
+
+```
+Are you legally authorized to work in the United States?
+Are you legally authorized to work in the United States for LaunchDarkly?
+Are you legally authorized to work in the United States for our Company?
+Are you legally authorized to work in the country in which you are applying?
+Are you legally authorized to work in the country where this position is located?
+```
+
+Matching is by the **full** normalized label, so an alias attached to the first fills
+Twilio's form and none of the other four. The row used to be marked resolved and never
+come back: the question vanished from Settings while four employers kept a blank required
+field and the page had said it saved — failure-as-absence, in the loop that exists to
+prevent it, and newly load-bearing because the model pass had been matching the other four
+unasked.
+
+A resolved gap now **reopens carrying whichever wording is still unanswered**. Only the
+caller knows a field is still empty — `record` calls `record_gap` for `result.gaps` and
+nothing else — so re-sighting is the signal, and the stored `ask` is refreshed to the open
+wording rather than the answered one. Settings says this out loud, because a question
+coming back looking almost identical otherwise reads as a bug.
+
+Keeping them in one row is still right: they are one thing to think about, they share a
+count and a sort position, and each needs its own alias because that is what exact-label
+matching means.
+
+## Answering a question once
+
+There are two shapes of answer and the difference matters, because for most of a bank's
+life the second is the common one:
+
+**A question nobody has answered** — type the answer, and it is saved under a key minted
+from the question's own wording. The employer's exact phrasing is recorded as an alias, so
+the same question at the next company is filled with no further typing.
+
+**A question you have already answered, phrased differently** — "Are you legally
+authorized to work in the United States?" when the bank holds
+`are_you_currently_eligible_to_work_legally_in`. This is what the model pass used to
+decide. Attach it instead: pick the key from the list beside the question, on `/apply`
+("also save to my answer bank as …") or in Settings ("or answer it with …"). That records
+this employer's wording as an alias of the answer you already wrote, and closes the gap.
+
+Three things make the second shape work, and each was broken until 2026-08-25 because the
+model was covering for them:
+
+- **`Answers.hash` covers aliases.** Attaching changes no *value*, so with aliases out of
+  the hash `matches_needing_prefill` never saw the plan as stale, the plan was never
+  rebuilt, and the field you had just explained stayed a gap forever while the page said
+  it saved.
+- **`/api/answer` takes `alias` and `gap_key`.** It used to read the alias out of
+  `prefill_gaps.ask` for the answer key and close by that key — which works only when the
+  answer goes under the gap's own key. Attaching to an existing key recorded no alias and
+  closed a row that was never open.
+- **The key box offers a list.** It defaults to a slug of the employer's label, so with
+  the save box ticked and no picker, Twilio's demographic-consent sentence becomes a
+  ninety-character key answering one question at one company.
+
+**On `/apply` the save box is ticked by default**, because the moment you know the answer
+is while you are typing it into a form. It writes on blur or on a dropdown change, never
+on the typing debounce — a save on the first 400ms pause stores half a sentence and then
+disarms itself, so the finished answer never lands.
+
+## Un-learning what was guessed
+
+`jobtracker forget-learned` — dry by default, `--write` to apply, grouped by key.
+
+Deleting the model pass removed none of what it had already decided. `record` writes every
+resolved key onto `form_fields.question_key`, and `known_question_keys` replays that as a
+**deterministic, model-free** alias at every company from then on. 229 of 383 resolved
+fields in the live database were explicable only as model output. Removing the pass without
+sweeping them would have frozen its worst readings permanently while taking away the only
+thing that could ever have varied them.
+
+A row is kept when a canonical ATS name, a label in `LABEL_ALIASES`, a file field, or an
+alias **you wrote** produces the key. Everything else goes, along with the gap it had
+closed and the `answers_hash` of every plan at that company — the same three tables
+`forget-question` moves.
+
+**And the values come out of the stored plans, which blanking the hash does not do.**
+`forget-question` relies on the blank to put a posting back in `matches_needing_prefill`
+so the plan is rebuilt clean. That works for a posting still in the queue and not for one
+that has left it — applied, deferred, closed, or with its score dropped. On the live
+database 13 of 64 plans were in that state, built a week earlier, and no `prefill` run
+would ever touch them again; `apply-to` reads `get_plan` directly and
+`browser._plan_index` lets a stored plan value beat a fresh `resolve_field`, so opening
+one would still have typed the guess. Three rules in that sweep, each learned by getting
+it wrong first:
+
+- **Judged from the plan entry, not from a join to `form_fields`.** They are two records
+  of one decision and either can outlive the other — a later DOM visit NULLs
+  `form_fields.question_key` when a write is refused, so a field carrying a guessed value
+  can have nothing left in `form_fields` naming it. The join left 7 of 37 wrong values in
+  place at Twilio, all in exactly that state. For the same reason the sweep runs even
+  when `form_fields` has nothing to clear.
+- **`file` and `alternative` entries are exempt.** A resume is placed from a path, not
+  from an answer, and a DOM file input can be keyed anything at all — `attach`,
+  `resume_upload` — so running the predicate over one would detach the most valuable
+  field on the form.
+- **It is "nothing accounts for this", not "the label says model".** Eight entries were
+  labelled `source: "model"` and kept, because `LABEL_ALIASES` gained their wording in
+  the same change: "LinkedIn Profile URL", "What is your degree in?". Demoting on the
+  label would have made you retype answers the rules now produce unprompted.
+
+It is a one-shot for a database that ran the model pass, and it stays afterwards as the
+bulk form of `forget-question` for a bad *human* alias, which is now the only kind there
+is.
+
+**Expect the fill rate to fall.** On the live database it went from ~61% of plan entries
+to ~21%, and the top three picks went from mostly-filled to 5/42 and 15/44. That is the
+trade, taken with the numbers in hand: those fills were mostly not answers anyone gave.
 
 **Everything above the marker is yours and is never read, parsed, or rewritten.** The
 block below it is regenerated wholesale from the database on every prefill run, which is
@@ -236,17 +385,14 @@ A button on the pick card. It re-plans that one posting against the answers, the
 resume, and the posting's own resume as they stand right now — so answering a question in
 Settings and seeing the count move does not mean waiting for tonight.
 
-**It opens no socket.** This server handles one request at a time, so a form fetch (rate
-limited) or a router call (a 180-second timeout) would freeze the page for every other
-tab. "The router is down" is therefore not one of this endpoint's states, because there is
-no router in its path.
+**It opens no socket.** This server handles one request at a time, so a rate-limited form
+fetch would freeze the page for every other tab. It is CPU and SQLite only.
 
-That is far less of a downgrade than it sounds. Every key the model has ever matched was
-written onto `form_fields.question_key`, and `known_question_keys` replays those as alias
-hits — the same mechanism `browser.fill_application` already relies on. The only thing a
-full run can still do is ask about a field the model has *never seen*, so this pass's gap
-count can only be equal to or higher than the nightly one. It can understate readiness; it
-can never overstate it.
+It is not a downgrade at all any more. While prefill had a model pass this button ran a
+strict subset of it — rules only, so its gap count could be equal to or higher than the
+nightly one and never lower, understating readiness but never overstating it. Since the
+model pass went (2026-08-25) the two are the same resolution over the same inputs. What
+this still will not do is *fetch* a form it has never seen.
 
 Two refusals rather than a misleading success:
 
@@ -256,11 +402,11 @@ Two refusals rather than a misleading success:
 - **No answer bank** → it names Settings.
 
 One implementation note worth keeping: the unit is constructed directly rather than
-filtered out of `task.pending()`. `matches_needing_prefill` excludes a plan whose
-`answers_hash` already matches, so routing the button through the queue would make it
-silently do nothing in exactly the case it exists for — the same shape as the Open
-prefilled regression. `PrefillTask.apply` still does the writing, so the button and the
-nightly run cannot drift about what a plan is.
+filtered out of `prefill.pending()`. `matches_needing_prefill` excludes a plan whose
+`answers_hash` already matches, so routing the button through that would make it silently
+do nothing in exactly the case it exists for — the same shape as the Open prefilled
+regression. `prefill.record` still does the writing, so the button and the nightly run
+cannot drift about what a plan is.
 
 ## The browser
 
@@ -305,10 +451,35 @@ assuming otherwise. **The page has no `<select>` element on it at all.**
   from a text box into a menu, and what gives `match_option` something to check a stored
   answer against. Bounded by `MAX_VOCABULARIES`; a form past the cap keeps an empty list,
   renders as a text box, and says so.
-- **Some have no fixed vocabulary at all.** The location field is a place lookup that
-  fetches per keystroke, so an opened menu is genuinely empty. `_pick` types the answer
-  into the widget's own search box — which works once it is open and focused, and did
-  nothing whatever while it was closed — and reads again.
+- **Some have no fixed vocabulary at all, and that is what `search` is for.** *Location
+  (City)* is a place lookup that fetches per keystroke, so an opened menu is genuinely
+  empty and stays empty — measured on the fixture, it is the one combobox of ten with no
+  "Toggle flyout" button in its indicators, because there is no list to toggle. So
+  `_learn_vocabularies` correctly learns nothing, the row on `/apply` rendered as a plain
+  text box, and an answer that was not character-for-character one of the widget's own
+  suggestions came back *"would not take it"* with no way to find out what would have
+  been taken. That was the single worst dead end on the page.
+
+  Two things fix it, and both are readings the widget was already being asked for. A
+  **refused** `_pick` publishes the menu it read in order to refuse (`seen` →
+  `Session.offer`), so the prefill's own refusal arrives with the answer list attached.
+  And the row grows a query box and a **Look up** button behind `live.SEARCH`, which is
+  `_read_vocabulary` with a query: open the widget, type into its own search box, read
+  what it then shows, close it. Either way the suggestions render as the row's `<select>`
+  and choosing one pushes an ordinary `set` carrying a string the menu itself produced —
+  the one kind of value `_pick` is guaranteed to find.
+
+  What comes back is **never** stored as the field's `options`. It answers one query, and
+  `store.known_options` replays whatever is stored at every later visit — so writing a
+  place lookup's answer to "new" there would teach that employer's form a vocabulary of
+  four cities and `match_option` would refuse every other one. `Session.offer` keeps the
+  query beside the list for the same reason, and a re-reading of the form drops both.
+
+  `_pick`'s search condition widened with it (2026-08-29): it used to type only when the
+  menu came up *empty*, so a menu showing anything at all was refused without ever being
+  asked for the value we hold — which is the ordinary state of one that has been searched
+  before. Measured against a live async combobox: with a previous lookup's query still in
+  the widget, choosing the answer from that very lookup's list was refused.
 - **Every combobox is followed by a phantom** `<input required tabindex="-1"
   aria-hidden="true">` that react-select renders to drive native validation. It has no
   name and no id, so it keyed on a slug of the same label as the widget it shadows: one
@@ -324,9 +495,13 @@ assuming otherwise. **The page has no `<select>` element on it at all.**
 - **`Country*` on that form is the phone number's dialling code**, not a country of
   residence: its menu offers "United States +1", "Afghanistan +93". Read as free text it
   took whatever the model pointed at, which was identity `location` — "New York, New
-  York" — into the field beside your phone number. Two things stop that now: it is a
-  dropdown, so `match_option` checks the answer against 244 options and refuses; and the
-  model is no longer asked about a field whose vocabulary is unknown (`vocabulary_known`).
+  York" — into the field beside your phone number. Two things stopped that: it is a
+  dropdown, so `match_option` checks the answer against 244 options and refuses; and
+  `vocabulary_known` refused to let the model point at a field whose options nobody had
+  published. `vocabulary_known` went with the model pass — the only writers left are a
+  canonical name and an alias a person attached on purpose, and holding *those* to it
+  would make every combobox permanently unanswerable. The guard is structural now: with
+  no alias, an unrecognized label is a gap whatever its type.
 
 ### A bad match used to be permanent
 
@@ -419,13 +594,26 @@ state**. It still needs a display — point `$DISPLAY` at an X server not attach
 monitor (`Xvfb :100`), because Chromium will not launch headful without one — but nothing
 carries that display anywhere and nothing in the app links to it.
 
-**The viewer is gone** (2026-08-22). `JOBTRACKER_BROWSER_VIEW_URL`, the "View window" link
-on the Today card, and the one on this page were all deleted. They existed because the
-window was where you did the two things the mirror could not do: read the application over,
-and submit it. The first is what the full-page preview is for. The second is now `/apply`'s
-Submit button. What is left — a remote X server shipping video frames for fifteen text
-fields — was only ever the slow path, and keeping a link to it advertised an interface that
-does not work well enough to use.
+**The viewer went (2026-08-22) and came back as a fallback (2026-08-29).** It was deleted
+because the window had been where you did the two things the mirror could not do: read the
+application over, and submit it. The first is what the full-page preview is for; the second
+is `/apply`'s Submit button. What was left — a remote X server shipping video frames for
+fifteen text fields — was only ever the slow path.
+
+That was right about the main flow and wrong about the last resort. The mirror carries what
+the discovery pass could read and what `_write` can move, and there is a residue that is
+neither: a captcha, a dropzone, a widget that will not take a value however it is written.
+For that residue the documented answer was "open the window" — with nothing anywhere that
+opened one. A slow interface you can reach beats a fast one that has stopped at the thing
+you need.
+
+So `JOBTRACKER_BROWSER_VIEW_URL` is back and `config.BROWSER_VIEW_URL` exists again. Set it
+to a remote-desktop view of the host's display (noVNC, xpra, …) and `/apply` renders **View
+window ↗** beside the preview, and again in the sentence about what the mirror could not
+read. Unset, neither renders and the sentence says what to set. It is on `/apply` only —
+the Today card's link did **not** come back, because nothing there has a window open yet —
+and the URL goes through `_safe_url` like every other third-party href these pages render.
+The app still neither starts, probes nor knows anything about the viewer.
 
 The static dashboard shows the prefill counts — `prefill 13/16 fields · 3 need you` —
 and **no button**. The counts are useful offline; a button that cannot drive a browser is
@@ -447,17 +635,44 @@ names them, and `_write` puts a value into exactly one of them. All that was mis
 channel from the page you are looking at to that writer.
 
 ```
-Cloudflare — Backend Engineer, New Grad          [Read the form again]
+Cloudflare — Backend Engineer, New Grad        [Read the form again] [Reset]
 
-┌─ preview ───────────── Pause ─┐   First Name   [ Dylan          ]  filled
-│  [jpeg of the real form]      │     from your answer bank as `first_name`
-│                               │     [ Dylan            ] [Save]
-│                               │   Resume/CV    [ Choose file    ]  filled
-│                               │   Work auth?   [ Yes         ▾  ]  filled
-└───────────────────────────────┘   Why us?      [                ]  needs you
-                                      ☐ also save to my answer bank as `why_us`
-Review & submit                     3/4 fields filled · 1 need you
+┌ Preview Pause 100% Open application ↗View┐ First Name  [ Dylan      ]  filled
+│  [jpeg of the whole real form]         │    from your answer bank as `first_name`
+│                                        │    [ Dylan          ] [Save]
+│                                        │  Resume/CV   [ Choose file ]  filled
+│                                        │  Work auth?  [ Yes      ▾  ]  filled
+└────────────────────────────────────────┘  Why us?     [             ]  needs you
+                                              ☑ also save to my answer bank as [why_us ▾]
+Review & submit                             3/4 fields filled · 1 need you
 ```
+
+**Open application** opens the form itself in a tab of *your* browser — the URL the
+browser actually landed on, so a Greenhouse embed or an Ashby `/application` opens the
+page the preview is a picture of. It is for reading the parts the discovery pass could not
+mirror. Typing in it changes nothing here; two tabs on one anonymous form share no draft,
+which is the same fact that makes this feature a browser rather than a link.
+
+**View window ↗**, when `JOBTRACKER_BROWSER_VIEW_URL` is set, is the other thing entirely:
+the browser `serve` is driving, holding *your* fill, through a remote-desktop view of that
+host's display. It is last in the row and it is the fallback — everything to its left is
+faster, and this is what is left when a field will not take a value at all. See "The viewer
+went and came back" above.
+
+**Reset** empties every field the form is holding and reads it again. It is the way back
+from a fill that went somewhere you did not want it, and from a form that has moved under
+the page — see the rule below for why it is one command rather than thirty.
+
+**The save box is ticked**, and the key box is a picker over every answer you already
+hold. Together they are what replaced the model pass: leave the minted key to answer a
+genuinely new question, or pick an existing one to say "this is the same question I have
+already answered", which records this employer's wording as an alias of it.
+
+It writes on blur, or when you pick from a dropdown — **never on the typing debounce**.
+That is the whole cost of ticking it by default: a save on the first 400ms pause stores
+whatever you had reached and then disarms itself, so the finished sentence never lands and
+the bank quietly holds half of one. It stays armed afterwards, because `/api/answer` is an
+upsert and correcting a value has to be the thing that sticks.
 
 ### How it works
 
@@ -478,10 +693,29 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
 
 ### Rules that are load-bearing
 
-- **A command points, it does not write.** The vocabulary is exactly five names — `set`,
-  `clear`, `rediscover`, `shoot`, `highlight` — and a command carries a field *handle*,
-  never a selector and never anything the browser thread evaluates. That is `browser.py`'s
-  click rule carried across the new channel, and it has its own test.
+- **A command points, it does not write.** The vocabulary is exactly seven names —
+  `set`, `clear`, `reset`, `rediscover`, `shoot`, `highlight`, `search` — and a command
+  carries a field *handle*, never a selector and never anything the browser thread
+  evaluates. That is `browser.py`'s click rule carried across the new channel, and it has
+  its own test.
+- **`search` is on `clear`'s side of the activation line, by the same test.** It opens one
+  combobox, types a query into the widget's own search box and reads back what the menu
+  then shows — both halves of which `_pick` already performs as the first step of a `set`.
+  It stops where `_pick` goes on to press an option, so it commits nothing and returns
+  text. It re-reads the form on the way out, because typing into a react-select remounts
+  its input and takes the `data-jt-id` with it; the handles do not move, so no epoch is
+  spent and the page never notices. `Session.offer` lands *after* that re-reading, since
+  `rows_from` builds fresh rows carrying no offer.
+- **`reset` is `clear` over the whole form, and it is one command rather than a loop.**
+  A clear re-reads the form on the way out, so thirty clears sent from the page are
+  thirty chances for the shape to change under the remaining handles — after which every
+  later one is correctly dropped as stale, and a reset that emptied four fields of
+  thirty is reported as a whole one. It is on `clear`'s side of the activation line by
+  the same test: emptying reaches nothing a fill does not. It touches only rows holding
+  something, because a `gap` is a question nobody had an answer for and `cleared` is one
+  you emptied on purpose. And it is the **one command carrying no epoch**, because it
+  names no handle from the page's side — which is what makes it the way out of a form
+  that has moved, where every per-field command is refused by design.
 - **There are two clicks in `browser.py`, and the rule narrowed rather than loosened when
   the second arrived.** `_submit` presses the employer's own button, once, behind the
   gate. `_press` is everything a *widget* needs to be operated — an option in its listbox,
@@ -584,16 +818,27 @@ the next poll. Same shape as `apply-to` itself, for the same reason — this is
   never imply the list is the whole form. Zero fields is still *"no application form
   found"*, never "nothing left to type".
 - **A form that rewrites itself while you are in it.** Re-reading after each write narrows
-  the window; when the shape does change, the page says so and stops rather than pushing
-  into whatever is there now. "Read the form again" is one click.
+  the window; when the shape does change, the page stops pushing rather than pushing into
+  whatever is there now.
+
+  But **stopping is not an ending**, and treating it as one is what made attaching a
+  resume look like a hang. Greenhouse's file row re-renders into a filename and a remove
+  control the moment it takes a file — a shape change, so a correct epoch bump — and the
+  page then disabled every field on it and waited for a Reload nobody had a reason to
+  press. The handles are stale; the *server's* rendering of them is not, and re-reading
+  it is exactly what a reload does. So the page reloads itself, and asks only when it
+  cannot: a reload while you are typing would discard the sentence you are in, and one
+  with a push in flight would land before its outcome does. The guard is read **before**
+  anything is disabled, because disabling the field you are in blurs it.
 
 ### Ending a session
 
 **Done — close the window** on `/apply` is the way out, and on a headless host it is the
 only one. The browser opens on the machine running `serve`; if you cannot reach that
 machine's screen, you cannot close the window, and until it closes `_APPLY_LOCK` stays
-held and every later "Open prefilled" answers *"a prefilled window is already open"* —
-until `serve` itself is restarted. Observed 2026-08-19.
+held. Observed 2026-08-19; until 2026-08-26 that also meant every later "Open prefilled"
+answered *"a prefilled window is already open"* until `serve` itself was restarted, which
+is no longer true — see "Going back to a window, and swapping one" below.
 
 `POST /api/session/close` sets `Session.closing`; `_hold_until_closed` reads it in the
 tick it was already doing, breaks, and `fill_application` closes the context on the way
@@ -617,6 +862,46 @@ Two things about the endpoint's shape:
   precisely when you want the window gone, and it is also the state most likely to be
   holding the lock. `submit()` refuses commands once the phase is `CLOSED`; this must
   not.
+
+### Going back to a window, and swapping one
+
+Added 2026-08-26. One window at a time is a real constraint — Chromium locks the single
+browser-profile directory — but *"a prefilled window is already open"* was the answer to
+three different situations, and only one of them is a collision.
+
+- **The same posting.** Not a second window: the one you asked for is the one that is up.
+  `_api_apply_to` returns `ok:true, href:/apply` and starts nothing at all — no session,
+  and the lock left exactly as it was found. This is the case that was actually broken.
+  The dashboard button is the only route to `/apply`, so opening a job, navigating back
+  to the dashboard and pressing the same button refused you, and the page holding **Done
+  — close the window** was the page the refusal had just made unreachable. The only
+  ending left was restarting `serve`.
+- **A different posting.** A swap you asked for, and closing the open window is exactly
+  what you would have done by hand. `_close_open_window` calls `request_close`, waits for
+  the browser thread to release `_APPLY_LOCK`, and hands the lock — *held* — to the
+  launch. Held, because the caller's next act is to launch into that profile directory
+  and a gap between the two is a second click's way in.
+- **Neither.** The lock held with nothing readable in `live.current()` is the moment
+  between acquiring it and `live.start`. Still a refusal, and a fast one: there is
+  nothing to ask to close, so waiting would be fifteen seconds spent to say so.
+
+`live.Session.holds(company, ats_job_id)` decides the first of those, and `CLOSED` is
+deliberately not held. A session whose window has gone is a page that can do nothing but
+report that it has gone, so reading it as "you are already there" would send the click to
+a dead form instead of opening a real one — absence read as success, one control along.
+
+Two things about the wait. It **blocks the request thread**, which on a single-request
+`HTTPServer` is the whole server; that is the bounded-inline trade `/api/company`'s
+verification already makes, and for the same reason — the answer decides whether the
+click succeeds, and nothing on a daemon thread can answer the click that started it. And
+the flag is read in the hold loop, so a window still *filling* will not see it until the
+fill lands. That is the latency **Done** has always had, since it is the same flag; on a
+long form it can outrun `SWAP_TIMEOUT_S` (15s), and the refusal then names the window and
+points at the button rather than waiting on a browser for as long as it likes.
+
+Nothing may launch without the lock. A swap that timed out and started a browser anyway
+would put two Chromiums into one profile directory, and the second one fails on the
+worker thread — turning a refusal you can read into a button stuck on "Opening…".
 
 None of this removes the need for `DISPLAY` or `Xvfb`: Chromium still has to draw
 somewhere, and it will not launch headful without a display. What it removes is any reason
@@ -643,14 +928,16 @@ with questions you have not answered is the normal state, especially in the firs
 and failing on it would leave a nightly unit permanently red for something only you can
 clear. That is the dbt-Labs-is-legitimately-empty rule applied here.
 
-Each not-ready line names its own reason, because three situations look identical in the
-database and want different things from you: no answer bank, an ATS that publishes no
-form (go visit it once), or a router that was down.
+Each not-ready line names its own reason, because these look identical in the database and
+want different things from you: no answer bank, or an ATS that publishes no form (go visit
+it once). "A router was down" used to be a third and is not any more — `prepare` builds
+plans with no model in reach, which is the whole point of prefill leaving the task queue.
 
 ## Checking its work
 
 ```bash
-jobtracker work --task prefill --dry-run          # what it would plan, and why not more
+jobtracker prefill --limit 5                      # plan five, and say what it did
+jobtracker forget-learned                         # what a past model pass taught, dry
 sqlite3 data/state.db 'select company, fields, gaps from prefill_plans order by gaps desc;'
 sqlite3 data/state.db 'select question_key, seen_on from prefill_gaps where resolved_at is null;'
 jobtracker apply-to Acme 123 --headless           # discover and report, no window

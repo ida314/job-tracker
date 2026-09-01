@@ -6,7 +6,6 @@ some of it, and commits each unit on its own.
 ```
 level   10   read a description for the level its title omitted   -> produces matches
 judge   20   judge a match against profile.yaml                   -> produces scores
-prefill 30   work out what goes in an application form            -> consumes scores
 inbox   40   read a reply from an employer                        -> proposes updates
 ```
 
@@ -30,12 +29,12 @@ what to write down once it answers.
 
 Tasks are polled in ascending priority and the first with work wins. That order is not a
 preference — it is the dependency chain. `level` settles uncertain postings into matches,
-`judge` scores those matches, `prefill` works down the scored ones. So "always work the
+and `judge` scores those matches. So "always work the
 earliest stage that has work" is the same instruction as "never starve a later stage",
 and there is only one knob to get wrong instead of three.
 
 **`inbox` is the exception, and it says so rather than pretending otherwise.** It is not
-in that chain: it consumes nothing the other three produce and produces nothing they
+in that chain: it consumes nothing the other two produce and produces nothing they
 consume, so the dependency rule does not decide its number. It is last on a starvation
 argument instead — its queue refills from an external stream on a schedule nothing here
 controls, and anywhere earlier a chatty mailbox would keep the pipeline's own stages
@@ -49,8 +48,8 @@ Task queue, in the order the scheduler considers it:
                   read descriptions to settle UNCERTAIN postings
    20  judge      nothing to do
                   judge open matches against profile.yaml
-   30  prefill    unavailable — answers.yaml not loaded
-                  prefill applications for the best-matched jobs
+   40  inbox      unavailable — no maildir configured
+                  read replies from employers and propose updates
 
 Would work: level (2314 unit(s))
 ```
@@ -83,7 +82,6 @@ visible rather than being an inexplicably shrinking queue.
 |---|---|---|
 | `level` | `"level"` | nothing re-asks it; a re-run is a retry |
 | `judge` | `profile.prose_hash` | profile prose re-asks every posting |
-| `prefill` | `answers.hash` | answers.yaml re-plans every application |
 | `inbox` | the `Message-ID` | nothing; a message cannot change |
 
 `inbox` is where that framing stops being an abstraction: the message *is* the question,
@@ -129,8 +127,31 @@ once would not make the GPU faster, it would move the queue into someone else's 
 Results are reassembled into **input order** before being applied, exactly as `fetch_all`
 does with `as_completed`. Nothing downstream may depend on which unit finished first.
 
-Within a single unit, `prefill` asks about its unresolved fields one at a time. That is
-deliberate: parallelising there would let one unit exceed the concurrency cap on its own.
+A unit that makes several calls makes them one at a time. Parallelising inside a unit
+would let one of them exceed the concurrency cap on its own.
+
+## The task that left
+
+`prefill` was here at priority 30 from 2026-08-13 to **2026-08-25**, and it is worth
+saying why it went rather than quietly renumbering. Its model pass was deleted (DESIGN.md
+§8.1), which left a stage that resolves a form against a YAML file and asks nothing of
+anything.
+
+That could have stayed registered — it would still have had a `pending()`, still committed
+per unit, still reported itself unavailable without an answer bank. The reason it could
+not is one line up in `cli.py`: **`cmd_work` returns early when no router is configured,
+and `_work` bails on a failed `probe()`.** A task only ever runs when a model is
+reachable. That is exactly right for `level`, `judge` and `inbox`, and silently wrong for
+a pass that has nothing to ask — a night with the GPU down would have built no plans at
+all, with the survey printed and exit 0.
+
+`prepare` already had that bug in its own copy of the machinery: on a box with no router
+it built nothing and every pick reported "no plan", which is the one failure `prepare`
+exists to detect, manufactured by `prepare` itself.
+
+So the boundary of this package is not "everything in the pipeline" but "everything that
+needs a model". Scoring has always been outside it for the same reason and says so in
+`cmd_rank`. If a task ever stops asking, it should leave too.
 
 ## Adding a task
 
@@ -154,15 +175,14 @@ register(MyTask())
 ```
 
 `pending()` must return only work the task can actually do. `level` excludes postings
-with no cached description and `prefill` excludes companies whose form it has never seen,
-because counting those as pending overstates a backlog no model could drain — and sends a
-`--budget` run to units guaranteed to be no-ops.
+with no cached description, because counting those as pending overstates a backlog no
+model could drain — and sends a `--budget` run to units guaranteed to be no-ops.
 
 ## Running it
 
 ```bash
 jobtracker work                                    # the next task, whatever it is
-jobtracker work --task prefill --budget 20         # pin one, cap the units
+jobtracker work --task judge --budget 20          # pin one, cap the units
 jobtracker work --dry-run                          # the queue; changes nothing
 jobtracker work --concurrency 8 --llm-url http://gpu:8000
 ```
@@ -173,9 +193,10 @@ in whatever cron already calls it. `rank` still exists too: its judging phase is
 run whether or not one is reachable, and is arithmetic over rows `judge` already wrote.
 
 `jobtracker prepare` is the narrow version: rescore, take the postings `today` will
-surface, and prefill exactly those. It passes the picks to `run_task(units=...)` rather
-than trusting the budget to land on the same set — "prepare the thing you are going to
-show me in the morning" has to mean exactly that.
+surface, and prefill exactly those. It passes the picks to
+`prefill.build_plans(only=...)` rather than trusting a budget to land on the same set —
+"prepare the thing you are going to show me in the morning" has to mean exactly that.
+It reaches no model, because prefill does not need one.
 
 `work` never fails for want of a model. With none configured or reachable it prints the
 queue and changes nothing, so it is safe to run before the router is up.

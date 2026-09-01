@@ -233,6 +233,9 @@ Nothing here raises for a router that is down.
   the router's mock backend, which ignores the schema entirely: every prefill
   question-match came back unparseable and every field became a gap. Exactly right —
   no answer rather than a wrong one. **Check it against the server you actually run.**
+  (Prefill's question-match was removed on 2026-08-25, so reproduce this against `level`.
+  The demonstration is worth keeping: it is the cleanest evidence that the parsers, not
+  the transport, are what hold the line.)
 
 - `temperature: 0`, so the same posting classifies the same way on a rerun. Otherwise
   `eval` scores noise instead of the model.

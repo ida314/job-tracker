@@ -120,7 +120,7 @@ nothing ships it anywhere, and no log line or span attribute may carry a subject
 
 ## What the model may say
 
-The fifth bounded role in DESIGN.md §8, and bounded twice: the narrower has already
+The fourth bounded role in DESIGN.md §8, and bounded twice: the narrower has already
 decided *that* the message is about something you applied to, and this decides only *what
 it means*.
 
@@ -155,8 +155,8 @@ real collision the obvious mapping would ship: two ambiguous messages at one com
 carry `ats_job_id=''`, so without it they share an `ident`, `task_attempts` charges one's
 failures to the other, and the router collapses two distinct questions onto one answer.
 
-Priority is **40**, last. `level → judge → prefill` is a dependency chain and this is not
-in it — it consumes nothing they produce. The honest reason it goes last is starvation:
+Priority is **40**, last. `level → judge` is a dependency chain and this is not in it —
+it consumes nothing they produce. The honest reason it goes last is starvation:
 the mail queue refills from an external stream on a schedule nothing here controls, and
 ahead of `level` a chatty inbox would keep the pipeline's own stages permanently waiting.
 

@@ -279,7 +279,7 @@ def test_a_pick_with_no_plan_says_how_to_get_one():
 
     page = dashboard.build_dashboard(conn, companies, "2026-07-22")
     assert "no prefill yet" in page
-    assert "work --task prefill" in page
+    assert "jobtracker prefill" in page
 
 
 def test_the_open_prefilled_button_exists_only_under_serve():

@@ -10,12 +10,14 @@ import html
 import inspect
 import json
 import re
+import threading
+import time
 from html.parser import HTMLParser
 
 import pytest
 import yaml
 
-from jobtracker import config, curation, models, server, store
+from jobtracker import config, curation, dashboard, models, server, store
 from jobtracker.criteria import load_criteria
 
 # Titles, locations and URLs all arrive from third-party ATS APIs and are
@@ -479,19 +481,154 @@ def test_apply_to_says_so_when_there_is_no_browser_to_drive(tmp_path, monkeypatc
     assert "playwright is not installed" in res["error"]
 
 
-def test_apply_to_refuses_a_second_window_while_one_is_open(tmp_path, monkeypatch):
-    """One browser profile directory, which Chromium locks. Two at once cannot work."""
-    from jobtracker import browser
+def test_apply_to_refuses_a_second_window_while_one_is_still_opening(
+        tmp_path, monkeypatch):
+    """One browser profile directory, which Chromium locks. Two at once cannot work.
+
+    The lock held with no readable session is the half-second between acquiring it and
+    `live.start`, and it is the one case with nothing to ask to close — so it is still a
+    refusal, and a fast one rather than a fifteen-second wait for a window that was
+    never there.
+    """
+    from jobtracker import browser, live
 
     monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
     handler = _apply_handler(tmp_path, monkeypatch)
+    live.CURRENT = None
 
     assert server._APPLY_LOCK.acquire(blocking=False)   # a window is open
     try:
         res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
     finally:
         server._APPLY_LOCK.release()
-    assert res["ok"] is False and "already open" in res["error"]
+    assert res["ok"] is False and "already open" not in res["error"]
+    assert "try again" in res["error"]
+
+
+def test_reopening_the_job_already_open_goes_back_to_it(tmp_path, monkeypatch):
+    """The bug this replaced: the button was the only route to the page holding Done.
+
+    Open a window, navigate back to the dashboard, press the same button again — and be
+    told a window is already open, by the one control that could have taken you to it.
+    The session was then unreachable and unclosable short of restarting `serve`.
+
+    Nothing is launched here: no new session, and the lock is left exactly as it was
+    found, because the window asked for is the window that is already up.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    handler = _apply_handler(tmp_path, monkeypatch)
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    session.set_phase(live.READY)
+
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+    finally:
+        server._APPLY_LOCK.release()
+    assert res["ok"] is True and res["href"] == "/apply"
+    assert "already open" in res["detail"]
+    assert live.current() is session          # not restarted
+    assert session.close_requested() is False  # and not closed on the way past
+
+
+def test_a_closed_session_for_the_same_job_is_not_a_window_to_go_back_to(tmp_path):
+    """`CLOSED` is a page that can only report that it has gone.
+
+    Answering "you are already there" for one would send the click to a dead form
+    instead of opening a real one — absence read as success, one control along.
+    """
+    from jobtracker import live
+
+    session = live.start("Acme", "1", "Backend Engineer", "https://x/apply")
+    assert session.holds("Acme", "1") is True
+    assert session.holds("Acme", "2") is False
+    assert session.holds("Other", "1") is False
+    session.set_phase(live.CLOSED)
+    assert session.holds("Acme", "1") is False
+
+
+def test_opening_another_job_closes_the_window_that_is_open(tmp_path, monkeypatch):
+    """A different job is a swap you asked for, not a collision.
+
+    Closing the open window is what you would have done by hand, so `_api_apply_to`
+    does it: it asks, waits for the browser thread to release the lock — which is the
+    only proof the profile directory is free — and takes its place.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    started = threading.Event()
+    monkeypatch.setattr(browser, "fill_application",
+                        lambda *a, **k: started.set())
+    handler = _apply_handler(tmp_path, monkeypatch)
+
+    old = live.start("Acme", "9", "Some Other Role", "https://x/other")
+    old.set_phase(live.READY)
+    assert server._APPLY_LOCK.acquire(blocking=False)
+
+    # Stands in for the hold loop: it reads `closing` in the tick it is already doing,
+    # then the browser thread releases the lock on its way out.
+    def _hold():
+        while not old.close_requested():
+            time.sleep(0.01)
+        old.set_phase(live.CLOSED)
+        server._APPLY_LOCK.release()
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+        assert started.wait(5), "the new window never launched"
+    finally:
+        holder.join(5)
+        # The worker's own `finally` releases it; waiting for that rather than
+        # releasing here is what keeps this test from racing the code it is testing.
+        for _ in range(200):
+            if not server._APPLY_LOCK.locked():
+                break
+            time.sleep(0.01)
+        else:  # pragma: no cover — only if the swap left the lock held
+            server._APPLY_LOCK.release()
+
+    assert res["ok"] is True and res["href"] == "/apply"
+    assert old.close_requested() is True
+    assert "closed Some Other Role" in res["detail"]
+    # The new session replaced it, and the old one is not what the page will find.
+    assert live.current() is not old
+    assert (live.current().company, live.current().ats_job_id) == ("Acme", "1")
+
+
+def test_a_window_that_will_not_close_is_a_refusal_not_a_second_browser(
+        tmp_path, monkeypatch):
+    """The lock is the proof, and without it nothing may launch.
+
+    Chromium locks the one profile directory, so starting a second browser into it fails
+    on the worker thread where nobody sees it. A swap that timed out and launched anyway
+    would turn a visible refusal into that.
+    """
+    from jobtracker import browser, live
+
+    monkeypatch.setattr(browser, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(server, "SWAP_TIMEOUT_S", 0.05)
+    launched = []
+    monkeypatch.setattr(browser, "fill_application",
+                        lambda *a, **k: launched.append(1))
+    handler = _apply_handler(tmp_path, monkeypatch)
+
+    old = live.start("Acme", "9", "Stuck Role", "https://x/other")
+    old.set_phase(live.FILLING)
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        res = handler._api_apply_to({"company": "Acme", "ats_job_id": "1"})
+    finally:
+        server._APPLY_LOCK.release()
+
+    assert res["ok"] is False and "did not close" in res["error"]
+    assert "Stuck Role" in res["error"]
+    assert not launched
+    assert live.current() is old
 
 
 # -- the answer bank, collected from the page ---------------------------------------
@@ -1280,7 +1417,170 @@ def test_every_gap_keeps_its_answer_box_and_save_button_in_both_lists(tmp_path):
     conn.close()
     for key in ("how_did_you_hear", "why_stripe"):
         assert f'<input class=answer type=text placeholder=\'Your answer\' data-key="{key}"' in page
-        assert f'<button class=save data-key="{key}">' in page
+        assert f'<button class=save data-key="{key}"' in page
+        # And the second way to answer one, which has to be in both lists for the same
+        # reason: a question only Stripe asks is as likely to be one you have already
+        # answered as a question four employers ask.
+        assert f'<button class=attach data-gap="{key}">' in page
+
+
+# -- attaching a question to an answer you already wrote --------------------------
+# The deliberate half of what the prefill model pass did on its own until 2026-08-25.
+def _attach_bank(tmp_path):
+    path = tmp_path / "answers.yaml"
+    path.write_text("identity:\n  first_name: D\n  last_name: D\n  email: e@x.edu\n"
+                    "answers:\n  work_authorization: \"Yes\"\n")
+    return path
+
+
+def test_attaching_records_the_wording_and_closes_that_gap(tmp_path):
+    """Both halves, and neither is optional.
+
+    The alias is what recognizes this question at the next employer; `gap_key` is what
+    closes the row you were actually looking at. Closing by answer key would have shut
+    `work_authorization`'s row — which was never open — and left this one on the page
+    while the page said it saved.
+    """
+    db = _fresh(tmp_path)
+    path = _attach_bank(tmp_path)
+    h = _handler_for(db, config.CRITERIA_YAML, answers_path=path)
+    conn = store.connect(db)
+    _gaps_at(conn, "are_you_authorized_to_work", "Are you authorized to work in the US?",
+             ["Stripe"])
+    conn.commit()
+    conn.close()
+
+    res = h._api_attach({"question_key": "work_authorization",
+                         "gap_key": "are_you_authorized_to_work",
+                         "alias": "Are you authorized to work in the US?"})
+    assert res["ok"] and res["remaining"] == 0
+
+    from jobtracker.answers import load_answers
+
+    bank = load_answers(path)
+    assert bank.by_alias["are you authorized to work in the us"] == "work_authorization"
+    assert bank.get("work_authorization") == "Yes"       # the value is untouched
+
+
+def test_attaching_to_an_answer_that_does_not_exist_is_refused(tmp_path):
+    """Otherwise the question is attached to nothing and its gap closes anyway — the
+    answer silently becomes blank on every form that asks it."""
+    db = _fresh(tmp_path)
+    path = _attach_bank(tmp_path)
+    h = _handler_for(db, config.CRITERIA_YAML, answers_path=path)
+    conn = store.connect(db)
+    _gaps_at(conn, "q", "Some question?", ["Stripe"])
+    conn.commit()
+    conn.close()
+
+    before = path.read_text()
+    res = h._api_attach({"question_key": "no_such_answer", "gap_key": "q",
+                         "alias": "Some question?"})
+    assert not res["ok"] and "not an answer you have written" in res["error"]
+    assert path.read_text() == before
+
+    conn = store.connect(db)
+    assert len(store.open_gaps(conn)) == 1
+    conn.close()
+
+
+def test_attaching_carries_no_value_and_cannot_edit_an_answer(tmp_path):
+    """`/api/answer` edits; this only ever points. A value accepted here would be a
+    second writer of the same field, and the two would disagree the first time one of
+    them grew a validation rule."""
+    import inspect
+
+    src = inspect.getsource(server.Handler._api_attach)
+    assert 'payload.get("value")' not in src
+
+
+def test_attaching_an_identity_key_is_recorded_where_something_reads_it(tmp_path):
+    """`Answers.by_alias` is built from the `answers:` block alone, so an alias of
+    `email` has nowhere to live in the file. `form_fields.question_key` is the record,
+    and it is what `known_question_keys` replays at every other company."""
+    db = _fresh(tmp_path)
+    path = _attach_bank(tmp_path)
+    h = _handler_for(db, config.CRITERIA_YAML, answers_path=path)
+    conn = store.connect(db)
+    store.upsert_form_field(conn, company="Stripe", form_key="q7",
+                            label="What is your e-mail address?", field_type="text",
+                            now="2026-08-25", required=True, options=None,
+                            question_key=None, source="dom")
+    _gaps_at(conn, "what_is_your_e_mail_address", "What is your e-mail address?",
+             ["Stripe"])
+    conn.commit()
+    conn.close()
+
+    res = h._api_attach({"question_key": "email",
+                         "gap_key": "what_is_your_e_mail_address",
+                         "alias": "What is your e-mail address?"})
+    assert res["ok"]
+
+    conn = store.connect(db)
+    assert store.known_question_keys(conn)["what is your e mail address"] == "email"
+    conn.close()
+
+
+def test_every_control_on_the_settings_page_has_a_handler_in_its_own_script(tmp_path):
+    """The button-and-handler-in-the-same-file rule, which /settings never had one for.
+
+    `/apply`, `/applications` and `/companies` each grew this test after a control was
+    shipped whose handler lived on a page that never loaded it — a click that does
+    nothing at all, silently. Settings gained `button.attach` on 2026-08-25 and would
+    have been the fourth.
+    """
+    import re
+
+    path = tmp_path / "answers.yaml"
+    path.write_text("identity:\n  first_name: D\n  last_name: D\n  email: e@x.edu\n"
+                    "answers:\n  work_authorization: \"Yes\"\n")
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "how_did_you_hear", "How did you hear about us?", ["Stripe"])
+    conn.commit()
+    page = server.render_settings(conn, path)
+    conn.close()
+
+    script = page[page.rindex("<script>"):]
+    classes = set(re.findall(r"class=(save|attach|save-identity|save-resume-name)[ >]",
+                             page))
+    assert classes == {"save", "attach", "save-identity", "save-resume-name"}
+    for cls in classes:
+        assert f"button.{cls}" in script, cls
+    for endpoint in ("/api/answer", "/api/attach", "/api/identity", "/api/resume"):
+        assert endpoint in script, endpoint
+    # And the picker the attach box reads from, which is useless without its options.
+    assert 'list="bankkeys"' in page
+    assert '<datalist id="bankkeys">' in page
+    assert '<option value="work_authorization">' in page
+
+
+def test_a_gap_carries_the_question_verbatim_for_the_alias(tmp_path):
+    """Saving or attaching has to record the *employer's wording*, not the slug.
+
+    `known_question_keys` and `Answers.by_alias` are both keyed on normalized label, so
+    an alias of "how_did_you_hear" would match a form asking literally that and nothing
+    else. Since the model pass went, this is the only thing that makes one answer cover
+    the same question at the next company.
+    """
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "how_did_you_hear", "How did you hear about us?", ["Stripe"])
+    conn.commit()
+    page = server.render_settings(conn, tmp_path / "answers.yaml")
+    conn.close()
+    assert 'data-alias="How did you hear about us?"' in page
+
+
+def test_a_gap_asked_by_many_names_a_few_and_counts_the_rest(tmp_path):
+    """Thirty company names is the reason you cannot see the next question."""
+    conn = store.connect(":memory:")
+    _gaps_at(conn, "work_authorization", "Authorized to work?",
+             [f"Co{i}" for i in range(9)])
+    conn.commit()
+    page = server.render_settings(conn, tmp_path / "answers.yaml")
+    conn.close()
+    assert "Co0, Co1, Co2, Co3, Co4 and 4 more" in page
+    assert "Co8," not in page
+    assert "9 employers" in page
 
 
 # -- the mirrored form ----------------------------------------------------------------
@@ -1344,6 +1644,62 @@ def test_zero_fields_renders_as_no_form_found(tmp_path):
     conn.close()
 
 
+def _unterminated_strings(script: str) -> list:
+    """Lines of an emitted script that end while still inside a `'...'` or `"..."`.
+
+    JavaScript string literals cannot carry a raw newline, so every one of these is a
+    `SyntaxError` — and a `SyntaxError` anywhere in a script kills the whole script, not
+    the statement it is in.
+    """
+    bad, block = [], False
+    for number, line in enumerate(script.splitlines(), 1):
+        quote, i = None, 0
+        while i < len(line):
+            char = line[i]
+            if block:
+                if line.startswith("*/", i):
+                    block = False
+                    i += 1
+            elif quote:
+                if char == "\\":
+                    i += 1
+                elif char == quote:
+                    quote = None
+            elif line.startswith("//", i):
+                break
+            elif line.startswith("/*", i):
+                block, i = True, i + 1
+            elif char in "'\"":
+                quote = char
+            elif char == "`":
+                break            # a template literal may span lines, and several do
+            i += 1
+        if quote:
+            bad.append(f"line {number}: {line.strip()[:70]}")
+    return bad
+
+
+def test_no_emitted_script_carries_a_newline_inside_a_string():
+    """`\\n` in a JS string is two characters; `\\\\n` is what a non-raw Python
+    docstring has to spell to emit them.
+
+    `server._JS` had three of the first (2026-08-19 to 2026-08-26), which put a real
+    newline inside a quoted literal and made the entire script a `SyntaxError` — so
+    every handler it carries was dead on all four pages that emit it: the tuning page's
+    rule controls, Settings' answer saves, Applications' status buttons and the Add a
+    company form. Exactly the "Open prefilled" failure — a button whose handler is not
+    on the page — with a different cause and four times the reach, and it was invisible
+    because a page with no script still renders perfectly.
+
+    This is what the parity tests cannot see: they check that a handler was written, not
+    that the script it is in survives being parsed.
+    """
+    for name, script in (("server._JS", server._JS),
+                         ("server._APPLY_JS", server._APPLY_JS),
+                         ("dashboard._JS", dashboard._JS)):
+        assert _unterminated_strings(script) == [], name
+
+
 def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_path):
     """A button whose handler is on another page is indistinguishable from a broken one.
 
@@ -1357,16 +1713,279 @@ def test_every_control_on_the_apply_page_has_a_handler_in_its_own_script(tmp_pat
 
     script = page[page.rindex("<script>"):]
     ids = set(re.findall(r'id="([a-z]+)"', page))
-    assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone"} <= ids
-    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone"):
+    assert {"pause", "reread", "reload", "preview", "closewin", "zoom", "gone",
+            "resetform", "resetmsg"} <= ids
+    for element in ("pause", "reread", "reload", "preview", "closewin", "zoom", "gone",
+                    "resetform", "resetmsg"):
         assert f"getElementById('{element}')" in script, element
     for hook in ("lf-file", "lf-detach", "tobank", "bankkey", "savebank", "bankval",
-                 ".lv"):
+                 "lf-lookup", ".sq", ".lv"):
         assert hook in script, hook
+    # The picker's options come from the answer bank, so an empty list is legitimate
+    # here — but the element the key box points at has to exist either way, or the
+    # control silently degrades to a plain text box.
+    assert 'list="bankkeys"' in page and '<datalist id="bankkeys">' in page
     for endpoint in ("/api/session", "/api/session/set", "/api/session/clear",
                      "/api/session/highlight", "/api/session/rediscover",
-                     "/api/session/file", "/api/session/close", "/api/answer"):
+                     "/api/session/reset", "/api/session/search",
+                     "/api/session/file", "/api/session/close",
+                     "/api/answer"):
         assert endpoint in script, endpoint
+
+
+def test_a_resume_at_the_documented_limit_actually_fits_in_the_body(tmp_path):
+    """The two caps are about two different things and only one of them bounds memory.
+
+    `validate_upload` refuses a *file* over `resumes.MAX_UPLOAD`, and quotes that number
+    in the message. The body carrying it is base64, so ~4/3 of it — and while the body
+    was capped at the same number, every file over about three quarters of the documented
+    limit was refused before the decode, as an empty payload reported as "no file". The
+    limit the message names could never be the thing that fired.
+    """
+    import base64
+
+    from jobtracker import resumes as resumes_mod
+
+    biggest = base64.b64encode(b"x" * resumes_mod.MAX_UPLOAD)
+    body = json.dumps({"filename": "cv.pdf", "content": biggest.decode()})
+    assert len(body) <= server.MAX_UPLOAD_BODY
+
+    # And it is still a bound, not an opening: a decision POST cannot buffer one.
+    assert server.MAX_BODY < server.MAX_UPLOAD_BODY < 2 * resumes_mod.MAX_UPLOAD
+
+
+def test_the_page_knows_the_limit_the_server_enforces(tmp_path):
+    """Duplicated numbers drift, and this pair drifts into a silent failure: a client
+    that thinks the cap is larger sends a body the server hangs up on mid-upload, which
+    on the other side is a request that never comes back rather than a refusal."""
+    from jobtracker import resumes as resumes_mod
+
+    assert f"var MAX_UPLOAD_BYTES = {resumes_mod.MAX_UPLOAD};" in server._APPLY_JS
+
+
+def test_every_ending_of_an_upload_reaches_the_status_pill(tmp_path):
+    """"uploading…" is the word for a request in flight, and it was also the word for
+    one that had already failed.
+
+    A file the reader could not open, a body the server hung up on, and a request that
+    never came back all left the pill reading it for the rest of the session — over a
+    card still wearing `.busy`, which is what keeps the poll from painting the row. A row
+    that has gone quiet next to a page that will not repaint it is what "it hangs and I
+    cannot touch anything else" looks like from here.
+    """
+    js = server._APPLY_JS
+    branch = js[js.index("classList.contains('lf-file')"):]
+    branch = branch[:branch.index("\n    }")]
+
+    # Every ending, and every one of them takes `.busy` off with it.
+    assert "reader.onerror" in branch
+    assert ".catch(" in branch
+    assert branch.count("done(") >= 4
+    assert "card.classList.remove('busy')" in branch
+    # Never "filled": the upload queued a command, and only the poll can see it land.
+    assert "'filled'" not in branch
+
+
+def test_an_over_length_body_is_refused_in_words_rather_than_read_as_empty(tmp_path):
+    """The one refusal that happens with the body still arriving.
+
+    Read as `{}` it reached the endpoint as a payload with no fields in it and came back
+    "no file" — true of the request, false about the problem, and pointing at the picker
+    rather than at the file. And the connection closes mid-upload either way, so without
+    an answer of its own the client sees a request that never finished.
+    """
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    h.path = "/api/session/file"
+    h.headers = {"Content-Length": str(server.MAX_UPLOAD_BODY + 1)}
+    sent = {}
+    h._send_json = lambda payload, status=200: sent.update(payload=payload, status=status)
+
+    h.do_POST()
+
+    assert sent["status"] == 413
+    assert sent["payload"]["ok"] is False
+    assert "larger than" in sent["payload"]["error"]
+
+
+def test_a_form_that_moved_is_read_again_rather_than_left_inert(tmp_path):
+    """Stopping is not an ending, and treating it as one is what made a resume look
+    like a hang.
+
+    Greenhouse's file row re-renders into a filename and a remove control the moment it
+    takes a file. That is a shape change, which is a correct epoch bump — and the page
+    then disabled every field on it and waited for a Reload nobody had a reason to
+    press, over a browser that was working perfectly. The handles are stale; the
+    server's rendering of them is not, and re-reading it is exactly what a reload does.
+
+    The guard is asked *before* anything is disabled: disabling the field you are in
+    blurs it, so a guard read afterwards is reading a page it has just cleared.
+    """
+    js = server._APPLY_JS
+    branch = js[js.index("if (s.epoch !== epoch) {"):]
+    branch = branch[:branch.index("\n      }")]
+
+    assert "location.reload()" in branch
+    assert branch.index("busyNow()") < branch.index("el.disabled = true")
+    # And it stops polling on the way out, or the reload races a tick that would run
+    # this branch again.
+    assert "stopped = true" in branch
+
+
+def test_the_form_can_be_emptied_from_the_page_that_mirrors_it(tmp_path):
+    """One command on the thread that owns the page, not a clear per row from here.
+
+    `_clear` re-reads the form on its way out, so a loop of thirty clears from this side
+    goes stale the first time emptying something changes the form's shape — and every
+    later one is then correctly dropped, leaving a reset that emptied four fields
+    reported as a whole one.
+    """
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    assert h._api_session_reset()["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.kind == live_mod.RESET
+    assert session.commands.empty(), "one command, not one per field"
+
+
+def test_resetting_carries_no_handle_and_no_epoch(tmp_path):
+    """Which is what makes it the way out of a form that has moved under the page.
+
+    Every per-field command is refused there, correctly — the handles this side is
+    holding name their neighbours now. Reset names nothing from this side at all, so
+    there is no handle of ours that could have gone stale, and the epoch it would be
+    checked against is one it has no reason to carry.
+    """
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+    session.epoch += 99                       # the form moved; the page does not know
+
+    assert h._api_session_reset()["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.handle == "" and command.value == ""
+    assert command.epoch == -1
+
+
+def test_the_page_offers_the_real_form_in_a_tab_of_your_own_browser(tmp_path):
+    """"Open application" is the form itself, not the window drawing it.
+
+    What this opens is the URL the browser actually landed on, so a Greenhouse embed or
+    an Ashby `/application` opens the page the preview is a picture of, for the parts the
+    discovery pass could not mirror. Typing in it changes nothing here: two tabs on one
+    anonymous form share no draft.
+
+    That is a different thing from the viewer link below, which reaches the window
+    holding your fill — and it must not stand in for it. Reading a form and being able to
+    touch it are the two halves that were confused when the viewer was deleted.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+
+    assert 'href="https://x/apply" target="_blank" rel="noopener noreferrer"' in page
+    assert "Open application" in page
+    # With no viewer configured there is no viewer link — only the sentence saying what
+    # to set to get one. A dead "View window" over a host with no viewer is the empty
+    # affordance this page keeps out of every other control.
+    assert "View window" not in page
+    assert "JOBTRACKER_BROWSER_VIEW_URL" in page
+
+
+def test_the_window_can_be_reached_when_a_viewer_is_configured(tmp_path):
+    """The fallback, back on 2026-08-29 after being deleted on 2026-08-22.
+
+    Deleting it was right about the main flow and wrong about the last resort. `/apply`
+    mirrors what the discovery pass could read and what `_write` can move; a captcha, a
+    dropzone and a widget that will not take a value are none of those, and for all three
+    the documented answer was "open the window" with nothing anywhere that opened one.
+
+    It is on `/apply` only — the dashboard has no window open yet — and it is
+    `_safe_url`-checked like every other third-party href these pages render.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session(), None, "https://gx10:6080/vnc.html")
+    conn.close()
+
+    assert 'href="https://gx10:6080/vnc.html"' in page
+    assert page.count("View window") == 2      # beside the preview, and in the note
+    assert 'class="btn viewwin"' in page
+    # And it is still not the same link as the form's own.
+    assert 'href="https://x/apply"' in page
+
+
+def test_a_hostile_viewer_url_cannot_smuggle_a_scheme(tmp_path):
+    """It comes out of the environment, which on a container host is not always the same
+    hands as the ones reading the page. Every href here goes through `_safe_url`."""
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session(), None, "javascript:alert(1)")
+    conn.close()
+
+    assert "javascript:alert" not in page
+
+
+def test_the_link_to_the_form_refuses_a_scheme_that_would_run(tmp_path):
+    """The session's URL is where an ATS redirected the browser, which is third-party
+    text like every other URL on these pages. `javascript:` in an href runs on click."""
+    session = _live_session()
+    session.retarget("javascript:alert(1)")
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "javascript:alert" not in page
+    assert 'href="#" target="_blank"' in page
+
+
+def test_saving_to_the_bank_is_offered_by_default(tmp_path):
+    """Ticked from the start, because this is where the bank grows.
+
+    The moment you know the answer to "how did you hear about us" is while you are
+    typing it into a form, not on a Settings visit you make once a month. Before the
+    model pass was removed the bank could afford to grow slowly, because a model was
+    guessing at the questions it did not cover; now nothing is.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    assert 'class="tobank" checked' in page
+
+
+def test_the_bank_is_never_written_from_the_typing_debounce(tmp_path):
+    """Ticked-by-default and save-on-debounce cannot both be true.
+
+    `bank()` used to run from the 400ms timer and untick itself after the first success.
+    That was harmless while *you* did the ticking — you ticked when you had finished
+    typing. Ticked from the start it stores whatever you had reached at the first pause
+    and disarms, so the finished sentence never lands and the bank holds half of one.
+    Blur and dropdown-change still call it: both mean "done with this field".
+
+    Read off the source because the alternative is a browser test of a race.
+    """
+    js = server._APPLY_JS
+    body = js[js.index("function schedule("):]
+    body = body[:body.index("\n  }")]
+    assert "push(card, value)" in body
+    assert "bank(" not in body, "the debounce must not reach the answer bank"
+
+    for commit in ("focusout", "change"):
+        at = js.index("'" + commit + "'")
+        assert "bank(" in js[at:at + 1400], commit
+
+
+def test_the_bank_write_carries_the_employer_wording(tmp_path):
+    """An alias keyed on our slug would match a form asking literally "how_did_you_hear".
+
+    `Answers.by_alias` and `known_question_keys` are both keyed on the normalized label,
+    so the verbatim question is the only thing that makes one answer cover the same
+    question at the next company. It is what the model used to work out.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    assert "data-alias=" in page
+    assert "alias: key.dataset.alias" in server._APPLY_JS
 
 
 def test_the_only_way_to_submit_is_armed_and_one_shot(tmp_path):
@@ -1393,7 +2012,8 @@ def test_the_only_way_to_submit_is_armed_and_one_shot(tmp_path):
 
     # And still not something the queue can carry: `submit` is a session-level gate, so
     # nothing that reaches `Session.submit` can activate a control.
-    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert live_mod.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
+                                   "highlight", "search"}
     assert "submit" not in live_mod.VOCABULARY
     session = live_mod.current()
     assert session.submit(live_mod.Command(kind="submit", handle="jt0")) is False
@@ -1743,6 +2363,177 @@ def test_the_page_and_its_script_call_a_status_the_same_thing(tmp_path):
         assert status in server._STATUS_WORD
 
 
+# -- asking a menu what it offers -------------------------------------------------------
+# The one dead end on this page. Greenhouse's "Location (City)" is a react-select whose
+# options are fetched per keystroke, so nothing offline can learn what it accepts: the
+# row rendered as a text box and any answer that was not character-for-character one of
+# the widget's own suggestions came back "would not take it", with no way to find out
+# what would have been taken.
+
+
+def test_a_lookup_is_queued_like_every_other_command(tmp_path):
+    """Handle, value, epoch. No selector, and nothing the browser thread evaluates."""
+    from jobtracker import live as live_mod
+
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    assert h._api_session_search({"handle": "jt0", "epoch": session.epoch,
+                                  "value": "new york"})["ok"] is True
+    command = session.commands.get_nowait()
+    assert command.kind == live_mod.SEARCH
+    assert command.handle == "jt0" and command.value == "new york"
+    assert command.epoch == session.epoch
+
+
+def test_an_empty_lookup_is_refused(tmp_path):
+    """An empty query is not a search: it reads the whole unfiltered menu, which for a
+    place lookup is nothing at all — and it would overwrite a list you had just asked for
+    with a blank one, which renders as "it offered nothing"."""
+    h = _handler_for(tmp_path / "state.db", tmp_path / "criteria.yaml")
+    session = _live_session()
+
+    out = h._api_session_search({"handle": "jt0", "epoch": session.epoch, "value": "  "})
+    assert out["ok"] is False
+    assert "look up" in out["error"]
+    assert session.commands.empty()
+
+    assert h._api_session_search({"epoch": 0, "value": "x"})["ok"] is False
+    assert h._api_session_search({"handle": "jt0", "epoch": "soon",
+                                  "value": "x"})["ok"] is False
+    assert session.commands.empty()
+
+
+def test_what_a_menu_offered_renders_as_a_menu(tmp_path):
+    """And the query it answered renders with it, because neither means anything alone.
+
+    Picking from this select pushes an ordinary `set` carrying a string the widget's own
+    menu produced — the one kind of value `_pick` is guaranteed to find. Nothing here
+    picks the nearest match for you, which is the rule that keeps an answer you did not
+    give off an application you are about to send.
+    """
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    session = _mirror([
+        (FormField(key="candidate-location", label="Location (City)*",
+                   type="combobox", required=True), live.REFUSED, "", None),
+    ])
+    session.offer("jt0", "New York, NY", ["New York, NY, United States",
+                                          "New York Mills, MN, United States"])
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert '<option value="New York, NY, United States">' in page
+    assert "what it offered for" in page
+    assert "<code>New York, NY</code>" in page
+    # The query goes back in the box, so a reload does not make you retype it.
+    assert 'class="sq" type="text" value="New York, NY"' in page
+
+
+def test_a_live_reading_supersedes_a_published_option_list(tmp_path):
+    """A published list that has just refused an answer is the list that failed.
+
+    Greenhouse publishes every option of every *question*, so those render as ordinary
+    menus and never come here. When one of them refuses anyway — the DOM disagreeing with
+    the API — `_pick` read the live menu in order to refuse, and that reading is what the
+    row should offer. Without the fallback in the other direction, a combobox with a
+    published list and no reading would render its menu away and put nothing in its place.
+    """
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    session = _mirror([
+        (FormField(key="q1", label="Work auth?", type="combobox", required=True,
+                   options=("Yes", "No")), live.GAP, "", None),
+    ])
+    # No reading yet: the published menu, and no lookup box cluttering a settled dropdown.
+    page = server.render_apply(conn, session)
+    assert '<option value="Yes">Yes</option>' in page
+    assert 'class="lf-lookup"' not in page
+
+    session.offer("jt0", "Authorized", ["Yes, I am authorized", "No"])
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert '<option value="Yes, I am authorized">' in page
+    assert '<option value="Yes">Yes</option>' not in page, "the list that just failed"
+    assert 'class="lf-lookup"' in page
+
+
+def test_a_lookup_that_came_back_with_nothing_says_so(tmp_path):
+    """It renders exactly like one that never ran, and the difference is whether to press
+    the button again or type something else."""
+    from jobtracker import live
+    from jobtracker.models import FormField
+
+    conn = store.connect(tmp_path / "state.db")
+    session = _mirror([
+        (FormField(key="candidate-location", label="Location (City)*",
+                   type="combobox", required=True), live.GAP, "", None),
+    ])
+    session.offer("jt0", "Atlantis", [])
+    page = server.render_apply(conn, session)
+    conn.close()
+
+    assert "it offered nothing for" in page
+    assert "<code>Atlantis</code>" in page
+
+
+def test_the_page_re_reads_itself_when_a_menu_has_been_read(tmp_path):
+    """The suggestions are the server's markup, so the page reloads rather than building
+    `<option>` elements — same reasoning as the epoch recovery, same busy guard.
+
+    Driven off what each row was *rendered* against rather than off a button press, which
+    is what makes a refused fill land the same way: `_pick` read the open menu in order to
+    refuse, and that reading arrives with no click behind it.
+    """
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    script = page[page.rindex("<script>"):]
+
+    assert "card.dataset.offeredfor" in script
+    assert "f.offered_for" in script
+    assert "!busyNow()" in script
+    # And the row carries what it was rendered with, or there is nothing to compare.
+    assert "data-offeredfor=" in page
+    # At most once per distinct reading. The reload resolves the difference in every case
+    # there is — `render_apply` renders from the same snapshot the poll reads — but a
+    # page that reloads itself forever is the wrong failure to risk, so the reading is
+    # marked in the hash before the reload and not repeated. Verified in a real browser
+    # 2026-08-29 against a server that never stopped reporting the new list: two loads,
+    # not two hundred.
+    assert "location.hash = '#read=' + reading" in script
+    assert "location.hash !== '#read=' + reading" in script
+    # Only in the direction that gains a list. The reverse — the page holding one the
+    # session has since cleared — is what every successful pick produces, and reloading
+    # there throws away a menu that is still correct to render an empty one.
+    assert "if (!f.offered_for) return;" in script
+
+
+def test_a_menus_suggestions_are_never_stored_as_its_options(tmp_path):
+    """They answer one query, not the question "what does this field accept".
+
+    `store.known_options` replays whatever is stored at every later visit, so writing a
+    place lookup's answer to "new" there would teach that employer's form a vocabulary of
+    four cities — and `match_option` would then refuse every other one.
+    """
+    import inspect
+
+    from jobtracker import browser as browser_mod
+
+    # The one caller that persists never passes a query; the one that passes a query
+    # writes nothing.
+    assert "query" not in inspect.getsource(browser_mod._learn_vocabularies)
+    obey = inspect.getsource(browser_mod._obey)
+    search = obey[obey.index("live.SEARCH:"):]
+    assert "upsert_form_field" not in search and "_remember" not in search
+    assert "session.offer(" in search
+
+
 def test_deleting_a_value_is_sent_as_a_clear_rather_than_an_empty_set(tmp_path):
     """The endpoint refuses an empty `set`, so the page has to know the difference.
 
@@ -1872,7 +2663,8 @@ def test_the_window_can_be_closed_from_the_page(tmp_path):
     assert h._api_session_close()["ok"] is True
     assert session.close_requested() is True
     assert session.commands.empty()
-    assert live_mod.VOCABULARY == {"set", "clear", "rediscover", "shoot", "highlight"}
+    assert live_mod.VOCABULARY == {"set", "clear", "reset", "rediscover", "shoot",
+                                   "highlight", "search"}
 
 
 def test_closing_works_from_any_phase(tmp_path):
@@ -1890,11 +2682,25 @@ def test_closing_works_from_any_phase(tmp_path):
     assert h._api_session_close()["ok"] is False
 
 
-def test_a_refused_open_says_where_the_way_out_is(tmp_path):
-    """"Close it first" was advice with no way to take it on a headless host."""
-    source = inspect.getsource(server.Handler._api_apply_to)
-    start = source.index("a prefilled window is already open")
-    assert "Fill in page" in source[start:start + 200]
+def test_a_refused_open_says_where_the_way_out_is(tmp_path, monkeypatch):
+    """"Close it first" was advice with no way to take it on a headless host.
+
+    Read off the refusal itself rather than off the source — the wording moved once and
+    a source-grep is what noticed, which is the wrong thing to be checking. Only one
+    refusal is left here: a window that would not close. The other two became a way
+    through instead, the same job going back to it and a different one taking its place.
+    """
+    from jobtracker import live
+
+    monkeypatch.setattr(server, "SWAP_TIMEOUT_S", 0.05)
+    session = live.start("Acme", "9", "Stuck Role", "https://x/other")
+    assert server._APPLY_LOCK.acquire(blocking=False)
+    try:
+        note, error = server._close_open_window(session)
+    finally:
+        server._APPLY_LOCK.release()
+    assert note == ""
+    assert "Stuck Role" in error and "Fill in page" in error
 
 
 def test_a_set_with_an_unreadable_epoch_is_refused_rather_than_guessed(tmp_path):
@@ -2454,8 +3260,15 @@ def test_a_checkbox_set_renders_as_one_question_with_its_choices(tmp_path):
 
 
 def test_a_dropdown_renders_as_a_dropdown_when_its_options_are_known(tmp_path):
-    """And as a text box, with a note, when they are not — because a `<select>` holding
-    only "— choose —" is worse than either."""
+    """And as a lookup box when they are not, rather than as free text.
+
+    A combobox with a published vocabulary is a plain menu. One without is the case
+    "Location (City)" made unavoidable: Greenhouse fetches its options per keystroke, so
+    there is no list to open and nothing offline can learn one. It used to render as a
+    text box apologising for itself, and anything typed into it that was not
+    character-for-character one of the widget's own suggestions came back "would not take
+    it" with no way to find out what would have been taken.
+    """
     from jobtracker import live
     from jobtracker.models import FormField
 
@@ -2469,8 +3282,15 @@ def test_a_dropdown_renders_as_a_dropdown_when_its_options_are_known(tmp_path):
     conn.close()
 
     assert '<option value="Yes">Yes</option>' in page
+    # The unpublished one gets a query box and a button to ask the widget itself, and
+    # says why. It never gets a free-text field pretending the answer is anything you
+    # like — that reading is what put "New York, New York" into a phone country selector.
     assert "a menu on the real form" in page
-    assert page.count("<select class=\"lv\"") == 1
+    assert 'class="lf-lookup"' in page
+    assert page.count('class="sq"') == 1
+    # Two selects, and the second one holds nothing but "— choose —" until something has
+    # asked. A menu with no options is still a menu; a text box is a different claim.
+    assert page.count('<select class="lv"') == 2
 
 
 def test_the_filename_an_employer_sees_is_a_setting(tmp_path):

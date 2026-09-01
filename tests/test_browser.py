@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from jobtracker import browser, live, store
-from jobtracker.answers import load_answers
+from jobtracker.answers import load_answers, normalize_label
 from jobtracker.models import Company, FormField
 
 try:  # pragma: no cover - depends on the optional extra
@@ -155,9 +155,13 @@ def test_the_only_activations_in_this_module_are_the_two_named_ones():
         _callers_of("_press")
     assert _callers_of("_pick") == ["_write"], _callers_of("_pick")
     # And reading a vocabulary must never *choose* one. It presses the widget's toggle
-    # twice — open, read, closed again — and the only thing it returns is text.
+    # twice — open, read, closed again — and the only thing it returns is text. That is
+    # true whether it was given a query or not: `_obey` reaches it for the `search`
+    # command, which types into the widget's own search box exactly as `_pick` already
+    # does before choosing, and then stops instead of pressing an option.
     assert ".click(" not in _code_without_prose_of(browser._read_vocabulary)
-    assert _callers_of("_read_vocabulary") == ["_learn_vocabularies"]
+    assert _callers_of("_read_vocabulary") == ["_learn_vocabularies", "_obey"], \
+        _callers_of("_read_vocabulary")
 
 
 def _code_without_prose_of(fn) -> str:
@@ -714,6 +718,192 @@ def test_a_control_that_will_not_empty_says_so_rather_than_going_quiet():
     session.submit(live.Command(kind=live.CLEAR, handle="jt0", epoch=session.epoch))
     browser._drain(session, page)
     assert session.snapshot()["fields"][0]["status"] == live.REFUSED
+
+
+# -- the menu that has no list ----------------------------------------------------------
+# Greenhouse's "Location (City)" is a react-select whose options are fetched per
+# keystroke. There is nothing to open, so `_learn_vocabularies` correctly learns nothing,
+# the row rendered as a plain text box, and any answer that was not character-for-
+# character one of the widget's own suggestions came back "would not take it" with no way
+# to find out what would have been taken. `search` is how the page asks.
+
+
+class _Locator:
+    """Playwright's locator, reduced to what `_pick` and `_read_vocabulary` use."""
+
+    def __init__(self, page, present=True):
+        self.page, self.present = page, present
+
+    def count(self):
+        return 1 if self.present else 0
+
+    @property
+    def first(self):
+        return self
+
+    def click(self):
+        self.page.presses += 1
+
+
+class _ComboPage(_Recorder):
+    """A page whose one combobox offers nothing until something types into it.
+
+    Modelled on the real widget rather than on a `<select>`: opening it shows an empty
+    menu however long you wait, and the options that do arrive are a function of the
+    query. That is the whole shape the `search` command exists for.
+    """
+
+    def __init__(self, found, offers):
+        super().__init__(found)
+        self.offers = offers          # query -> what the menu then shows
+        self.query = ""
+        self.presses = 0
+
+    def locator(self, selector):
+        return _Locator(self)
+
+    def fill(self, selector, value):
+        super().fill(selector, value)
+        self.query = value
+
+    def evaluate(self, script, arg=None):
+        if "data-jt-submit" in script:
+            return self.submit
+        # `data-jt-id` is what tells the two *reading* scripts from the two *widget*
+        # ones. `_DISCOVER_JS` names all three attributes — it is what sets them — so
+        # discriminating on `data-jt-opt` or `data-jt-ctl` first answered a discovery
+        # pass with a list of city names.
+        if "data-jt-id" in script:                       # _DISCOVER_JS, _HIGHLIGHT_JS
+            self.evaluated.append(arg)
+            return self.found
+        offered = self.offers.get(self.query, [])
+        if "args.value" in script:                       # _OPTION_JS
+            wanted = normalize_label(arg["value"])
+            chose = next((o for o in offered if normalize_label(o) == wanted), None)
+            return {"opened": bool(offered), "chose": chose, "offered": offered}
+        return offered                                   # _VOCABULARY_JS
+
+
+def test_a_menu_with_no_list_can_be_asked_what_it_offers():
+    """`search` types the query into the widget's own box and reads the menu back.
+
+    It chooses nothing — the presses are the widget's own toggle, open and closed again —
+    and the value on the row does not move. What changes is what this side knows.
+    """
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"))
+    page = _ComboPage(found, {"new york": ["New York, NY, United States",
+                                           "New York Mills, MN, United States"]})
+
+    session.submit(live.Command(kind=live.SEARCH, handle="jt0", value="new york",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["offered"] == ["New York, NY, United States",
+                              "New York Mills, MN, United States"]
+    assert row["offered_for"] == "new york"
+    # Nothing was chosen and nothing was written: the field is exactly where it was.
+    assert row["value"] == "" and row["status"] == live.PENDING
+
+
+def test_searching_re_reads_the_form_without_spending_an_epoch():
+    """Typing into a react-select remounts its input, which takes the `data-jt-id` with
+    it — so without a re-reading the field just searched would be the one field on the
+    form nothing else could reach. The handles do not move, so the page never notices.
+    """
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"),
+                             ("first_name", "First Name", "text"))
+    page = _ComboPage(found, {"new": ["New York, NY, United States"]})
+    before = session.epoch
+
+    session.submit(live.Command(kind=live.SEARCH, handle="jt0", value="new",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert session.epoch == before, "a search invalidated the page's handles"
+    # And the re-reading did not throw the answer away: `rows_from` builds rows with no
+    # offer, so `offer` has to land after it.
+    assert session.snapshot()["fields"][0]["offered_for"] == "new"
+
+
+def test_a_refused_dropdown_says_what_it_would_have_taken():
+    """The dead end this whole feature is about.
+
+    `_pick` reads the open menu in order to decide, so a refusal already knows the answer
+    list — it was just being discarded. Publishing it is what turns the one status on the
+    page you could do nothing about into a list to choose from, with no second search.
+    """
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"))
+    page = _ComboPage(found, {"New York, NY": ["New York, NY, United States"]})
+
+    # What the answer bank holds — a perfectly reasonable answer the menu does not offer.
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="New York, NY",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.REFUSED
+    assert row["offered"] == ["New York, NY, United States"]
+    assert row["offered_for"] == "New York, NY"
+
+
+def test_choosing_one_of_its_own_wordings_is_taken():
+    """The other half: a value the menu produced is one `_pick` is guaranteed to find."""
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"))
+    page = _ComboPage(found, {"New York, NY, United States":
+                              ["New York, NY, United States"]})
+
+    session.submit(live.Command(kind=live.SET, handle="jt0",
+                                value="New York, NY, United States",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.FILLED
+    assert row["value"] == "New York, NY, United States"
+
+
+def test_a_menu_showing_something_else_is_still_asked_for_our_answer():
+    """`_pick` used to type only when the menu came up *empty*.
+
+    That was written for the place-lookup case and is too narrow by one word. A menu
+    showing anything at all was refused without ever being asked the question — and a
+    menu showing something is the ordinary state of one that has been searched before, or
+    one that opens on a default list. Found by driving a real async combobox on
+    2026-08-29: with a previous lookup's query still in the box, choosing the answer from
+    the list that lookup had produced was refused, quoting the leftover list back.
+
+    `search` is what made this routine, so it is fixed here rather than worked around by
+    clearing the box: the page must be able to look something up and then pick it.
+    """
+    session, found = _mirror(("candidate-location", "Location (City)*", "combobox"))
+    page = _ComboPage(found, {
+        "newark": ["Newark, NJ, United States"],
+        "New York, NY, United States": ["New York, NY, United States"],
+    })
+    page.query = "newark"        # what a lookup a moment ago left in the widget
+
+    session.submit(live.Command(kind=live.SET, handle="jt0",
+                                value="New York, NY, United States",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.FILLED, row
+    assert row["value"] == "New York, NY, United States"
+
+
+def test_a_menu_that_is_already_showing_the_answer_is_not_typed_into():
+    """The other side of that condition: a static Yes/No costs what it always did."""
+    session, found = _mirror(("q1", "Work auth?", "combobox"))
+    page = _ComboPage(found, {"": ["Yes", "No"]})
+
+    session.submit(live.Command(kind=live.SET, handle="jt0", value="Yes",
+                                epoch=session.epoch))
+    browser._drain(session, page)
+
+    assert session.snapshot()["fields"][0]["status"] == live.FILLED
+    assert page.filled == {}, "it searched a menu that was already offering the answer"
 
 
 def test_focusing_a_row_outlines_that_field_on_the_real_page():
@@ -1337,6 +1527,53 @@ def test_a_combobox_learns_its_vocabulary_from_what_the_ats_published(tmp_path):
     assert lent["first_name"].options == ()
 
 
+@needs_browser
+def test_the_location_field_is_the_one_menu_with_nothing_to_open(tmp_path):
+    """Why `search` had to exist, measured on the form rather than argued from types.
+
+    Ten comboboxes, and nine of them carry a "Toggle flyout" button in their indicators:
+    a list you can open and read, which is what `_learn_vocabularies` does once per
+    company and keeps forever. *Location (City)* carries none, because there is nothing
+    to toggle — its options are fetched per keystroke by a place lookup, so an opened menu
+    is genuinely empty and stays empty however long you wait.
+
+    That is the whole reason it rendered as a text box on `/apply` and the whole reason an
+    answer like "New York, NY" came back *"would not take it"*: nothing offline can learn
+    what it accepts, and the only thing that can is the widget, asked.
+    """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        chromium = pw.chromium.launch(headless=True)
+        page = chromium.new_page()
+        page.goto(REAL_FORM.as_uri(), wait_until="domcontentloaded")
+        found = page.evaluate(browser._DISCOVER_JS)
+        fields = browser._fields_from_dom(found)
+        toggles = {}
+        for raw, field_ in zip(found, fields):
+            if field_.type != "combobox":
+                continue
+            toggles[field_.key] = page.evaluate(
+                """(h) => {
+                    const ctl = document.querySelector(`[data-jt-ctl="${h}"]`);
+                    const ind = ctl && ctl.querySelector('[class*="indicators"]');
+                    return ind ? ind.querySelectorAll('button').length : 0;
+                }""",
+                raw["handle"],
+            )
+        # And what reading it without typing gets you, which is the fill's own path.
+        location = next(r for r, f in zip(found, fields)
+                        if f.key == "candidate-location")
+        empty = browser._read_vocabulary(page, location["handle"])
+        chromium.close()
+
+    assert len(toggles) == 10, toggles
+    assert toggles["candidate-location"] == 0
+    assert all(n == 1 for key, n in toggles.items()
+               if key != "candidate-location"), toggles
+    assert empty == [], "the menu is not empty, so the premise of `search` is wrong"
+
+
 # -- what an employer's copy of the resume is called -------------------------------------
 def test_the_resume_goes_out_under_a_name_a_person_would_have_chosen(tmp_path):
     """Playwright sends the basename on disk, and the disk names here are minted for
@@ -1395,3 +1632,211 @@ def test_the_gap_list_names_a_question_once(tmp_path, answers):
     # And the phone-number country selector is not filled from an identity location.
     assert "Country*" not in {f.label for f in report.filled}
     conn.close()
+
+
+# -- emptying the whole form -----------------------------------------------------------
+def test_reset_empties_what_is_holding_something_and_leaves_a_gap_alone():
+    """`cleared` and `gap` are two different answers and reset may only produce one.
+
+    A gap is a question nobody ever had an answer for; `cleared` is one you emptied on
+    purpose. Marking every row `cleared` would spend the distinction the two statuses
+    exist to draw — and would say the reset did something to thirty fields when it
+    touched one.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"),
+                             ("why", "Why us?", "textarea"))
+    session.mark("jt0", live.FILLED, "Dylan")
+    page = _Recorder(found)
+
+    browser._reset(session, page)
+
+    rows = {r["handle"]: r for r in session.snapshot()["fields"]}
+    assert rows["jt0"]["status"] == live.CLEARED and rows["jt0"]["value"] == ""
+    # Never touched, and never claimed to have been.
+    assert rows["jt1"]["status"] == live.PENDING
+    assert page.filled == {'[data-jt-id="jt0"]': ""}
+
+
+def test_reset_reads_the_form_once_rather_than_after_every_field():
+    """The reason it is one command and not a loop of clears from the page.
+
+    `_clear` on its own path re-reads the form on the way out. Thirty of those is thirty
+    chances for the shape to change under the remaining handles — and attaching or
+    detaching a file is exactly that change — after which every later clear is correctly
+    dropped as stale. The page would then report a whole reset over four emptied fields
+    of thirty, on a form about to be sent.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"),
+                             ("email", "Email", "text"),
+                             ("why", "Why us?", "textarea"))
+    for handle in ("jt0", "jt1", "jt2"):
+        session.mark(handle, live.FILLED, "x")
+    page = _Recorder(found)
+
+    browser._reset(session, page)
+
+    assert len(page.filled) == 3
+    # `evaluate` records one arg per discovery pass — `_find_submit` answers off the
+    # script it was handed and is not counted.
+    assert len(page.evaluated) == 1
+
+
+def test_a_field_that_will_not_empty_keeps_saying_it_is_holding_something():
+    """`refused` is a real outcome here as it is for a single clear.
+
+    A combobox with no clear indicator cannot be emptied, and a row reporting `cleared`
+    over a widget still holding an answer would be counted out of "need you" and off the
+    submit gate's blocker list — the reset's own version of the emptied field that read
+    as filled.
+    """
+    class _Empty:
+        def count(self):
+            return 0
+
+    class _NoClearControl(_Recorder):
+        def locator(self, selector):
+            return _Empty()
+
+    session, found = _mirror(("country", "Country", "combobox"))
+    session.mark("jt0", live.FILLED, "United States +1")
+    page = _NoClearControl(found)
+
+    browser._reset(session, page)
+
+    row = session.snapshot()["fields"][0]
+    assert row["status"] == live.REFUSED
+    assert row["value"] == "United States +1"
+
+
+def test_reset_is_reachable_from_the_queue_and_needs_no_epoch():
+    """The one command that carries no epoch, because it names no handle from outside.
+
+    A form that has moved under the page refuses every per-field command by design — the
+    handles the page is holding name their neighbours now. Reset is what still works
+    there, so requiring the epoch it cannot have would take the way out of that state
+    away in exactly the case it exists for.
+    """
+    session, found = _mirror(("first_name", "First Name", "text"))
+    session.mark("jt0", live.FILLED, "Dylan")
+    page = _Recorder(found)
+
+    assert session.submit(live.Command(kind=live.RESET)) is True
+    session.epoch += 99                       # the form moved under the page
+    browser._drain(session, page)
+
+    assert page.filled == {'[data-jt-id="jt0"]': ""}
+
+
+@needs_browser
+def test_resetting_empties_the_real_form_in_one_pass(tmp_path):
+    """The same four controls as the clear test, but reached by one command.
+
+    Read against a real browser for the same reason: three of the four are Playwright
+    semantics rather than ours, and a fake page only asserts we called them. What this
+    adds is that one command reaches all of them — the property that made `reset` a name
+    of its own instead of a loop of clears from a page whose handles go stale the first
+    time emptying something changes the form's shape.
+    """
+    page_file = tmp_path / "form.html"
+    page_file.write_text(CLEARABLE_HTML)
+    (tmp_path / "resume.pdf").write_bytes(b"%PDF-1.4 fake")
+    session = live.start("Stripe", "1", "Backend Engineer", page_file.as_uri())
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        context = browser._launch(pw, tmp_path / "profile", headless=True)
+        try:
+            page = context.new_page()
+            page.goto(page_file.as_uri())
+            page.set_input_files("#cv", str(tmp_path / "resume.pdf"))
+
+            found = page.evaluate(browser._DISCOVER_JS)
+            fields = browser._fields_from_dom(found)
+            session.absorb(live.rows_from(found, fields))
+            session.set_phase(live.READY)
+            for row in session.snapshot()["fields"]:
+                # What the fill would have left behind: everything holding something.
+                session.mark(row["handle"], live.FILLED, "x")
+
+            session.submit(live.Command(kind=live.RESET))
+            browser._drain(session, page)
+
+            assert page.input_value("#fn") == ""
+            assert page.input_value("#ctry") == ""
+            assert not page.is_checked("#agree")
+            assert page.evaluate("document.getElementById('cv').files.length") == 0
+
+            statuses = {r["key"]: r["status"] for r in session.snapshot()["fields"]}
+            assert set(statuses.values()) == {live.CLEARED}
+        finally:
+            context.close()
+
+
+def test_a_browser_that_will_not_start_is_not_reported_as_a_missing_one():
+    """The message that cost two evenings, in both directions.
+
+    A launch failure used to send its real exception to `log.debug` and raise a fixed
+    "no browser to drive… `playwright install chromium`". On a headless host that is
+    almost never true: chromium-1234 was installed and correct both times this fired,
+    once with $DISPLAY pointing at a dead X server and once with a stale SingletonLock
+    in the profile naming a container that had been recreated. It happens on `serve`'s
+    daemon thread, where the exception is the only thing a human ever sees, so the
+    reason has to travel in it.
+    """
+    from pathlib import Path
+
+    could_not_start = browser._why_no_browser(
+        [Exception("Target page, context or browser has been closed\nBrowser logs: …")],
+        Path("/data/browser"),
+    )
+    assert "would not start" in could_not_start
+    assert "Target page, context or browser has been closed" in could_not_start
+    # It must not send the reader off to reinstall a browser that is already there.
+    assert "playwright install" not in could_not_start
+    # And it names where to look, which is the whole point of the change.
+    assert "SingletonLock" in could_not_start and "/data/browser" in could_not_start
+    # One line of the launcher's output, not the whole log dump.
+    assert "Browser logs" not in could_not_start
+
+
+def test_a_genuinely_missing_browser_still_says_how_to_install_one():
+    """The other half: the old message was right about *this* case and stays."""
+    from pathlib import Path
+
+    missing = browser._why_no_browser(
+        [Exception("Executable doesn't exist at /ms-playwright/chromium-1234/chrome")],
+        Path("/data/browser"),
+    )
+    assert "playwright install" in missing
+    assert "would not start" not in missing
+
+
+def test_the_launch_failure_never_comes_back_empty_handed():
+    """No attempts recorded is still a sentence, not a bare colon. Belt and braces: the
+    loop always appends before raising, but a message that degrades into punctuation is
+    how a reason-carrying error quietly becomes a reason-free one again."""
+    from pathlib import Path
+
+    assert browser._why_no_browser([], Path("/data/browser")).strip()
+
+
+def test_the_first_refusal_on_the_page_arrives_with_its_menu_attached():
+    """The refusal that matters most is the one already there when you open `/apply`.
+
+    `_obey` publishes what a refused `_pick` saw, but the *initial* fill runs before
+    `live.start` exists, so its refusals had nowhere to put the reading and the row
+    opened saying "would not take it" with an empty dropdown — for a menu the fill had
+    just finished reading. Measured against Vercel's live Greenhouse form: Location
+    (City) came back `refused` with `offered: []`.
+
+    Asserted on the source because reaching it otherwise means driving a real browser
+    through `fill_application`: the fill must hand `_write` somewhere to record what it
+    saw, and must publish it *after* `absorb`, since `rows_from` builds rows carrying no
+    offer and would overwrite an earlier one.
+    """
+    src = inspect.getsource(browser.fill_application)
+    assert "offers[raw[\"handle\"]] = (value, seen)" in src
+    absorb = src.index("session.absorb(")
+    publish = src.index("session.offer(")
+    assert absorb < publish, "publishing before absorb is overwritten by rows_from"

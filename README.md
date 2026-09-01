@@ -66,7 +66,6 @@ python -m jobtracker.cli serve           # live tuning UI on http://127.0.0.1:87
 # the model tasks — see docs/tasks.md
 python -m jobtracker.cli work --dry-run               # what it would work on, and why
 python -m jobtracker.cli work --llm-url http://HOST:PORT
-python -m jobtracker.cli work --task prefill --budget 20
 
 # ranking — see docs/ranking.md
 python -m jobtracker.cli rank --llm-url http://HOST:PORT
@@ -85,10 +84,12 @@ python -m jobtracker.cli mail                         # narrow the mailbox, no m
 python -m jobtracker.cli work --task inbox            # read the candidates
 python -m jobtracker.cli mail --list                  # proposals awaiting your ruling
 
-# prefilled applications — see docs/prefill.md
+# prefilled applications — see docs/prefill.md.  No model anywhere in here.
 cp answers.example.yaml answers.yaml                  # gitignored; holds your details
-python -m jobtracker.cli prepare                      # make tomorrow's picks ready
+python -m jobtracker.cli prefill                      # plan every match worth applying to
+python -m jobtracker.cli prepare                      # the same, for tomorrow's picks only
 python -m jobtracker.cli apply-to Cloudflare 7695702  # opens a browser, fills, stops
+python -m jobtracker.cli forget-learned               # un-learn what a past model guessed
 ```
 
 **The nightly sequence is `check` → `work` → `prepare` → `dashboard`,** and only `check`
@@ -96,9 +97,15 @@ touches an ATS. It caches a description for every match/uncertain posting, which
 lets the rest read `state.db` and talk to nothing but the local inference router.
 
 `work` picks the task itself, in the pipeline's own dependency order — settle uncertain
-postings, judge the matches that produces, prefill the best of those. Run it more than
-once to drain more than one stage. `prepare` then makes sure tomorrow's three picks each
-have a prefill plan, and exits 2 if one does not.
+postings, then judge the matches that produces. Run it more than once to drain more than
+one stage. `prepare` then rescores, works out what goes in each of tomorrow's three
+application forms, and exits 2 if a pick has no plan at all.
+
+**`prepare` needs no model.** Prefill reads a form and your `answers.yaml` and nothing
+else; it was a `work` task until 2026-08-25, which meant a night with the router down
+built no plans and reported every pick as blank — the failure `prepare` exists to catch,
+caused by `prepare`. What the model used to do there, and why removing it took a
+`forget-learned` sweep as well as a deletion, is DESIGN.md §8.1.
 
 `check` writes the report to **stdout**; progress goes to **stderr**, so `check > report.md`
 stays clean. `--output report.md` writes the file directly.

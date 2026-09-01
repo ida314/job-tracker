@@ -7,7 +7,6 @@ Priority is the pipeline's dependency chain, not a preference:
 
     level   10   settle UNCERTAIN postings   -> produces matches
     judge   20   judge matches vs. profile   -> produces scores
-    prefill 30   prefill the best matches    -> consumes scores
 
 so "work the next available task" and "keep every stage drained" are one instruction.
 
@@ -16,6 +15,13 @@ so "work the next available task" and "keep every stage drained" are one instruc
 `inbox` is the exception, and it says so: it is not in that chain at all. It goes last
 because its queue refills from an external stream on its own schedule, so anywhere
 earlier a busy mailbox would starve the pipeline's own stages.
+
+**`prefill` used to sit at 30, and left on 2026-08-25.** It stopped asking a model
+anything — it resolves a form against answers you typed and nothing else — and this
+package is for work that needs one. Keeping it here would have gated plan-building
+behind `cmd_work`'s router check, so a night with `sir` down would silently build no
+plans at all: the same reason scoring has never been a task. It is `jobtracker prefill`
+now, and `prepare` calls it directly. See `jobtracker/prefill.py`.
 """
 
 from .base import (  # noqa: F401
@@ -30,7 +36,6 @@ from .base import (  # noqa: F401
 )
 from . import level  # noqa: F401  (side effect: register())
 from . import judge  # noqa: F401  (side effect: register())
-from . import prefill  # noqa: F401  (side effect: register())
 from . import inbox  # noqa: F401  (side effect: register())
 from .runner import (  # noqa: F401
     DEFAULT_CONCURRENCY,

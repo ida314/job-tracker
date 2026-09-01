@@ -20,7 +20,7 @@ import os
 # version that never moves cannot answer "is this the build with the new thing in it".
 #
 # 0.3.0 (2026-08-16) — the mailbox became a source of proposals (`mail` + the `inbox`
-# task, the fifth bounded model role), a posting can carry its own resume and be
+# task, the last bounded model role), a posting can carry its own resume and be
 # re-planned from the page, the postings tables group by company, Today opens past its
 # three, and the answer gaps sort by how many employers ask. Three new tables.
 #
