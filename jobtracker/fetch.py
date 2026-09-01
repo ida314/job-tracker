@@ -78,6 +78,12 @@ TIMEOUT = 20
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.5
 RETRY_STATUS = {429, 500, 502, 503, 504}
+# A host that answers 429 usually says how long to wait, in a standard header. Honouring
+# it is strictly better than our own backoff — Discord's buckets routinely ask for longer
+# than 1.5s/3.0s, so the existing ladder burns all three attempts and reports FETCH_FAILED
+# for a request that would have succeeded. Capped, because a hostile or buggy header must
+# not be able to hang a nightly batch job.
+MAX_RETRY_AFTER = 30.0
 USER_AGENT = "jobtracker/0.1 (+https://github.com/; backend-newgrad-tracker)"
 # Ceiling on requests for one paged board. Workday caps a page at 20 rows, so Nvidia's
 # ~2,000 reqs is ~100 requests. Measured 2026-08-31: the `cxs` endpoint answers in ~2.4s,
@@ -150,9 +156,15 @@ class Fetcher:
             self._retries += 1
 
     # -- single request with backoff -------------------------------------------------
-    def _request_json(self, url: str, method: str = "GET", body: dict | None = None):
+    def _request_json(
+        self,
+        url: str,
+        method: str = "GET",
+        body: dict | None = None,
+        headers: dict | None = None,
+    ):
         """Return (status_code, parsed_json, error). Retries transient failures."""
-        return self._request(url, method, want="json", body=body)
+        return self._request(url, method, want="json", body=body, headers=headers)
 
     def _request_text(self, url: str, method: str = "GET"):
         """Return (status_code, body_text, error). For non-JSON feeds (aggregator READMEs).
@@ -164,7 +176,12 @@ class Fetcher:
         return self._request(url, method, want="text")
 
     def _request(
-        self, url: str, method: str = "GET", want: str = "json", body: dict | None = None
+        self,
+        url: str,
+        method: str = "GET",
+        want: str = "json",
+        body: dict | None = None,
+        headers: dict | None = None,
     ):
         last_error = "unknown error"
         status: int | None = None
@@ -190,15 +207,22 @@ class Fetcher:
                     rate_limited_seconds.add(paced, {"server.address": host})
                 log.debug("%s %s (attempt %d/%d)", method, url, attempt + 1, self._max_retries)
                 try:
+                    # Per-request, never on the session. A session header would carry a
+                    # plugin's bearer token to every board in companies.yaml. `requests`
+                    # merges these over the session's, which is also how a caller
+                    # overrides User-Agent for a host that mandates its own shape.
                     resp = self._session.request(
-                        method, url, timeout=self._timeout, json=body
+                        method, url, timeout=self._timeout, json=body, headers=headers
                     )
                     status = resp.status_code
                     span.set_attribute("http.response.status_code", status)
                     if status in RETRY_STATUS:
                         last_error = f"HTTP {status}"
                         span.add_event("retry", {"attempt": attempt + 1, "reason": last_error})
-                        self._retry_after(attempt, url, last_error)
+                        self._retry_after(
+                            attempt, url, last_error,
+                            self._parse_retry_after(resp.headers.get("Retry-After")),
+                        )
                         continue
                     if status != 200:
                         return self._fail(span, status, f"HTTP {status}", attempt)
@@ -232,9 +256,26 @@ class Fetcher:
         span.set_status(trace.Status(trace.StatusCode.ERROR, error))
         return status, None, error
 
-    def _retry_after(self, attempt: int, url: str, reason: str) -> None:
+    @staticmethod
+    def _parse_retry_after(raw: object) -> float | None:
+        """Seconds from a `Retry-After` header, or None if it does not say a number.
+
+        RFC 9110 also allows an HTTP-date there. We ignore that form deliberately rather
+        than parsing it: it is rare, it needs a clock comparison, and falling back to the
+        existing backoff is a correct answer. Read from the *header* rather than a JSON
+        body so this stays `want`-agnostic and works for a text fetch too.
+        """
+        try:
+            seconds = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds > 0 else None
+
+    def _retry_after(
+        self, attempt: int, url: str, reason: str, retry_after: float | None = None
+    ) -> None:
         """Log and sleep between attempts. Silent retries hide creeping breakage."""
-        backoff = BACKOFF_BASE * (2**attempt)
+        backoff = min(retry_after, MAX_RETRY_AFTER) if retry_after else BACKOFF_BASE * (2**attempt)
         if attempt + 1 < self._max_retries:
             self._count_retry()
             # Low-cardinality attributes only: host, not url. A per-URL counter would mint
@@ -272,6 +313,33 @@ class Fetcher:
                 span.set_status(trace.Status(trace.StatusCode.ERROR, error))
                 return None, error
             return text, None
+
+    def fetch_json(
+        self, url: str, headers: dict | None = None
+    ) -> tuple[int | None, object | None, str | None]:
+        """One paced JSON GET with caller-supplied headers, as `(status, payload, error)`.
+
+        The entry point for an import plugin, so nothing outside this module has to reach
+        into a `_`-prefixed method to talk to a feed. Everything is inherited: the
+        per-host governor, the retry policy, `Retry-After`, and the trace shape.
+
+        It returns the **status** as well, unlike `fetch_page`. For a credentialed feed
+        the code is the finding: 401 is a bad token, 403 is a permission the bot was not
+        granted, 429 is pacing. Collapsing those into one error string would hide the
+        only thing that tells you which of them to go and fix.
+
+        `headers` may carry a credential, so note what is safe about that: `_request`
+        records `url.full` as a span attribute and logs the URL on every retry, but never
+        headers. **A token must therefore never move into a query parameter**, or it
+        lands in traces and logs the same day.
+        """
+        with tracer.start_as_current_span("fetch.feed") as span:
+            span.set_attribute("url.full", url)
+            span.set_attribute("server.address", urlparse(url).netloc)
+            status, payload, error = self._request_json(url, headers=headers)
+            if error:
+                span.set_status(trace.Status(trace.StatusCode.ERROR, error))
+            return status, payload, error
 
     # -- one company -----------------------------------------------------------------
     def fetch_job_detail(self, company: Company, ats_job_id: str):
