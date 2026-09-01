@@ -33,6 +33,7 @@ import yaml
 
 from .models import Company
 from .sources import api_sources
+from .sources.workday import Workday
 
 log = logging.getLogger("jobtracker.curation")
 
@@ -57,7 +58,16 @@ FIELD_ORDER = (
 # NOT enforce this — it has to keep loading whatever is already on disk — but a *new*
 # entry naming something else is a typo, and typos here fail silently.
 ATS_VALUES = frozenset(
-    {"greenhouse", "lever", "ashby", "aggregator", "workday", "gem", "bespoke", "unknown"}
+    {
+        "greenhouse",
+        "lever",
+        "ashby",
+        "aggregator",
+        "workday",
+        "gem",
+        "bespoke",
+        "unknown",
+    }
 )
 CHECK_METHODS = frozenset({"api", "manual", "aggregator"})
 TIER_RANGE = range(1, 8)
@@ -124,17 +134,28 @@ def validate_new(company: Company, existing: Sequence[Company]) -> list[str]:
                 "board is never checked"
             )
 
-    # Only for `api`. On a `manual` entry `slug` is documentation, not an identifier —
-    # Red Hat carries "redhat / wd5 / jobs" and Nvidia "nvidia / wd5 /
-    # NVIDIAExternalCareerSite", which are Workday tenant triples a human reads. Applying
-    # the shape rule to those would make this stricter than the file it validates.
-    if company.check_method == "api" and company.slug and any(
-        c in company.slug for c in " \t/:"
-    ):
-        errors.append(
-            "a slug is the board identifier only, not a URL — "
-            '"greenhouse/stripe" should be ats: greenhouse, slug: stripe'
-        )
+    # Only for `api`. On a `manual` entry `slug` is documentation, not an identifier, so
+    # the shape rule would be stricter than the file it validates.
+    #
+    # Workday is exempt from the no-slash half and gets its own rule instead: no single
+    # string identifies a Workday board, because the data centre (`wd1`, `wd5`, `wd12`)
+    # is part of the hostname and is not derivable from the tenant name. Its slug is the
+    # triple `tenant/dc/site`. Checking the triple's shape is the useful check here —
+    # a two-part slug builds a URL that 404s, which presents as a dead board.
+    if company.check_method == "api" and company.slug:
+        if company.ats == "workday":
+            # The adapter's own parser, so the validator and the fetcher can never
+            # disagree about what a valid triple is.
+            if Workday.parse_slug(company.slug) is None:
+                errors.append(
+                    "a workday slug is the tenant triple tenant/dc/site — "
+                    '"redhat/wd5/jobs", not a bare name or a URL'
+                )
+        elif any(c in company.slug for c in " \t/:"):
+            errors.append(
+                "a slug is the board identifier only, not a URL — "
+                '"greenhouse/stripe" should be ats: greenhouse, slug: stripe'
+            )
 
     if company.slug and company.ats:
         for other in existing:
@@ -314,7 +335,12 @@ def edit_entry(text: str, name: str, fields: dict) -> str:
             (j for j in range(start, end) if lines[j].startswith(f"  {key}:")), None
         )
         if at is None:
-            lines.insert(start + 1, rendered)
+            # A key this entry does not carry yet goes in schema order, not at the top.
+            # CLAUDE.md's field schema says the parser and every awk/grep sweep in this
+            # repo depends on that order, so inserting after `- name:` — which is where
+            # this landed until 2026-08-31 — would put `slug` before `ats` and, on an
+            # entry with no notes, `notes` before both.
+            lines.insert(_field_insert_point(lines, start, end, key), rendered)
             end += 1
             continue
         # A scalar can still be folded across continuation lines; replacing only the
@@ -326,6 +352,24 @@ def edit_entry(text: str, name: str, fields: dict) -> str:
         end -= stop - at - 1
 
     return "".join(lines)
+
+
+def _field_insert_point(lines: list[str], start: int, end: int, key: str) -> int:
+    """Where a not-yet-present `key` belongs inside one entry, per FIELD_ORDER.
+
+    Before the first field that sorts after it; failing that, at the end of the entry. A
+    key absent from FIELD_ORDER sorts last, which keeps this total — an unknown field is
+    a typo the validator catches, not a reason for the writer to raise.
+    """
+    rank = {k: i for i, k in enumerate(FIELD_ORDER)}
+    mine = rank.get(key, len(FIELD_ORDER))
+    for j in range(start + 1, end):
+        if not lines[j].startswith("  ") or lines[j].startswith("    "):
+            continue
+        other = lines[j][2:].split(":", 1)[0]
+        if rank.get(other, len(FIELD_ORDER)) > mine:
+            return j
+    return end
 
 
 def _entry_end(lines: list[str], start: int) -> int:
