@@ -38,7 +38,7 @@ field order below; the parser and every `awk`/`grep` sweep in this repo depends 
 | Field | Meaning |
 |---|---|
 | `ats` | `greenhouse`, `lever`, `ashby`, `workday`, `gem`, `bespoke`, `aggregator`, or `unknown` (Snowflake — portal type never confirmed) |
-| `slug` | The board identifier within that ATS. Empty for `bespoke`/`workday`. |
+| `slug` | The board identifier within that ATS. A Workday slug is the *triple* `tenant/dc/site` (`redhat/wd5/jobs`), because the data centre is part of the hostname and is not derivable from the tenant name. Empty for `bespoke`. |
 | `board_url` | Full JSON API URL for `api`; the raw README URL for `aggregator`. Loaded into `Company.board_url`. Empty for `manual`. |
 | `careers_page` | Human-facing careers URL. The fallback when the API breaks. |
 | `category` | Free-text bucket, e.g. `data-infra`, `fintech-backend`. |
@@ -54,7 +54,12 @@ API URL shapes:
 greenhouse  https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true
 lever       https://api.lever.co/v0/postings/{slug}?mode=json
 ashby       https://api.ashbyhq.com/posting-api/job-board/{slug}
+workday     POST https://{tenant}.{dc}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs
+                 {"appliedFacets":{},"limit":20,"offset":N,"searchText":""}
 ```
+
+Workday is **paged** — the first source here whose board does not arrive in one call. See
+"Paged boards" below; its page cap is a trap, and so is its idea of an end of results.
 
 ---
 
@@ -97,12 +102,51 @@ the `ApiJobBoardWithTeams` GraphQL operation.
 ## Rule: `manual` companies are never scraped
 
 If `check_method: manual`, do not fetch, scrape, or attempt to reverse-engineer a portal.
-These companies (Workday, bespoke portals, Gem, IBM Careers) have no keyless public JSON
-board. The agent adds them to a "check these by hand" list in the daily report, at most
-once per week per company, rate-limited via `last_checked`.
+These companies (bespoke portals, Gem, Comeet, Avature, IBM Careers) have no keyless
+public JSON board. The agent adds them to a "check these by hand" list in the daily
+report, at most once per week per company, rate-limited via `last_checked`.
 
 The point is honesty about coverage: surfacing a company for manual review is correct,
 pretending to have checked it is not. Never let a `manual` entry silently report zero.
+
+**The rule is unchanged; its premise was audited on 2026-08-31 and was wrong for six
+entries.** `manual` asserts that a company *has no keyless JSON board*. That is a claim
+about the world, and for Workday it was never true — it had simply never been checked.
+Its `cxs` endpoint is keyless, unauthenticated, returns clean JSON, and is identical in
+shape across every tenant. Red Hat, Nvidia, Capital One, Workday and Target Tech are `api`
+now, behind an adapter like any other board.
+
+Amazon is the instructive counter-example, and the reason "has a JSON board" is not the
+whole question. `amazon.jobs/en/search.json` **is** keyless and ships descriptions inline —
+and the board still cannot be read: offset paging is hard-capped, page 101 answers
+*"Cannot return more than 10000 results at once"*, and a run takes ~9 minutes before
+failing. An adapter was written, measured, and removed the same day. It stays `manual`
+because a board that ends `FETCH_FAILED` every night is not coverage, and narrowing it with
+`base_query` would be a role gate applied before any title is read.
+
+So the standing instruction is narrower than it looks, and worth stating precisely:
+
+- **Never scrape a company whose portal has no public JSON board.** Still absolute. It is
+  what protects Coralogix (Comeet mints its token in the page), Epic (Avature is behind a
+  login), YC Work at a Startup (login), and every entry in the "no marker" list below.
+- **But `manual` is a finding, not a category.** It records that nobody found an endpoint,
+  and the correct response to "is there one?" is to go and look — at the network the page
+  itself makes, not at its DOM. Finding one is a reclassification, not a rule change.
+- **A found endpoint is verified before it is written.** Same rule as slugs: `target/wd5/
+  targetcareers` was fetched and returned 2,000 reqs before it went in the file. A guessed
+  triple that 404s is indistinguishable from a dead board.
+
+Recon notes for the 29 that remain, so nobody repeats the sweep:
+
+| Company | Finding (2026-08-31) |
+|---|---|
+| Snowflake | Phenom People. `/api/apply/v2/jobs` returns structured JSON (`"Tenant not identified"`) — right endpoint family, tenant param not yet found. `ats: unknown` is now known to be wrong. |
+| Retool | Gem. `api.gem.com/v0/job-board/retool` answers **403 JSON**, not 404 — the endpoint is real and header- or key-gated. |
+| Epic Systems | Avature (`epic.avature.net/Careers/Login`). Login-walled. |
+| Coralogix | Comeet, rendered client-side; the uid+token pair is not in the static HTML, confirming the existing note. |
+| SAP | SuccessFactors, and `jobs.sap.com/search/` is **server-rendered HTML** — no JS needed, parseable as text if it is ever worth doing. |
+| JPMorgan, Fidelity, Walmart, Intuit | `ats: workday` is unconfirmed for all four; none names a tenant in its static HTML. `intuit.wd1` answers **401** where a wrong tenant answers 422, so Intuit's tenant exists and only the site name is unknown. |
+| Rippling, HashiCorp, lakeFS, Two Sigma, Jane Street, Goldman, Bloomberg, Google, Meta, Microsoft, LinkedIn, Uber, tier-6 labs | No ATS marker in static HTML. Several are likely endpoint-behind-a-shell rather than genuinely browser-locked; none has been run down. |
 
 ---
 
@@ -113,13 +157,19 @@ confirmed against the company name. Current composition of the 100 entries:
 
 | | Count | Status |
 |---|---|---|
-| `api` | 63 | All return valid JSON. 47 Greenhouse, 14 Ashby, 2 Lever. |
-| `manual` | 35 | Never scraped, by rule. Flagged weekly. |
+| `api` | 68 | All return valid JSON. 47 Greenhouse, 14 Ashby, 5 Workday, 2 Lever. |
+| `manual` | 29 | Never scraped, by rule. Flagged weekly. |
 | `aggregator` | 2 | GitHub new-grad lists, diffed daily. |
 
-**Red Hat added 2026-08-13** at tier 2, `manual`. Workday tenant `redhat.wd5` / site `jobs`,
-read off `redhat.com/en/jobs`; `greenhouse|lever|ashby/redhat` all 404, so there is no keyless
-JSON board and it may not be promoted to `api`. It is IBM-owned but, unlike HashiCorp, has not
+**Five entries promoted from `manual` to `api` on 2026-08-31** — Red Hat, Nvidia, Capital
+One, Workday and Target Tech, onto the new Workday adapter. See the audit under "Rule:
+`manual` companies are never scraped" for why that is a reclassification and not a change
+of rule, and "Paged boards" for the traps.
+
+**Red Hat added 2026-08-13** at tier 2, `manual`; **`api` since 2026-08-31**. The original
+note said `greenhouse|lever|ashby/redhat` all 404 "so there is no keyless JSON board" — that
+ruled out three ATSes and mistook the result for a fact about the company. Its Workday board
+answers `redhat/wd5/jobs` with 122 reqs. It is IBM-owned but, unlike HashiCorp, has not
 migrated to IBM Careers. Filed at tier 2 on the growth axis, not product category — RHEL,
 OpenShift, Ansible and Ceph mean backend *is* the engineering — with the caveat that much of
 that engineering is in Brno and Pune and the US footprint is Raleigh and Boston, no NYC.
@@ -774,15 +824,16 @@ the ATSes: they read `state.db` and talk to nothing but the local model.
 
 ## Posted dates
 
-`postings.posted_at` is the vendor's raw value and is **three mutually incomparable
+`postings.posted_at` is the vendor's raw value and is **five mutually incomparable
 formats** — Greenhouse ISO-with-offset, Ashby ISO-UTC-with-millis, Lever epoch-millis as
-a string, aggregator a relative age like `2d`. As text an epoch string collates before
-every ISO timestamp, so `ORDER BY posted_at` is silently wrong. Nothing may sort on it.
+a string, aggregator a relative age like `2d`, Workday relative English prose (`Posted 2
+Days Ago`). As text an epoch string collates before every ISO timestamp, so
+`ORDER BY posted_at` is silently wrong. Nothing may sort on it.
 
 `postings.posted_on` is that value normalized to a plain ISO day, and is the only date
 anything is allowed to compare. Conversion lives in the adapter behind
 `Source.normalize_posted_at(raw, today)`; `today` is a parameter, not a clock read,
-because adapters are pure and one source dates relatively.
+because adapters are pure and **three** sources now date relatively.
 
 - **Greenhouse's bulk field is `updated_at`, which is not a posted date.** It moves
   whenever anyone edits the req. Observed: a Stripe posting first published 2023-11-01
@@ -1307,6 +1358,90 @@ the button and the terminal end up disagreeing about the file they both own.
 - **Both buttons are rendered server-side**, `co-force` merely `hidden` until the script
   reveals it. The parity test reads button classes off the markup, so a button the JS mints
   is one nothing checks has a handler — the same mechanism `.tabs` and `.cotoggle` use.
+
+## Paged boards
+
+`jobtracker/sources/workday.py`, added 2026-08-31. The first source whose board does not
+arrive in one call, which is why `Source` grew `page_size`, `jobs_page_url`, `jobs_body`
+and `jobs_page_error`, and why `fetch.py` grew `_fetch_paged` and a request body.
+Everything else about it is an ordinary adapter: pure, registered by an import line.
+
+The hooks are on the base class rather than inside the adapter because a second paged
+vendor was built the same day (Amazon — see the manual-rule audit for why it was dropped)
+and hit the *same* traps independently. That is what says these are properties of paged
+boards, not of Workday.
+
+**Every trap below returns something that looks like an empty board.** None of them
+errors, none of them 404s, and `sync_postings` would read each one as "every posting
+closed". Each has a test named after it.
+
+- **A page over the vendor's cap is not an empty page.** Workday caps at 20 rows: `limit:
+  50` returns HTTP 200, valid JSON, and **no `jobPostings` key at all** — not a clamp, not
+  an error, a different shape. (Amazon does the same at its own cap of 100, answering
+  `result_limit=200` with `"jobs": null`.) Both parse to zero rows under the obvious
+  `.get(..., [])`, which is what `jobs_page_error` exists to refuse. **Zero rows on a
+  well-formed page is still allowed through** — a genuinely empty board is a different fact and belongs to
+  `health.py`.
+- **`total` is only populated on page one.** Workday reports `total: 0` on every request
+  carrying a non-zero offset. A paging loop bounded by `total` stops after one page and
+  keeps 20 of 2,000 reqs, silently. Do not "simplify" the loop back to a total.
+- **An offset past the end wraps to the beginning.** The other half of the same trap, and
+  the reason a short-page rule is not sufficient on its own. Measured against Nvidia
+  2026-08-31: `offset` 2000, 3000, 4000 and 5000 all return the *same first row* as
+  `offset=0`, twenty rows each, with `total` helpfully repopulated to 2000. There is no
+  short page and no error, ever — so the first run of this adapter collected **4,000
+  postings for a board of 2,000**, the second half being the first half again, and
+  stopped only when it hit the page cap ~100 requests later. `_fetch_paged` therefore has
+  **two** stopping rules: a short page, and *a page that adds no posting id we do not
+  already hold*. The second is the one that terminates Nvidia. Ids are the check because
+  they are what identifies a posting; a page that adds none has told us nothing, whatever
+  its `total` claims. There is a test named after this.
+- **`postedOn` is relative prose.** `"Posted Today"`, `"Posted 2 Days Ago"`, `"Posted 30+
+  Days Ago"` — resolved against `today`, which is why `normalize_posted_at` takes it as a
+  parameter. `"30+"` is floored at exactly 30: it is a bound rather than a date, and 30 is
+  its honest edge. Verified 2026-08-31: the detail payload's `startDate` is the day the prose counts from —
+  a posting reading "Posted 2 Days Ago" carries `2026-08-29` — so the description fetch
+  upgrades an approximation to the real date at no extra request, exactly as Greenhouse's
+  `first_published` does.
+- **Workday can never claim identity.** Nothing in either payload names the employer. The
+  only company-ish string available is the tenant inside `externalUrl`, which restates the
+  slug we asked for — the Ashby/Lever tautology that `ashby/cedar` sails straight through.
+  `identity_from_jobs` returns `None` on purpose, `expected_board_name` stays null, and a
+  Workday board is only ever evidenced as reachable. Do not "fix" this by reading the URL
+  back.
+
+Four more things that are not traps but will surprise you:
+
+- **A Workday slug is a triple**, `tenant/dc/site`. No single string identifies the board:
+  the data centre (`wd1`, `wd5`, `wd12`) is part of the hostname and has no relationship to
+  the tenant name — Capital One is `wd12` while everything else tracked is `wd5`.
+  `curation.validate_new` checks the triple's shape via the adapter's own `parse_slug`, so
+  the validator and the fetcher cannot disagree. A wrong tenant answers **422**; a right
+  tenant with a wrong site answers **401**, which is how Intuit's tenant was confirmed to
+  exist while its site name is still unknown.
+- **`parse_jobs` cannot build a Workday URL.** The row carries a site-relative
+  `externalPath` and the payload names no host, so the URL can only come from the slug —
+  which `parse_jobs` is not given. `Source.posting_url` fills it in from `fetch_company`,
+  guarded on emptiness so it is a no-op for every adapter that already has one.
+- **`externalPath` does not follow a rename, and the report will look wrong because of
+  it.** Red Hat carries a req titled *"Account Solution Architect - FSI"* whose path is
+  `/job/Tokyo/Senior-Account-Solution-Architect---FSI_R-051257-2`, and two distinct reqs
+  both titled *"AI Driven Development Consultant"* sitting at `Agile-Development-Coach`
+  and `Agile-Development-Lead`. The path is minted from the title the req had when it was
+  created and is then frozen; `title` is current. Both were checked against the raw API
+  on 2026-08-31 — this is Workday's data, not a mis-paired parse. It is also exactly why
+  the path is the right `ats_job_id`: it is stable across the renames that would otherwise
+  churn a posting as closed-and-new.
+- **`appliedFacets` stays empty.** Workday will filter server-side, and doing so would be
+  a role or location gate applied *before* any title is read — the mistake recorded against
+  `locations_exclude`, which discarded 390 postings in 2026-07 without their titles ever
+  being seen. Everything is fetched; `match.py` decides.
+- **The cost is latency, and it is real.** Measured 2026-08-31: the `cxs` endpoint answers
+  in ~2.4s and 20 rows at a time, so a 2,000-req board is ~100 requests and ~4 minutes.
+  Five boards across four workers pulled 5,323 postings in **564s wall with 0.0s slept in
+  the per-host limiter** — none of it is our pacing, and none of it will tune away. A
+  nightly run that was ~29s is now several minutes. Affordable for a 01:00 batch job, and
+  worth knowing before someone goes looking for a regression.
 
 ## Aggregator sources
 
