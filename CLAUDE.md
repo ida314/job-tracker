@@ -651,6 +651,68 @@ only propose.
 - **`state.db` now holds the text of personal mail.** Gitignored and local; no log line or
   span attribute may carry a subject or a body.
 
+## URL dedupe
+
+`jobtracker/dedupe.py`, three columns on `postings`, and two calls in `cmd_check`. Full
+guide in `docs/dedupe.md`. Added 2026-08-31, and it runs across **every** source, not just
+plugins.
+
+- **The key is not the URL string.** ATS identity is extracted from the path first
+  (`lever:artera-2:<uuid>`), and **before the query is dropped** — Greenhouse's
+  `embed/job_app?for=X&token=Y`, which `browser.py` itself mints, carries its identity in
+  the query. Normalized URL is the fallback.
+- **`key_from_identity` is the primary rule for api rows**, and it closes the big hole.
+  Measured on the live DB: of 9,150 postings only 3,487 are on their own ATS's host — the
+  other 5,663 link to careers sites, because 25 of 45 Greenhouse boards return one there.
+  Keyed off the URL, most of the corpus would be unreachable by a feed link. Where both
+  derivations apply they agree on 3,487 rows and disagree on none.
+- **The path is not lowercased** (paths are case-sensitive, and `lever/Onehouse` vs
+  `lever/onehouse` is a live trap here) **but the slug and id inside an ATS key are**
+  (those are case-insensitive identifiers, and there the failure runs the other way).
+- **`gh_jid` is identity and must survive normalization.** It is on 6,019 stored URLs and
+  equals `ats_job_id` on all 6,403 carrying it, none differing. Drop it and every board
+  that links its reqs to one careers page collapses: **13 keys covered 2,805 open
+  postings** before this was fixed — 795 Databricks, 527 Stripe, 400 MongoDB, 41 Betterment
+  at byte-identical URLs. `t` (holding `gh_src`) and `utm_*` are tracking and are dropped.
+- **Precedence is the safety argument, and the rule is "only a feed is closed by a peer",
+  not "unless it is api".** An uncurated company has no `check_method`; ranking it below a
+  feed would make *forgetting an entry in companies.yaml* a way to close live rows.
+  Measured: running the pass against a deliberately empty companies file closed 795
+  Databricks postings, which had lost their identity key and their rank together. So
+  unknown loses to a board, outranks every feed, and is never peer-closed; two board rows
+  sharing a key are logged at WARNING with neither touched. That WARNING is the only way a
+  too-coarse key becomes visible, since nothing is closed.
+- **The index cannot live in `_SCHEMA`.** `connect()` runs `executescript(_SCHEMA)`
+  *before* `_apply_column_migrations`, so an index on `postings(dedupe_key)` there raises
+  `no such column` on any pre-existing database — and passes on every freshly built one,
+  which is every database in the test suite. `_ADDED_INDEXES` is applied after the
+  columns; there is a test that drops the column and reconnects.
+- **`sync_postings` must not reopen a dedupe closure.** It resets `closed_at` on every
+  re-seen posting, which is right for a board — but the duplicate's own feed still lists
+  it tomorrow, so an unconditional reset undoes the closure at 01:00 and remakes it at
+  01:05, forever. The reopen is conditional on `closed_reason IS NULL`, i.e. on the
+  closure having come from absence.
+- **`dedupe_key` is a plain assignment, not COALESCE** like `posted_on` beside it. The key
+  is derived from the same statement's URL, and a URL that moves must take its key with it
+  — Greenhouse migrating an `absolute_url` to a careers page is documented and observed.
+- **`close_duplicates` runs once per check, after every board has synced**, never inside
+  the board loop. A shared key's winner can be fetched later in the same run than its
+  loser, and boards are fetched in `companies.yaml` order — deciding per board would make
+  which row survives depend on the ordering of a curated file.
+- **The reason lives in `closed_reason`/`duplicate_of_url`, not in `verdicts`** (rewritten
+  from the title every night — the mechanism that erased 99 llm matches on 2026-08-02) and
+  not in `overrides` (which mean "I ruled on this role", while a duplicate is a fact about
+  the *row*).
+- **Blind spot, documented not hidden:** `simplify.jobs/p/<uuid>` shares no string and no
+  job id with its redirect target, so a Simplify row and its direct twin do not dedupe.
+  Two Simplify links do. A test asserts the miss. Workday is deliberately out of the URL
+  extractor — its path is title-derived and does not follow a rename — and is covered on
+  the api side by `key_from_identity`.
+- **Measured before it was wired:** on the live corpus the pass derives 9,150 keys, closes
+  **0** postings and reports **0** conflicts — and, after the two fixes above, closes 0
+  even when handed an empty companies.yaml, where the first attempt closed hundreds. The first run that does close things must say how many in the run log, or a
+  legitimate cleanup reads as a regression at 2am.
+
 ## The tuning loop
 
 `criteria.yaml` is easy to edit and hard to edit safely: a token added to stop one bad

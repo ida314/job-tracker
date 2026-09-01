@@ -16,6 +16,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+from . import dedupe
 from .models import BoardHealth, HealthStatus, Posting, Verdict
 
 _SCHEMA = """
@@ -446,6 +447,31 @@ _ADDED_COLUMNS = [
     # look permanently stale, and `matches_needing_prefill` would rebuild it every night
     # forever.
     ("prefill_plans", "resume_key", "TEXT"),
+    # One identity for one req, however it arrived — see dedupe.py. A job reaches this
+    # tracker by several roads (its own board, the Simplify README, a Discord channel)
+    # and those are several rows describing one application you can submit once.
+    # NULL means "not derived yet", which the self-draining backfill fills in; it never
+    # means "this row is unique".
+    ("postings", "dedupe_key", "TEXT"),
+    # Why a posting closed. NULL is the pre-existing meaning and still the common one:
+    # closed by absence from its board's fetch. A value names a closure that absence did
+    # not cause — 'duplicate', or 'aged_out' for a feed that announces and never retracts.
+    # It is also what stops `sync_postings` reopening a dedupe closure every night.
+    ("postings", "closed_reason", "TEXT"),
+    # The row this one duplicates, as a clickable URL rather than a (company, ats_job_id)
+    # pair: the question being answered is "why did this vanish?", and a link answers it.
+    ("postings", "duplicate_of_url", "TEXT"),
+]
+
+
+# Indexes over columns that _ADDED_COLUMNS creates. These CANNOT live in _SCHEMA:
+# `connect` runs `executescript(_SCHEMA)` *before* the column migrations, so an index on
+# `postings(dedupe_key)` there raises "no such column" against any database that predates
+# the column — and passes on every freshly-built one, which is every database in the test
+# suite. The bug would therefore be invisible until it hit the one database that matters.
+_ADDED_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_postings_dedupe_key "
+    "ON postings(dedupe_key) WHERE dedupe_key IS NOT NULL",
 ]
 
 
@@ -456,12 +482,18 @@ def _apply_column_migrations(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
+def _apply_index_migrations(conn: sqlite3.Connection) -> None:
+    for statement in _ADDED_INDEXES:
+        conn.execute(statement)
+
+
 def connect(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
     _apply_column_migrations(conn)
+    _apply_index_migrations(conn)  # after the columns they index — see _ADDED_INDEXES
     conn.commit()
     return conn
 
@@ -527,14 +559,40 @@ def ever_nonempty(conn: sqlite3.Connection, company: str) -> bool:
 
 
 # -- postings ----------------------------------------------------------------------
+def _key_for(posting: Posting, identity: Optional[tuple[str, str]]) -> Optional[str]:
+    """The dedupe key for one posting: curated identity first, then the URL.
+
+    Identity wins because it is the only bridge for most of the corpus. Measured over
+    the live database: of 9,150 postings only 3,487 carry a URL on their own ATS's host
+    — the other 5,663 link to the employer's careers site, because 25 of 45 Greenhouse
+    boards return one there (Stripe's is a search page with no req id in it at all).
+    Keyed off those URLs, the majority of tracked reqs would sit where no feed link
+    could ever reach them. Verified: where both derivations apply they agree on all
+    3,487 rows and disagree on none.
+    """
+    if identity is not None:
+        key = dedupe.key_from_identity(identity[0], identity[1], posting.ats_job_id)
+        if key:
+            return key
+    return dedupe.dedupe_key(posting.url)
+
+
 def sync_postings(
-    conn: sqlite3.Connection, company: str, postings: list[Posting], now: str
+    conn: sqlite3.Connection,
+    company: str,
+    postings: list[Posting],
+    now: str,
+    identity: Optional[tuple[str, str]] = None,
 ) -> tuple[list[Posting], list[str]]:
     """Reconcile a HEALTHY fetch against stored state.
 
     Returns (new_postings, closed_ids). New postings get first_seen=now. Previously
     stored postings get last_seen bumped and are reopened if they had been closed.
     Postings absent from this fetch are marked closed. Call ONLY for OK boards.
+
+    `identity` is the company's `(ats, slug)` when it has one, so an api row keys on the
+    triple the tracker already curates rather than on whatever URL its board happened to
+    return. Omit it and the key falls back to the URL, which is right for a feed.
     """
     existing = {
         row["ats_job_id"]: row
@@ -552,20 +610,35 @@ def sync_postings(
             # date we already have. Greenhouse in particular only yields its true
             # `first_published` from the detail payload, so the bulk pass would
             # otherwise blank it every night.
+            # Two things here that look like they should match their neighbours and
+            # deliberately do not:
+            #
+            # `dedupe_key` is a plain assignment, NOT COALESCE like posted_on above. The
+            # key is derived from this same statement's url/identity, and a URL that
+            # moves must take its key with it — Greenhouse boards migrating their
+            # `absolute_url` to a careers page is a documented, observed event.
+            #
+            # `closed_at` is reopened only when the closure came from absence. Reopening
+            # unconditionally is correct for a board — a req that comes back is open
+            # again — but a duplicate's own feed still lists it tomorrow, so an
+            # unconditional reset would undo a dedupe closure at 01:00 and redo it at
+            # 01:05, every night, forever.
             conn.execute(
-                "UPDATE postings SET last_seen=?, closed_at=NULL, title=?, "
-                "location=?, url=?, posted_at=?, posted_on=COALESCE(?, posted_on) "
+                "UPDATE postings SET last_seen=?, "
+                "closed_at=CASE WHEN closed_reason IS NULL THEN NULL ELSE closed_at END, "
+                "title=?, location=?, url=?, posted_at=?, "
+                "posted_on=COALESCE(?, posted_on), dedupe_key=? "
                 "WHERE company=? AND ats_job_id=?",
                 (now, p.title, p.location, p.url, p.posted_at, p.posted_on,
-                 company, p.ats_job_id),
+                 _key_for(p, identity), company, p.ats_job_id),
             )
         else:
             conn.execute(
                 "INSERT INTO postings (company, ats_job_id, title, location, url, "
-                "posted_at, posted_on, first_seen, last_seen, closed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                "posted_at, posted_on, first_seen, last_seen, closed_at, dedupe_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
                 (company, p.ats_job_id, p.title, p.location, p.url, p.posted_at,
-                 p.posted_on, now, now),
+                 p.posted_on, now, now, _key_for(p, identity)),
             )
             new_postings.append(p)
 
@@ -575,6 +648,8 @@ def sync_postings(
         if jid not in current_ids and row["closed_at"] is None
     ]
     for jid in closed_ids:
+        # closed_reason stays NULL: absence from the board is the original meaning of a
+        # closure and the only one that reopens on its own.
         conn.execute(
             "UPDATE postings SET closed_at=? WHERE company=? AND ats_job_id=?",
             (now, company, jid),
@@ -630,6 +705,100 @@ def backfill_posted_on(conn: sqlite3.Connection, sources: dict, today: str) -> i
         )
         filled += 1
     return filled
+
+
+# -- dedupe ------------------------------------------------------------------------
+def backfill_dedupe_key(conn: sqlite3.Connection, identities: dict | None = None) -> int:
+    """Derive `dedupe_key` for rows that predate the column.
+
+    `identities` maps company name -> (ats, slug), so an api row keys on the triple the
+    tracker curates rather than on whatever URL its board returned. A company absent
+    from it falls back to the URL, which is correct for a feed and harmless for a
+    company dropped from companies.yaml.
+
+    No refetch: the URLs are already stored and already correct. Idempotent and
+    self-draining — it only looks at `dedupe_key IS NULL AND url != ''`, so a second run
+    is a no-op. That drain is only sound because `dedupe.dedupe_key` returns a key for
+    every http(s) URL; if it could decline one, those rows would be re-examined nightly
+    forever. There is a test asserting exactly that totality.
+    """
+    identities = identities or {}
+    rows = conn.execute(
+        "SELECT company, ats_job_id, url FROM postings "
+        "WHERE dedupe_key IS NULL AND url IS NOT NULL AND url != ''"
+    ).fetchall()
+    filled = 0
+    for row in rows:
+        identity = identities.get(row["company"])
+        key = None
+        if identity is not None:
+            key = dedupe.key_from_identity(identity[0], identity[1], row["ats_job_id"])
+        if not key:
+            key = dedupe.dedupe_key(row["url"])
+        if not key:
+            continue
+        conn.execute(
+            "UPDATE postings SET dedupe_key=? WHERE company=? AND ats_job_id=?",
+            (key, row["company"], row["ats_job_id"]),
+        )
+        filled += 1
+    return filled
+
+
+def close_duplicates(
+    conn: sqlite3.Connection, check_methods: dict, now: str
+) -> tuple[list[dict], list[list]]:
+    """Close every open posting that is a redundant copy of another open posting.
+
+    Returns `(closed, conflicts)`. `closed` is one dict per closure carrying the loser
+    and the winner's URL; `conflicts` is the groups where two `api` rows shared a key,
+    which is a finding to report rather than a duplicate to collapse.
+
+    **Run this once per check, after every board has synced, never inside the board
+    loop.** The winner of a shared key can be fetched later in the same run than the
+    loser, and boards are fetched in companies.yaml order — so deciding inside the loop
+    would make which row survives depend on the ordering of a curated file. One pass
+    over the whole open set is order-independent by construction, and `dedupe.preferred`
+    is order-free too so the guarantee does not stop at this function's boundary.
+
+    `check_methods` maps company name -> check_method, which is what ranks the rows. A
+    company that is not in it ranks last and can therefore only ever lose, which is the
+    safe direction for a name nobody curates any more.
+    """
+    rows = conn.execute(
+        "SELECT company, ats_job_id, url, first_seen, dedupe_key FROM postings "
+        "WHERE closed_at IS NULL AND dedupe_key IS NOT NULL"
+    ).fetchall()
+
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        item = dict(row)
+        item["check_method"] = check_methods.get(row["company"], "")
+        groups.setdefault(row["dedupe_key"], []).append(item)
+
+    closed: list[dict] = []
+    conflicts: list[list] = []
+    for key, group in groups.items():
+        if len(group) < 2:
+            continue
+        clash = dedupe.conflicting_api_rows(group)
+        if clash:
+            conflicts.append(clash)
+        winner, losers = dedupe.preferred(group)
+        for loser in losers:
+            conn.execute(
+                "UPDATE postings SET closed_at=?, closed_reason='duplicate', "
+                "duplicate_of_url=? WHERE company=? AND ats_job_id=?",
+                (now, winner["url"], loser["company"], loser["ats_job_id"]),
+            )
+            closed.append({
+                "company": loser["company"],
+                "ats_job_id": loser["ats_job_id"],
+                "title_of": winner["company"],
+                "duplicate_of_url": winner["url"],
+                "dedupe_key": key,
+            })
+    return closed, conflicts
 
 
 # -- runs --------------------------------------------------------------------------

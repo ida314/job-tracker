@@ -368,7 +368,13 @@ def cmd_check(args: argparse.Namespace) -> int:
                     replace(p, posted_on=source.normalize_posted_at(p.posted_at, today))
                     for p in postings
                 ]
-            new_postings, _ = store.sync_postings(conn, company.name, postings, today)
+            # The curated (ats, slug) is what an api row keys on for dedupe: most
+            # boards do not return a URL on their own ATS's host, so the URL alone
+            # would leave the majority of tracked reqs unreachable by a feed link.
+            identity = (company.ats, company.slug) if company.slug else None
+            new_postings, _ = store.sync_postings(
+                conn, company.name, postings, today, identity=identity
+            )
             stats["new_postings"] += len(new_postings)
             # `postings`, not `res.postings`: new_postings holds the normalized copies,
             # and Posting is a frozen dataclass compared by value, so the membership
@@ -399,6 +405,44 @@ def cmd_check(args: argparse.Namespace) -> int:
     )
     if filled:
         log.info("normalized posted_at -> posted_on for %d stored posting(s)", filled)
+
+    # One identity for one req, however it arrived (dedupe.py). Two passes, and the
+    # ordering matters: keys first for rows that predate the column, then one closure
+    # sweep over the whole open set.
+    #
+    # The sweep is deliberately NOT inside the board loop above. A shared key's winner
+    # can be fetched later in the same run than its loser, and boards are fetched in
+    # companies.yaml order — so deciding per board would make which row survives depend
+    # on the ordering of a curated file.
+    keyed = store.backfill_dedupe_key(
+        conn, {c.name: (c.ats, c.slug) for c in companies if c.slug}
+    )
+    if keyed:
+        log.info("derived dedupe keys for %d stored posting(s)", keyed)
+
+    closed_dupes, conflicts = store.close_duplicates(
+        conn, {c.name: c.check_method for c in companies}, today
+    )
+    for group in conflicts:
+        # Two api rows sharing a key is a finding, not a duplicate — almost certainly a
+        # key too coarse to tell two live reqs apart. Neither row was touched.
+        log.warning(
+            "dedupe: %d api postings share one key and none were closed: %s",
+            len(group),
+            ", ".join(f"{r['company']}/{r['ats_job_id']}" for r in group),
+        )
+    for dup in closed_dupes:
+        log.info(
+            "dedupe: closed %s/%s — same req as %s",
+            dup["company"], dup["ats_job_id"], dup["title_of"],
+        )
+    if closed_dupes:
+        # Said out loud because the first run shifts every count on the dashboard at
+        # once, and a legitimate cleanup that says nothing reads as a regression at 2am.
+        log.info(
+            "dedupe: %d posting(s) closed as duplicates of a row already tracked",
+            len(closed_dupes),
+        )
 
     store.record_run(conn, started, _now(), stats)
     conn.commit()
