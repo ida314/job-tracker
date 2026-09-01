@@ -145,7 +145,7 @@ Recon notes for the 29 that remain, so nobody repeats the sweep:
 | Epic Systems | Avature (`epic.avature.net/Careers/Login`). Login-walled. |
 | Coralogix | Comeet, rendered client-side; the uid+token pair is not in the static HTML, confirming the existing note. |
 | SAP | SuccessFactors, and `jobs.sap.com/search/` is **server-rendered HTML** — no JS needed, parseable as text if it is ever worth doing. |
-| JPMorgan, Fidelity, Walmart, Intuit | `ats: workday` is unconfirmed for all four; none names a tenant in its static HTML. `intuit.wd1` answers **401** where a wrong tenant answers 422, so Intuit's tenant exists and only the site name is unknown. |
+| JPMorgan, Fidelity, Walmart, Intuit | `ats: workday` is unconfirmed for all four; none names a tenant in its static HTML. Guesses already tried and refused, so nobody repeats them: `jpmc.wd5/ExternalCareers`, `jpmorgan.wd5/ExternalCareers`, `fidelity.wd5/Fidelity`, `fidelity.wd1/FidelityCareers`, `walmart.wd5/WalmartExternal`, `intuit.wd5/IntuitExternalCareerSite` — all **422**. But `intuit.wd1/IntuitExternalCareerSite` answers **401**, and that difference is the useful signal: a wrong tenant 422s, so Intuit's tenant exists at wd1 and only the site name is unknown. Read the triple off the rendered careers page rather than guessing further — a 401 or 422 is FETCH_FAILED, never "no openings". |
 | Rippling, HashiCorp, lakeFS, Two Sigma, Jane Street, Goldman, Bloomberg, Google, Meta, Microsoft, LinkedIn, Uber, tier-6 labs | No ATS marker in static HTML. Several are likely endpoint-behind-a-shell rather than genuinely browser-locked; none has been run down. |
 
 ---
