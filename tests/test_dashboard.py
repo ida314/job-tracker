@@ -696,3 +696,68 @@ def test_a_dismissed_proposal_leaves_the_banner():
     conn.commit()
     doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
     assert "banner mail" not in doc
+
+
+# -- resume suggestions --------------------------------------------------------------
+def _with_suggestions(conn, company="Acme", jid="1", count=2):
+    import json as _json
+
+    store.record_suggestions(
+        conn, company, jid,
+        _json.dumps([{
+            "section": "experience",
+            "current_line": f"  \\item line {i}",
+            "suggestion": f"  \\item line {i}, tailored",
+            "evidence": "distributed systems",
+        } for i in range(count)]),
+        "hash-1", "2026-07-22",
+    )
+    conn.commit()
+
+
+def test_a_pick_says_how_many_resume_edits_were_proposed():
+    conn = _ranked_pool(4)
+    _with_suggestions(conn, "Acme", "1", count=2)
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    assert "2 suggested edits" in panel
+
+
+def test_the_count_renders_in_the_static_file_too():
+    """Knowing a tailored resume is waiting is useful offline — the same reason the
+    prefill counts render in both modes. Only controls are gated on `interactive`, and
+    this line has none."""
+    conn = _ranked_pool(4)
+    _with_suggestions(conn, "Acme", "1", count=1)
+    companies = [_company("Acme", 1), _company("Zeta", 3)]
+    static = dashboard.build_dashboard(conn, companies, "2026-07-22", interactive=False)
+    assert "1 suggested edit" in _today_panel(static)
+
+
+def test_a_pick_with_no_suggestions_says_nothing_about_them():
+    """`tailor` ships switched off, so a permanent "0 edits" on every card would be noise
+    about a feature nobody enabled."""
+    conn = _ranked_pool(4)
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    assert "suggested edit" not in panel
+
+
+def test_the_suggestion_line_carries_no_button_in_either_mode():
+    """A pick is what has buttons, and its buttons are the three dispositions.
+
+    Accepting a tailored resume compiles a document first — `tailor build --attach` — so a
+    control here would put a model-authored PDF one click from an application with the
+    diff unread, and would widen what `.pick [data-act]` selects.
+    """
+    conn = _ranked_pool(4)
+    _with_suggestions(conn, "Acme", "1", count=2)
+    companies = [_company("Acme", 1), _company("Zeta", 3)]
+    for interactive in (True, False):
+        doc = dashboard.build_dashboard(conn, companies, "2026-07-22",
+                                        interactive=interactive)
+        panel = _today_panel(doc)
+        start = panel.index('<div class="tailor">')
+        block = panel[start:panel.index("</div>", start)]
+        assert "<button" not in block, interactive
+        assert "data-act" not in block, interactive

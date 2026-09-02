@@ -3325,3 +3325,96 @@ def test_changing_an_identity_answer_reaches_identity_not_answers(tmp_path):
     parsed = _yaml.safe_load(answers.read_text())
     assert parsed["identity"]["location"] == "Brooklyn, NY"
     assert "location" not in (parsed.get("answers") or {})
+
+
+# -- resume suggestions --------------------------------------------------------------
+def _with_suggestions(db, edits=None):
+    """A DB holding one proposal for the posting `_live_session` opens."""
+    import json as _json
+
+    conn = store.connect(db)
+    store.record_suggestions(
+        conn, "Acme", "1",
+        _json.dumps(edits if edits is not None else [{
+            "section": "experience",
+            "current_line": r"  \item Built a REST API in Flask",
+            "suggestion": r"  \item Built a REST API serving high-throughput traffic",
+            "evidence": "high-throughput HTTP services",
+        }]),
+        "hash-1", "2026-09-01",
+    )
+    conn.commit()
+    return conn
+
+
+def test_the_apply_page_shows_what_tailor_proposed(tmp_path):
+    """The diff, and the phrase from the posting each edit answers.
+
+    That phrase is a verbatim quote from the job description, which is what lets the page
+    say *why* an edit was proposed instead of asking you to take it on trust.
+    """
+    conn = _with_suggestions(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    assert '<div class="pane tailor">' in page
+    assert "high-throughput HTTP services" in page
+    assert "serving high-throughput traffic" in page
+
+
+def test_the_suggestions_block_carries_no_control(tmp_path):
+    """Accepting is `tailor build --attach`, which compiles the document first.
+
+    A button here would put a model-authored PDF on a real application without anyone
+    having built or read it — and it would break what `.lf` and `[data-act]` mean to the
+    handlers and the parity tests.
+    """
+    conn = _with_suggestions(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    block = page[page.index('<div class="pane tailor">'):]
+    block = block[:block.index("<script>")]
+    assert "<button" not in block
+    assert "data-act" not in block
+    assert "data-handle" not in block
+    assert "data-filterable" not in block
+
+
+def test_a_posting_with_no_suggestions_renders_no_block(tmp_path):
+    """`tailor` ships switched off. An empty block on every page would be noise about a
+    feature nobody enabled."""
+    conn = store.connect(tmp_path / "state.db")
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    # The block, not the words: the stylesheet names the section in a comment and is
+    # emitted on every render, so a text search finds it on a page holding no proposal.
+    assert '<div class="pane tailor">' not in page
+
+
+def test_the_suggestions_block_escapes_what_it_renders(tmp_path):
+    """Every string here reaches the page from a language model.
+
+    `evidence` and `current_line` are quotes, but a quote from a job description is still
+    third-party text — the same reason titles and locations are escaped.
+    """
+    conn = _with_suggestions(tmp_path / "state.db", edits=[{
+        "section": "experience",
+        "current_line": "<script>alert(1)</script>",
+        "suggestion": '"><img src=x onerror=alert(1)>',
+        "evidence": "<b>bold</b>",
+    }])
+    page = server.render_apply(conn, _live_session())
+    conn.close()
+    assert "<script>alert(1)</script>" not in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "onerror=alert(1)>" not in page
+
+
+def test_showing_suggestions_is_still_a_pure_read(tmp_path):
+    """Rendering a proposal must not resolve it. Glancing is not accepting — the same
+    rule the mail banner follows, and `/apply` has a test for the session half already."""
+    conn = _with_suggestions(tmp_path / "state.db")
+    server.render_apply(conn, _live_session())
+    row = store.get_suggestions(conn, "Acme", "1")
+    conn.close()
+    assert row["resolution"] == "pending"
+    assert row["resolved_at"] is None
