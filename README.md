@@ -36,6 +36,7 @@ docs/            reference notes — see the table below
 | [`docs/companies.md`](docs/companies.md) | Adding a target: what is validated, what is verified against the live board, and what is written |
 | [`docs/mail.md`](docs/mail.md) | Reading your job-search mailbox for replies, and proposing what they mean |
 | [`docs/ranking.md`](docs/ranking.md) | Picking the three to apply to tomorrow, and tuning it without a GPU |
+| [`docs/tailor.md`](docs/tailor.md) | Proposing resume edits for one posting, and what stops a model writing your resume |
 | [`docs/observability.md`](docs/observability.md) | Traces, metrics, and the query idioms that are not obvious |
 
 State (`postings`, `verdicts`, `board_health`, `runs`) is separate from curation, so
@@ -90,6 +91,12 @@ python -m jobtracker.cli prefill                      # plan every match worth a
 python -m jobtracker.cli prepare                      # the same, for tomorrow's picks only
 python -m jobtracker.cli apply-to Cloudflare 7695702  # opens a browser, fills, stops
 python -m jobtracker.cli forget-learned               # un-learn what a past model guessed
+
+# a resume tailored per posting — see docs/tailor.md
+python -m jobtracker.cli plugins enable tailor        # it ships switched off
+python -m jobtracker.cli work --task tailor           # propose edits, grounded in the posting
+python -m jobtracker.cli tailor build                 # apply them and compile a PDF
+python -m jobtracker.cli tailor build --attach        # ...and use it for that posting
 ```
 
 **The nightly sequence is `check` → `work` → `prepare` → `dashboard`,** and only `check`

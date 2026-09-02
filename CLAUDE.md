@@ -705,6 +705,40 @@ in `docs/plugins.md`. Added 2026-08-31. Discord is the first, and the third regi
 this package after `sources/` and `tasks/` — one module plus one import line, module pure,
 `runner.py` owns the socket.
 
+**A plugin has a `kind` since 2026-09-01, and there are two.** `import` is everything below
+— a feed of postings. `task` is the switch for a bounded model role in `tasks/`; it
+implements *nothing*, has no `page_url`/cursor/`parse_page` (genuinely absent, not stubbed,
+so the paging loop fails at the boundary rather than three layers into a request), and the
+role stays implemented in `tasks/` exactly like the ones that are not switchable.
+`plugins/roles.py` derives one switch per registered task, which is what makes putting a
+role on the switchboard a change to a set of names rather than a module.
+
+- **`plugins/` may import `tasks/`; `tasks/` may not import `plugins/`.** `survey()` takes
+  the enabled set as an argument, so a task module stays pure and cannot tell whether it is
+  switchable, and the queue never depends on what is on disk. There is a test reading that
+  off the source.
+- **A switched-off task is absent from the survey, not unavailable.** Switched off is a
+  decision you typed and there is nothing to fix; a reason printed beside it reads as a
+  fault. `work --task <off>` says so and exits **0** — falling through prints "every task
+  is drained", which is false.
+- **The switch comes before the query.** A disabled task is never asked for
+  `unavailable_reason` and never asked for `pending()`, or a machine that turned a role off
+  still pays for its backlog nightly.
+- **`level`, `judge` and `inbox` default to on**; new plugins default to off. Adding the
+  switch was not meant to change anyone's queue, and there is a test asserting an existing
+  plugins.yaml loads key for key.
+- **`purge` is import-only.** It removes postings a feed imported; a model role imports
+  nothing, and the postings it writes proposals *about* belong to whichever board owns them.
+- **Each plugin declares its own settings** (`defaults()`), and the type of a setting is the
+  type of its default. One flat global `DEFAULTS` meant every plugin's config surface was
+  the union of all of them — `channel_id` was a valid setting on a model role and was
+  `.isdigit()`-validated as one. Semantic rules live in `validate()` on the plugin that owns
+  them, and **`coerce` runs `validate` too**, or `backfill_days=-3` degrades from a refusal
+  at the prompt to a `RefusedWrite` three layers down.
+- **A cursor is described by the plugin that minted it** (`describe_cursor`). `plugins list`
+  decoded every plugin's cursor with Discord's snowflake decoder, imported directly into the
+  CLI — invisible with one feed, a confidently wrong date for the second.
+
 - **A feed is not a board, and that is the whole reason this package exists.**
   `sync_postings` closes every posting absent from a fetch, and it is right to: a board is
   a *complete statement* of what a company has open. A poll returns only what arrived
@@ -966,6 +1000,69 @@ scoring out of the queue: no model, must always run.
 - Adding a task is one module plus one import line, same as an ATS. **Task modules are
   pure** — prompts, parsers, and a description of what to write; `runner.py` owns every
   socket, transaction, and clock.
+- **A task can be switched off in plugins.yaml** (2026-09-01) — see "Import plugins" above.
+  Enablement only, and it stays outside this package: `survey(conn, ctx, enabled=...)`
+  takes the set as an argument, `enabled=None` means all of them, and `tasks/` never reads
+  a config file.
+
+## Tailoring a resume
+
+`jobtracker/tasks/tailor.py`, `jobtracker/resume/`, and `jobtracker tailor build`. Full
+guide in `docs/tailor.md`. Added 2026-09-01. **The fifth bounded model role (DESIGN.md §8)
+and the first that composes prose** — so the bound is not the shape of the answer.
+
+- **Your resume's source is LaTeX** (`$JOBTRACKER_RESUME_TEX`), and that is what dissolved
+  the dependency question rather than answering it. `resumes.RESUME_TYPES` is `.pdf`/`.docx`
+  and there is no text extractor in this repo; a `.tex` file is already text. Two things
+  follow that matter more than the missing dependency: the model quotes lines back, and a
+  PDF extractor's idea of a line is a column-layout accident — and the output is a diff.
+- **Both anchors are verbatim quotes.** `evidence` must occur in the description and
+  `current_line` in the resume. `inbox`'s quote rule at *both* ends: one keeps an invented
+  requirement off a resume, the other keeps the page from attributing a line to you that you
+  never wrote. Grounding is checked whitespace-normalized but `apply_edits` replaces
+  exactly, so **an edit must pass both** — one that passed the loose check and failed the
+  exact one would render on the page and then do nothing when applied.
+- **The LaTeX guard is a security control.** A resume is compiled, so a suggestion is a
+  program about to be run: `\input` reads files, `\write`/`\openout` create them,
+  `\catcode`/`\csname` rewrite what the source means, `\write18` runs a shell. An
+  **allowlist** of control sequences, because a blocklist is a guess and `\csname` composes
+  command names out of characters. It runs inside parsing, not at assembly — an edit that
+  renders and is refused later is one you accept and watch do nothing.
+- **`apply_edits` replaces a line it was handed verbatim, and does nothing else.** No
+  search, no fuzzy match, no insertion — which puts the preamble out of reach by
+  construction and is why a document that compiled before compiles after. The cost is a real
+  limit: it cannot add a bullet or reorder a section, because insertion has no anchor.
+- **`resume_suggestions` has exactly one reader**, the page that shows it to you. Nothing
+  joins it into prefill, ranking or matching. This is §8.1's finding, not an accident of
+  there being nothing else yet: the role removed there was *more* tightly bounded (an enum
+  of keys, no free text) and was still wrong because its answers were cached where the rules
+  replayed them. Ask where an answer is stored, not just where it is produced.
+- **Assembly is not a task.** It needs no model, and `cmd_work` returns early with no router
+  — the exact bug that made `prefill` leave the queue on 2026-08-25. `jobtracker tailor
+  build` always runs.
+- **Nothing writes bytes to your resume.** Edits apply to a copy in memory; the result is a
+  new file under `$JOBTRACKER_TAILORED`; `--attach` records it through the per-posting
+  override that already existed. There is a test reading the no-write rule off the source.
+- **`assemble.py` is the only subprocess in this repo**, and there is a test keeping it that
+  way. List argv, `shell=False`, a scratch directory the engine runs inside, a timeout
+  (TeX loops rather than erroring), and `--untrusted`. **Exit 0 with no PDF is a failure and
+  is named** — otherwise a compile that "worked" and produced nothing is a blank attachment.
+- **A missing toolchain is not an `unavailable_reason` for the task.** Suggestions are text
+  and need no engine; withholding the whole feature for want of its last step is the
+  capability-absent shape this file keeps naming. `tailor build` reports it once and exits
+  **0**, and it must never make `prepare` exit 2.
+- **Tectonic is in the serve image only**, on `Dockerfile.serve`'s own argument about the
+  browsers: the nightly never compiles anything, and a toolchain in the 177MB batch image
+  multiplies the nightly pull for something it never runs. CI asserts
+  `latex.unavailable_reason() is None` on the published image, the same way it asserts
+  Playwright — a lost capability otherwise looks exactly like a working deployment.
+- **Priority 50, last.** It consumes what `judge` produces and feeds nothing, so the chain
+  does not fix its number; it is behind `inbox` because its unit key is a hash of the resume
+  **text**, so one edit re-keys every posting at once. (`Answers.hash` covers only a
+  resume's basename and cannot be reused for this.)
+- **Neither surface has a button, in either mode.** Accepting means compiling a document;
+  a control on the Today card or `/apply` would put a model-authored PDF one click from an
+  application with the diff unread, and would widen what `.pick [data-act]` and `.lf` select.
 
 ## The ambiguity pass
 
@@ -1659,10 +1756,12 @@ tuned. The write primitive already existed (`_write`, keyed by the `data-jt-id` 
 
 ## Slug repair
 
-`jobtracker repair`, documented in `docs/repair.md`. The **second** of the model's four
+`jobtracker repair`, documented in `docs/repair.md`. The **second** of the model's five
 bounded roles as DESIGN.md §8 numbers them — the last to be built, though not the last in
-the list. (It was the second of *five* until 2026-08-25, when question matching was
-removed; the numbering did not move.) It is the only one where the model is a
+the list. (The count went five → four when question matching was removed on 2026-08-25,
+and back to five when `tailor` arrived on 2026-09-01. **This** role has been number 2
+throughout; what moved was `inbox`, which was fifth and became fourth when the removed
+role vacated that slot.) It is the only one where the model is a
 *fallback* rather than the mechanism. Deterministic regexes read the careers page first; the model is asked
 only about pages they could not parse.
 

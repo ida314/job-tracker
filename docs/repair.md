@@ -1,6 +1,6 @@
 # Slug repair
 
-`jobtracker repair` — the second of the model's four bounded roles (DESIGN.md §8), and
+`jobtracker repair` — the second of the model's five bounded roles (DESIGN.md §8), and
 the only one where the model is a fallback rather than the mechanism.
 
 Boards move. Mercury and Vercel migrated Ashby → Greenhouse and left dead Ashby boards
