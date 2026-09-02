@@ -122,12 +122,29 @@ def test_prefill_is_not_a_task():
     assert get_task("prefill") is None
 
 
-def test_inbox_runs_last_so_a_busy_mailbox_cannot_starve_the_pipeline():
+def test_inbox_runs_after_the_chain_so_a_busy_mailbox_cannot_starve_it():
     """The mail queue refills from an external stream on a schedule nothing here
     controls. Ahead of `level` a chatty inbox would keep the pipeline's own stages
-    permanently waiting for a queue that never drains."""
-    assert task_names()[-1] == "inbox"
+    permanently waiting for a queue that never drains.
+
+    It used to assert `task_names()[-1] == "inbox"`, which stopped being the claim when
+    `tailor` arrived behind it. What was load-bearing was "after the stages it could
+    starve", not "last" — see the test below for why something else is last now.
+    """
     assert get_task("inbox").priority > get_task("judge").priority
+    assert get_task("inbox").priority > get_task("level").priority
+
+
+def test_tailor_runs_last_because_one_resume_edit_re_keys_every_unit():
+    """`tailor`'s unit_key is a hash of the resume text, not of the posting.
+
+    That is what makes a rewritten resume re-ask every posting — the property it is there
+    for — and it is exactly why it cannot go earlier. Editing one line re-keys the entire
+    queue at once, so ahead of `inbox` a single save would push a mailbox behind several
+    hundred units. Same starvation argument `inbox` makes, one notch up.
+    """
+    assert task_names()[-1] == "tailor"
+    assert get_task("tailor").priority > get_task("inbox").priority
 
 
 def test_the_first_task_with_work_wins(criteria, profile):

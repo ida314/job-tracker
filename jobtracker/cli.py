@@ -1066,6 +1066,41 @@ def _load_answers(path: Path | None):
         return None, resolved
 
 
+def _load_resume(path=None) -> tuple:
+    """`(text, format, hash)` for the resume source, or `(None, None, "")`.
+
+    Read here rather than in the task, for the reason `check` caches descriptions and
+    `mail` fills `mail_candidates`: **a task never opens a file.** A task that read its
+    own resume would have a queue that depends on a path being mounted at unit time.
+
+    Every failure is an absence. An unreadable file is not an empty resume — but it is
+    also not a crash in a command that has four other tasks to run, so it is logged and
+    reported by `tailor.unavailable_reason` as configuration that is not there yet.
+
+    The hash is over the text. Two resumes with the same name and different content are
+    different questions, and `Answers.hash` — which covers the basename only — cannot
+    tell them apart.
+    """
+    import hashlib
+
+    from . import resume as resume_mod
+
+    target = Path(path) if path else config.RESUME_TEX
+    if not target.is_file():
+        return None, None, ""
+    fmt = resume_mod.for_path(target)
+    if fmt is None:
+        log.warning("no resume format handles %s", target.name)
+        return None, None, ""
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning("resume source did not load: %s", exc)
+        return None, None, ""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return text, fmt, digest
+
+
 def _build_context(args: argparse.Namespace, today: str, fetcher=None):
     """Everything every task might need, loaded once.
 
@@ -1087,6 +1122,9 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
         log.warning("profile.yaml did not load: %s", exc)
 
     answers, answers_path = _load_answers(getattr(args, "answers", None))
+    resume_text, resume_format, resume_hash = _load_resume(
+        getattr(args, "resume_source", None)
+    )
 
     return TaskContext(
         today=today,
@@ -1094,6 +1132,9 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
         profile=profile,
         answers=answers,
         answers_path=answers_path,
+        resume_text=resume_text,
+        resume_format=resume_format,
+        resume_hash=resume_hash,
         tiers=rank_mod.tier_lookup(companies),
         companies={c.name: c for c in companies},
         fetcher=fetcher,
