@@ -32,6 +32,9 @@ WORKDIR /app
 # BuildKit secret is accepted for the day the router repo goes private; a build arg would
 # be readable with `docker history` on the published image.
 ARG SIR_CLIENT=""
+# Pinned like every other toolchain here: a resume that compiled last night must compile
+# tonight, and "latest" is how that stops being true without anything changing in-tree.
+ARG TECTONIC_VERSION=0.15.0
 COPY requirements.txt .
 RUN --mount=type=secret,id=sir_token \
     pip install --no-cache-dir -r requirements.txt \
@@ -39,6 +42,24 @@ RUN --mount=type=secret,id=sir_token \
     # floor for the feature; this is the exact version whose driver matches the browsers
     # baked into this image.
  && pip install --no-cache-dir playwright==1.62.0 \
+    # Tectonic: what `jobtracker tailor build` compiles a resume with. One static binary
+    # that fetches only the packages a document needs, rather than a TeX Live subset —
+    # ~30MB against ~500MB, on an image that is already the large one.
+    #
+    # It goes in THIS image and not the batch one on the argument Dockerfile.serve's
+    # header already makes about the browsers: the nightly `check`/`work`/`prepare` never
+    # compiles anything, and folding a toolchain into a 177MB image to carry something it
+    # never runs multiplies the nightly pull for nothing.
+ && ARCH="$(dpkg --print-architecture)" \
+ && case "$ARCH" in \
+      arm64) TECTONIC_ARCH=aarch64-unknown-linux-musl ;; \
+      amd64) TECTONIC_ARCH=x86_64-unknown-linux-musl ;; \
+      *) echo "no tectonic build for $ARCH" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL \
+      "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-${TECTONIC_ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin tectonic \
+ && chmod +x /usr/local/bin/tectonic \
  && if [ -n "$SIR_CLIENT" ]; then \
       if [ -s /run/secrets/sir_token ]; then \
         git config --global \
@@ -63,7 +84,9 @@ COPY companies.yaml criteria.yaml profile.yaml ./
 ENV JOBTRACKER_DB=/data/state.db \
     JOBTRACKER_ANSWERS=/data/answers.yaml \
     JOBTRACKER_BROWSER_PROFILE=/data/browser \
-    JOBTRACKER_RESUMES=/data/resumes
+    JOBTRACKER_RESUMES=/data/resumes \
+    JOBTRACKER_RESUME_TEX=/data/resume.tex \
+    JOBTRACKER_TAILORED=/data/tailored
 
 # Where Chromium draws. There is no screen in here; the X server is a sibling container
 # sharing /tmp/.X11-unix. Playwright's headful launch fails on the worker thread without

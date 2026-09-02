@@ -830,8 +830,69 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None,
     p.append("</div>")
 
     p.append("</div>")
+    p.extend(_tailor_block(conn, snap))
     p.append(f"<script>{_APPLY_JS}</script></div></body></html>")
     return "\n".join(p)
+
+
+def _tailor_block(conn, snap) -> list:
+    """What `tailor` proposes changing in the resume for this posting.
+
+    Read-only, and a sibling of `.split` rather than anything inside it: the two panes are
+    the form and the picture of the form, and this is neither. It is the one use of the
+    `conn` `render_apply` has always been handed and never touched.
+
+    **No control here, in either mode.** Accepting is `jobtracker tailor build --attach`,
+    which compiles the document first — a button that attached a PDF straight from this
+    page would put a model-authored document on an application without anyone having
+    built it, and `.lf`/`[data-act]` would stop meaning what the parity tests assume.
+
+    Each edit renders as a diff plus the phrase from the job description it answers. That
+    phrase is the point: it is a verbatim quote, so the page can show *why* an edit was
+    proposed rather than asking you to take it on trust.
+    """
+    if not snap.get("ats_job_id"):
+        return []
+    row = store.get_suggestions(conn, snap["company"], snap["ats_job_id"])
+    if row is None:
+        return []
+    try:
+        edits = json.loads(row["edits"] or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not edits:
+        return []
+
+    out = ['<div class="pane tailor">']
+    out.append(
+        f'<h2>Resume suggestions <span class="note">'
+        f'{len(edits)} for this posting · {html.escape(row["resolution"])}</span></h2>'
+    )
+    for edit in edits:
+        if not isinstance(edit, dict):
+            continue
+        out.append('<div class="sg">')
+        out.append(
+            f'<div class="sg-sec">{html.escape(str(edit.get("section") or ""))}</div>'
+        )
+        out.append(
+            f'<div class="sg-was">{html.escape(str(edit.get("current_line") or ""))}</div>'
+        )
+        out.append(
+            f'<div class="sg-now">{html.escape(str(edit.get("suggestion") or ""))}</div>'
+        )
+        out.append(
+            '<div class="sg-why">because the posting says '
+            f'<q>{html.escape(str(edit.get("evidence") or ""))}</q></div>'
+        )
+        out.append("</div>")
+    out.append(
+        '<p class=note>Nothing here has been applied. '
+        "<code>jobtracker tailor build</code> assembles a PDF from these; "
+        "<code>--attach</code> makes it this posting's resume.</p>"
+    )
+    out.append("</div>")
+    return out
 
 
 # How long to wait for a window we have asked to close, when a different job is taking
@@ -3392,6 +3453,23 @@ background:transparent;color:inherit;font:inherit;font-size:.9rem;text-decoratio
 a.btn:hover{opacity:.7}
 #resetmsg{margin-left:0}
 .phead .note{font-weight:400;font-size:.8rem}
+
+/* Resume suggestions. A full-width block below the two panes, not a third column: at
+   820px the split already collapses, and a diff needs the line length. */
+.pane.tailor{margin-top:1.4rem;border-top:1px solid rgba(127,127,127,.25);
+padding-top:1rem}
+.pane.tailor h2{font-size:1rem;margin:0 0 .6rem}
+.pane.tailor h2 .note{font-weight:400;font-size:.8rem;opacity:.75;margin-left:.4rem}
+.sg{border:1px solid rgba(127,127,127,.25);border-radius:6px;padding:.5rem .6rem;
+margin-bottom:.5rem}
+.sg-sec{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;opacity:.6}
+.sg-was,.sg-now{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+font-size:.78rem;white-space:pre-wrap;word-break:break-word;padding:.25rem .4rem;
+border-radius:4px;margin-top:.25rem}
+.sg-was{background:rgba(190,60,60,.12);text-decoration:line-through;opacity:.75}
+.sg-now{background:rgba(60,150,90,.14)}
+.sg-why{font-size:.78rem;opacity:.75;margin-top:.35rem}
+.sg-why q{font-style:italic}
 
 """
 

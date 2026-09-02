@@ -28,6 +28,7 @@ marks manual companies as surfaced. Opening a view of your data should not mutat
 from __future__ import annotations
 
 import html
+import json
 import sqlite3
 from collections import Counter
 from datetime import date
@@ -723,6 +724,7 @@ def build_dashboard(
     unranked = sum(1 for r in ranked if r["score"] is None)
     plans = store.plans_by_posting(conn)
     overrides = store.posting_resumes(conn)
+    suggestions = store.suggestions_by_posting(conn)
     pending_mail = store.pending_mail_count(conn)
 
     # Read straight off `applications` rather than joining through `postings`, which is
@@ -746,7 +748,7 @@ def build_dashboard(
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
-           rest, overrides)
+           rest, overrides, suggestions)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -808,7 +810,7 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy) -> None:
 
 
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
-           plans=None, rest=(), overrides=None) -> None:
+           plans=None, rest=(), overrides=None, suggestions=None) -> None:
     """The three to apply to today.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -825,7 +827,7 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         parts.append('<div class="picks">')
         for i, row in enumerate(picks, 1):
             _pick(parts, i, row, by_name, today, interactive, criteria, plans,
-                  overrides)
+                  overrides, suggestions)
         parts.append("</div>")
 
     if unranked:
@@ -902,7 +904,7 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None) -> 
 
 
 def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
-          overrides=None) -> None:
+          overrides=None, suggestions=None) -> None:
     tier = _tier_of(row["company"], by_name)
     var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
@@ -934,6 +936,7 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
     )
 
     _prefill_line(parts, row, plans)
+    _tailor_line(parts, row, suggestions)
     _resume_line(parts, row, interactive, overrides)
 
     parts.append('<div class="act">')
@@ -999,6 +1002,36 @@ def _prefill_line(parts, row, plans) -> None:
     parts.append(
         f'<div class="{cls}"><span class="counts">prefill {filled}/{plan["fields"]}'
         f" fields</span>{tail}</div>"
+    )
+
+
+def _tailor_line(parts, row, suggestions=None) -> None:
+    """What `tailor` proposes changing in your resume for this posting.
+
+    A count and nothing else, in both modes. **No control, in either mode** — reading the
+    edits is what `/apply` is for, and a card that could accept them would put a
+    model-authored document one click from an application without the diff ever being
+    read. That is the §8.1 rule, and it is also why `.pick [data-act]` has to keep meaning
+    exactly the three disposition buttons.
+
+    Absent when nothing has been proposed: `tailor` ships switched off, and a permanent
+    "0 suggestions" on every card would be noise about a feature you have not enabled.
+    """
+    row_suggestions = (suggestions or {}).get((row["company"], row["ats_job_id"]))
+    if row_suggestions is None:
+        return
+    try:
+        count = len(json.loads(row_suggestions["edits"] or "[]"))
+    except (TypeError, ValueError):
+        return
+    if not count:
+        return
+    state = row_suggestions["resolution"]
+    tail = "" if state == "pending" else f" · {html.escape(state)}"
+    parts.append(
+        f'<div class="tailor"><span class="counts">resume: {count} '
+        f'suggested edit{"s" if count != 1 else ""}</span>'
+        f'<span class="tail">{tail}</span></div>'
     )
 
 

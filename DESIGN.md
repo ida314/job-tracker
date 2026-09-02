@@ -297,7 +297,8 @@ postings today."
 ## 8. Where the model still earns its place
 
 The rewrite does not eliminate the language model. It relocates it from the runtime to
-bounded roles — two when this was written, five by 2026-08-16, **four now**. Since
+bounded roles — two when this was written, five by 2026-08-16, four after the removal in
+§8.1, **five again now**. Since
 2026-08-13 they share one mechanism: each is a **task** (docs/tasks.md), which is a
 prompt, a schema, a parser, a query for what still needs asking, and a write. A scheduler
 picks between them by priority, and priority is the pipeline's own dependency order.
@@ -492,11 +493,54 @@ gave.
    rendered-image newsletter, an agency sending from a domain you never applied at, a
    forwarded thread whose context is below the fold.
 
-   The general principle across all four: the model is allowed to *read*, never to
+5. **Resume tailoring** (added 2026-09-01) — **implemented** as the `tailor` task; see
+   `docs/tailor.md`. It reads a posting's description and the candidate's resume and
+   proposes edits to the resume.
+
+   **This is the first role that composes prose**, and it does not fit the sentence the
+   other four share. Saying so is the point: a role that quietly failed to fit it, under a
+   summary claiming it did, is how §8.1 happened. Level extraction returns an enum, ranking
+   three ordinals, inbox reading an enum and a quote. This returns a sentence somebody
+   might send to an employer under their own name.
+
+   So the bound cannot be the shape of the answer, and it is not:
+
+   - **Both anchors are verbatim quotes.** `evidence` must occur in the job description and
+     `current_line` in the resume — role 2's rule that a proposed slug must appear on the
+     page it was read from, and role 4's that a quote must appear in the message, applied
+     at *both* ends at once. An edit that cannot name a real requirement, or a real line,
+     is dropped. That is what keeps an invented requirement off a resume and keeps the page
+     from attributing a line to you that you never wrote.
+   - **The text is checked before it can reach a document.** The resume's source is LaTeX,
+     which is what makes it readable with no PDF parser and no new dependency — and also
+     means a suggestion is a program about to be run. An allowlist of control sequences,
+     because a blocklist is a guess and `\csname` composes command names out of characters.
+   - **Nothing it writes is read back by anything deterministic.** `resume_suggestions` has
+     one reader: the page that shows it to you.
+   - **It proposes and stops.** Applying the edits and compiling the PDF is a separate,
+     model-free pass; attaching the result to an application is a button. No code path
+     writes bytes to the resume.
+
+   The third of those is §8.1's lesson rather than a coincidence, and it is the one worth
+   re-reading before adding a sixth role. The role removed there was *more* tightly bounded
+   than this one — an enum of keys the candidate had written, no free text at all — and was
+   still wrong, because its answers were cached where deterministic code replayed them.
+
+   The honest limit: nothing here can check that a rewritten bullet is *true*. The
+   grounding rules keep the requirement honest and the prompt says to keep the candidate's
+   own facts, but "did you actually do what this sentence now says" is not a question this
+   system can answer. It is why the output is a diff, and why accepting one is a human act.
+
+   The general principle across the first four: the model is allowed to *read*, never to
    *decide*. Level extraction reads a description for a fact the title omitted; ranking
    reads it for a fit judgment no rule could encode; inbox reading reads a reply and
    proposes what it meant. In every case deterministic code holds the verdict, the
    ordering, the text, and the reason.
+
+   Role 5 is the first that **writes**, and it is bounded differently on purpose: not by
+   what it may produce, but by what it must quote, what may reach a document, where the
+   answer is stored, and who applies it. If a sixth role needs prose, that is the list it
+   has to satisfy — and the removal in §8.1 is the reason the list is that long.
 
    The role removed in §8.1 is the one that did not fit this sentence, and it took until
    after it shipped to notice. *Question matching* read a label and **pointed at an

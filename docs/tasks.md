@@ -7,6 +7,7 @@ some of it, and commits each unit on its own.
 level   10   read a description for the level its title omitted   -> produces matches
 judge   20   judge a match against profile.yaml                   -> produces scores
 inbox   40   read a reply from an employer                        -> proposes updates
+tailor  50   propose resume edits for a scored match              -> proposes, and stops
 ```
 
 This repo still does not know about schedulers — it ships the command and the machine
@@ -35,10 +36,22 @@ and there is only one knob to get wrong instead of three.
 
 **`inbox` is the exception, and it says so rather than pretending otherwise.** It is not
 in that chain: it consumes nothing the other two produce and produces nothing they
-consume, so the dependency rule does not decide its number. It is last on a starvation
+consume, so the dependency rule does not decide its number. It is on a starvation
 argument instead — its queue refills from an external stream on a schedule nothing here
 controls, and anywhere earlier a chatty mailbox would keep the pipeline's own stages
 permanently waiting. Dressing that up as a dependency would be the wrong kind of tidy.
+
+**`tailor` is last, on the same argument one notch up.** It *does* consume what `judge`
+produces — it works down scored matches — but it feeds nothing, so its number is not fixed
+by the chain either. Its unit key is a hash of your resume text, which is the property that
+makes a rewritten resume re-ask every posting, and exactly what makes it a bad neighbour:
+editing one line re-keys the entire queue at once, and ahead of `inbox` a single save would
+push a mailbox behind several hundred units.
+
+**A task can also be switched off**, in plugins.yaml — see docs/plugins.md. That is
+enablement, not priority: `survey()` takes the enabled set as an argument, this package
+never reads that file, and a switched-off task is *absent* from the queue rather than
+listed as unavailable.
 
 ```
 $ jobtracker work --dry-run
@@ -204,5 +217,10 @@ queue and changes nothing, so it is safe to run before the router is up.
 ## Telemetry
 
 Spans `task.run` → `task.unit`, attributes `task.name` and `task.outcome`. Metric
-attributes stay bounded — three tasks × three outcomes — the same rule that keeps
+attributes stay bounded — four tasks × three outcomes — the same rule that keeps
 `company` out of metrics and in traces (docs/observability.md).
+
+The bound covers the `apply()` return string too, since it becomes a key in
+`TaskReport.outcomes`: `judge` returns one of four ordinals, `inbox` one of ten states, and
+`tailor` an edit count capped at `MAX_EDITS`. A label carrying a company or a title would
+put unbounded cardinality into the run summary.

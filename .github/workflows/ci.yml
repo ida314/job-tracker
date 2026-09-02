@@ -136,6 +136,15 @@ jobs:
           r = browser.unavailable_reason()
           print("browser:", r or "usable")
           sys.exit(1 if r else 0)'
+          # Same shape, same reason. `tailor build` reports a missing toolchain on a card
+          # and carries on, so an image that lost tectonic would look exactly like a
+          # working deployment until someone tried to assemble a resume.
+          docker run --rm --entrypoint python jobtracker-serve:ci -c '
+          from jobtracker.resume import get_format
+          import sys
+          r = get_format("latex").unavailable_reason()
+          print("latex:", r or "usable")
+          sys.exit(1 if r else 0)'
 
   # Continuous deployment, the publishing half.
   publish:
@@ -260,4 +269,13 @@ jobs:
           import sys
           r = browser.unavailable_reason()
           print("browser:", r or "usable")
+          sys.exit(1 if r else 0)'
+          # Same shape, same reason. `tailor build` reports a missing toolchain on a card
+          # and carries on, so an image that lost tectonic would look exactly like a
+          # working deployment until someone tried to assemble a resume.
+          docker run --rm --entrypoint python "$IMG" -c '
+          from jobtracker.resume import get_format
+          import sys
+          r = get_format("latex").unavailable_reason()
+          print("latex:", r or "usable")
           sys.exit(1 if r else 0)'

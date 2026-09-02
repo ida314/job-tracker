@@ -33,6 +33,9 @@ packages = [
     "jobtracker.plugins",
     "jobtracker.plugins.discord",
     "jobtracker.plugins.discord.formats",
+    # Resume formats. Same warning: absent from the image, `tailor` imports nothing and
+    # every posting reports no suggestions — which is indistinguishable from a quiet night.
+    "jobtracker.resume",
 ]
 
 [tool.pytest.ini_options]

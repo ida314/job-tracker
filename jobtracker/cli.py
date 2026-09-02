@@ -26,9 +26,11 @@ Subcommands:
   applications  list what you applied to, grouped by what needs doing
   mail          read the job-search mailbox and propose application updates; it never
                 writes to the mailbox. `work --task inbox` is what reads the candidates
+  tailor        assemble a tailored resume from the edits `work --task tailor` proposed;
+                --attach uses each result as that posting's resume
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
   repair        read careers pages for broken boards' new slugs; --write applies
-  plugins       list, enable, disable, configure or purge an import plugin
+  plugins       list, enable, disable or configure a plugin (a feed, or a model role)
   add-company   append a curated entry to companies.yaml
   forget-learned  sweep every resolved label the rules and your aliases cannot
                 explain (the one-shot for a database that ran prefill's model pass)
@@ -303,8 +305,11 @@ def _active_plugins(plugins_path) -> list:
         return []
 
     active = []
-    for plugin in plugins_mod.all_plugins():
-        settings = {**plugin_settings.DEFAULTS, **configured.get(plugin.name, {})}
+    # Import plugins only. A task plugin has no feed to read, and handing one to the
+    # paging loop would call `page_url` on a model role.
+    for plugin in plugins_mod.plugins_of_kind(plugins_mod.KIND_IMPORT):
+        settings = {**plugin_settings.defaults_for(plugin.name),
+                    **configured.get(plugin.name, {})}
         if not settings.get("enabled"):
             continue
         why = plugin.unavailable_reason(settings)
@@ -313,6 +318,27 @@ def _active_plugins(plugins_path) -> list:
             continue
         active.append((plugin, settings))
     return active
+
+
+def _enabled_tasks(plugins_path) -> set:
+    """The task names switched on in plugins.yaml.
+
+    The mirror of `_active_plugins`, and it makes the same refusal for the same reason: a
+    malformed plugins.yaml means **no switched task runs**, rather than every task
+    running ungoverned. A curated file that says something unactionable is not permission.
+
+    A task nobody has a switch for is on — that is what keeps a box with no plugins.yaml
+    running the queue it ran yesterday.
+    """
+    from . import plugins as plugins_mod
+    from .plugins import settings as plugin_settings
+
+    try:
+        configured = plugin_settings.load_settings(plugins_path)
+    except plugin_settings.InvalidSettings as exc:
+        log.error("plugins.yaml is invalid, so no switched task ran: %s", exc)
+        return set()
+    return plugins_mod.enabled_task_names(configured)
 
 
 def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degraded) -> None:
@@ -417,6 +443,18 @@ def cmd_plugins(args: argparse.Namespace) -> int:
         return 1
 
     if action == "purge":
+        if plugin.kind == plugins_mod.KIND_TASK:
+            # Purge removes what a feed *imported*. A model role imports nothing: it
+            # writes proposals about postings some board already owns, and deleting the
+            # postings because you turned a role off would take the board's rows with
+            # them. Disabling it is the whole of switching it off.
+            print(
+                f"{plugin.name} is a model role, not a feed — it imports no postings, "
+                f"so there is nothing to purge.\n"
+                f"  `jobtracker plugins disable {plugin.name}` switches it off.",
+                file=sys.stderr,
+            )
+            return 1
         return _plugins_purge(args, plugin)
 
     try:
@@ -432,7 +470,9 @@ def cmd_plugins(args: argparse.Namespace) -> int:
                     print(f"expected key=value, got {pair!r}", file=sys.stderr)
                     return 1
                 key, _, value = pair.partition("=")
-                options[key.strip()] = plugin_settings.coerce(key.strip(), value)
+                options[key.strip()] = plugin_settings.coerce(
+                    plugin.name, key.strip(), value
+                )
             settings = plugin_settings.set_options(path, plugin.name, options)
     except plugin_settings.InvalidSettings as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -449,15 +489,20 @@ def cmd_plugins(args: argparse.Namespace) -> int:
         # nightly run is the first thing that tells you.
         print(f"  cannot run yet: {why}")
     elif action == "enable":
-        days = settings.get("backfill_days")
-        print(f"  the next `check` will read the last {days} day(s), then only what is new")
+        if plugin.kind == plugins_mod.KIND_TASK:
+            print("  the next `jobtracker work` will pick it up")
+        else:
+            days = settings.get("backfill_days")
+            print(
+                f"  the next `check` will read the last {days} day(s), "
+                f"then only what is new"
+            )
     return 0
 
 
 def _plugins_list(args: argparse.Namespace, path: Path) -> int:
     from . import plugins as plugins_mod
     from .plugins import settings as plugin_settings
-    from .plugins.discord import day_of
 
     try:
         configured = plugin_settings.load_settings(path)
@@ -468,32 +513,56 @@ def _plugins_list(args: argparse.Namespace, path: Path) -> int:
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     try:
         for plugin in plugins_mod.all_plugins():
-            settings = {**plugin_settings.DEFAULTS, **configured.get(plugin.name, {})}
-            company = plugin.company(settings)
-            counts = store.plugin_posting_counts(conn, company.name)
+            settings = {**plugin_settings.defaults_for(plugin.name),
+                        **configured.get(plugin.name, {})}
             state = "enabled" if settings.get("enabled") else "disabled"
-            print(f"{plugin.name}  [{state}]  {plugin.summary}")
+            print(f"{plugin.name}  [{state}]  ({plugin.kind})  {plugin.summary}")
             why = plugin.unavailable_reason(settings)
             if why:
                 print(f"  cannot run: {why}")
-            print(f"  group   : {company.name}")
-            if settings.get("label"):
-                print(f"  label   : {settings['label']}")
-            # The channel id is printed; the token never is, not even a prefix.
-            if settings.get("channel_id"):
-                print(f"  channel : {settings['channel_id']}")
-            cursor = store.get_plugin_state(conn, plugin.name).get("cursor")
-            if cursor:
-                print(f"  read to : {day_of(cursor) or cursor}")
+            if plugin.kind == plugins_mod.KIND_TASK:
+                _print_task_plugin(plugin)
             else:
-                print(f"  read to : nothing yet — first run covers "
-                      f"{settings.get('backfill_days')} day(s)")
-            print(f"  postings: {counts['total']} total · {counts['open']} open · "
-                  f"{counts['applied']} applied")
+                _print_import_plugin(conn, plugin, settings)
             print()
     finally:
         conn.close()
     return 0
+
+
+def _print_task_plugin(plugin) -> None:
+    """A model role has no group, no cursor and no postings of its own.
+
+    It reports the two things that decide when it runs: where it sits in the queue, and
+    what the queue would ask it. Printing a feed's fields here — `read to`, `postings` —
+    would be reporting numbers that belong to whichever board owns those rows.
+    """
+    from .tasks import get_task
+
+    task = get_task(plugin.task_name)
+    if task is None:
+        print("  role    : not registered — this switch controls nothing")
+        return
+    print(f"  role    : priority {task.priority}, run by `jobtracker work`")
+
+
+def _print_import_plugin(conn, plugin, settings: dict) -> None:
+    company = plugin.company(settings)
+    counts = store.plugin_posting_counts(conn, company.name)
+    print(f"  group   : {company.name}")
+    if settings.get("label"):
+        print(f"  label   : {settings['label']}")
+    # The channel id is printed; the token never is, not even a prefix.
+    if settings.get("channel_id"):
+        print(f"  channel : {settings['channel_id']}")
+    cursor = store.get_plugin_state(conn, plugin.name).get("cursor")
+    if cursor:
+        print(f"  read to : {plugin.describe_cursor(cursor)}")
+    else:
+        print(f"  read to : nothing yet — first run covers "
+              f"{settings.get('backfill_days')} day(s)")
+    print(f"  postings: {counts['total']} total · {counts['open']} open · "
+          f"{counts['applied']} applied")
 
 
 def _plugins_purge(args: argparse.Namespace, plugin) -> int:
@@ -999,6 +1068,41 @@ def _load_answers(path: Path | None):
         return None, resolved
 
 
+def _load_resume(path=None) -> tuple:
+    """`(text, format, hash)` for the resume source, or `(None, None, "")`.
+
+    Read here rather than in the task, for the reason `check` caches descriptions and
+    `mail` fills `mail_candidates`: **a task never opens a file.** A task that read its
+    own resume would have a queue that depends on a path being mounted at unit time.
+
+    Every failure is an absence. An unreadable file is not an empty resume — but it is
+    also not a crash in a command that has four other tasks to run, so it is logged and
+    reported by `tailor.unavailable_reason` as configuration that is not there yet.
+
+    The hash is over the text. Two resumes with the same name and different content are
+    different questions, and `Answers.hash` — which covers the basename only — cannot
+    tell them apart.
+    """
+    import hashlib
+
+    from . import resume as resume_mod
+
+    target = Path(path) if path else config.RESUME_TEX
+    if not target.is_file():
+        return None, None, ""
+    fmt = resume_mod.for_path(target)
+    if fmt is None:
+        log.warning("no resume format handles %s", target.name)
+        return None, None, ""
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning("resume source did not load: %s", exc)
+        return None, None, ""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return text, fmt, digest
+
+
 def _build_context(args: argparse.Namespace, today: str, fetcher=None):
     """Everything every task might need, loaded once.
 
@@ -1020,6 +1124,9 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
         log.warning("profile.yaml did not load: %s", exc)
 
     answers, answers_path = _load_answers(getattr(args, "answers", None))
+    resume_text, resume_format, resume_hash = _load_resume(
+        getattr(args, "resume_source", None)
+    )
 
     return TaskContext(
         today=today,
@@ -1027,6 +1134,9 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
         profile=profile,
         answers=answers,
         answers_path=answers_path,
+        resume_text=resume_text,
+        resume_format=resume_format,
+        resume_hash=resume_hash,
         tiers=rank_mod.tier_lookup(companies),
         companies={c.name: c for c in companies},
         fetcher=fetcher,
@@ -1106,7 +1216,8 @@ def _refresh_gap_stubs(conn, ctx) -> int:
 UNREACHABLE = object()
 
 
-async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None):
+async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None,
+                enabled: set | None = None):
     """Build a client, run one task, tear the client down. Async because the SDK is."""
     from . import llm as llm_pkg
     from .tasks import run_next
@@ -1127,6 +1238,7 @@ async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None):
             task_name=task_name,
             budget=args.budget,
             concurrency=args.concurrency or DEFAULT_CONCURRENCY,
+            enabled=enabled,
         )
     finally:
         await client.aclose()
@@ -1152,6 +1264,15 @@ def cmd_work(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
+    enabled = _enabled_tasks(getattr(args, "plugins", None))
+    if args.task and args.task not in enabled:
+        # Exit 0, not 1: you switched it off, so this is the system doing what you said.
+        # Falling through to the survey would print "Nothing to do — every task is
+        # drained", which is false and sends you looking for an empty queue.
+        print(f"{args.task} is switched off in plugins.yaml.")
+        print(f"  `jobtracker plugins enable {args.task}` turns it on.")
+        return 0
+
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
 
@@ -1164,7 +1285,7 @@ def cmd_work(args: argparse.Namespace) -> int:
 
     try:
         ctx = _build_context(args, today, fetcher=fetcher)
-        candidates = survey(conn, ctx)
+        candidates = survey(conn, ctx, enabled=enabled)
 
         if args.dry_run:
             _print_survey(candidates)
@@ -1184,7 +1305,7 @@ def cmd_work(args: argparse.Namespace) -> int:
             print("  (or $JOBTRACKER_LLM_URL / $SIR_BASE_URL)")
             return 0
 
-        report = asyncio.run(_work(args, conn, ctx, args.task))
+        report = asyncio.run(_work(args, conn, ctx, args.task, enabled))
         if report is UNREACHABLE:
             _print_survey(candidates)
             print("\nRouter unreachable — the queue was left as it was.")
@@ -1308,7 +1429,11 @@ def cmd_rank(args: argparse.Namespace) -> int:
         args.concurrency = getattr(args, "concurrency", None) or 4
         ctx = _build_context(args, today)
         log.info("judging %d match(es) against profile %s", len(pending), profile.prose_hash)
-        report = asyncio.run(_work(args, conn, ctx, "judge"))
+        # Switched off means switched off, whichever command reaches the task. `rank` is
+        # `work --task judge` aimed from a different door, not an exemption from it.
+        report = asyncio.run(
+            _work(args, conn, ctx, "judge", _enabled_tasks(getattr(args, "plugins", None)))
+        )
         if report is not None and report is not UNREACHABLE:
             # `judged` and `unreadable` come off the task report rather than being
             # recounted here — the runner is what actually knows, and it already
@@ -1338,6 +1463,120 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
 
 # -- prefill -----------------------------------------------------------------------
+def cmd_tailor(args: argparse.Namespace) -> int:
+    """Assemble a tailored resume from suggestions `tailor` already proposed.
+
+    Deterministic, and deliberately not a `work` task for the reason `prefill` left that
+    queue on 2026-08-25: it asks a model nothing, and `cmd_work` returns early when no
+    router is configured. A pass that needs no model must not be gated behind one being
+    reachable, or a night with the GPU down assembles nothing and reports it as though
+    there were nothing to assemble.
+
+    It never writes to your resume source. It applies the edits to a copy in memory,
+    compiles that, and writes a NEW file under TAILORED_DIR. Attaching one to an
+    application is a separate act — `--attach` here.
+
+    `dismiss` is the other half of that, and it exists so `dismissed` is a state something
+    can actually reach: a proposal you do not want, kept rather than deleted. Deleting is
+    what would let the next run propose exactly the same edits again — the rule
+    `mail_proposals` follows. It comes back on its own when the resume changes, because
+    that is a different question.
+    """
+    from . import resume as resume_mod, resumes
+
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = args.since or _today()
+    try:
+        if args.action == "dismiss":
+            if not (args.company and args.job_id):
+                print("dismiss needs a company and a job id", file=sys.stderr)
+                return 1
+            moved = store.resolve_suggestions(
+                conn, args.company, args.job_id, "dismissed", today
+            )
+            conn.commit()
+            if not moved:
+                print(f"no suggestions for {args.company} {args.job_id}", file=sys.stderr)
+                return 1
+            # Dismissed, never deleted — the `mail_proposals` rule. Deleting is what would
+            # let the next run propose exactly the same edits again. They come back on
+            # their own when the resume changes, because that is a different question.
+            print(f"{args.company} {args.job_id}: dismissed; `tailor build` will skip it")
+            return EXIT_OK
+
+        text, fmt, _resume_hash = _load_resume(getattr(args, "resume_source", None))
+        if text is None or fmt is None:
+            print(f"No resume source at {config.RESUME_TEX}.", file=sys.stderr)
+            print("  Write one, or set $JOBTRACKER_RESUME_TEX.", file=sys.stderr)
+            return 1
+
+        every = list(store.suggestions_by_posting(conn).values())
+        if args.company:
+            every = [r for r in every if r["company"] == args.company]
+        rows = [row for row in every if row["resolution"] != "dismissed"]
+        if not rows:
+            # Two different states, and saying the first about the second is the
+            # absence-read-as-a-cause mistake: one sends you to enable a plugin, the
+            # other says the system did what you told it to.
+            if every:
+                print(f"Nothing to assemble — all {len(every)} proposal(s) are dismissed.")
+                print("  They return on their own when the resume changes.")
+            else:
+                print("Nothing to assemble — no suggestions have been proposed yet.")
+                print("  `jobtracker plugins enable tailor`, then `jobtracker work`.")
+            return 0
+        rows.sort(key=lambda r: (r["company"], r["ats_job_id"]))
+        if args.limit:
+            rows = rows[:args.limit]
+
+        # Reported once, up front, rather than as N identical failures. A missing engine
+        # is one fact about this machine, not one fact per posting.
+        blocked = fmt.unavailable_reason()
+        built = failed = 0
+        for row in rows:
+            edits = [
+                resume_mod.Edit(**e) for e in json.loads(row["edits"] or "[]")
+            ]
+            tailored, applied = fmt.apply_edits(text, edits)
+            head = f"{row['company']} — {row['ats_job_id']}"
+            if not applied:
+                # The resume moved under a proposal made against an older version of it.
+                print(f"  {head}: none of {len(edits)} edit(s) still apply — re-run work")
+                continue
+            if blocked:
+                print(f"  {head}: {applied}/{len(edits)} edit(s) ready, not assembled")
+                continue
+
+            stem = resumes.stored_name(row["company"], row["ats_job_id"], "").rstrip(".")
+            try:
+                blob = resume_mod.assemble(fmt, tailored, stem=stem or "resume")
+            except resume_mod.AssemblyFailed as exc:
+                print(f"  {head}: {exc}", file=sys.stderr)
+                failed += 1
+                continue
+            out = config.TAILORED_DIR / f"{stem}.pdf"
+            resume_mod.write_pdf(out, blob)
+            built += 1
+            print(f"  {head}: {applied} edit(s) -> {out}")
+            if args.attach:
+                store.set_posting_resume(
+                    conn, row["company"], row["ats_job_id"], out.name, len(blob), today
+                )
+                store.resolve_suggestions(
+                    conn, row["company"], row["ats_job_id"], "accepted", today
+                )
+                conn.commit()
+
+        if blocked:
+            # Named, not silent, and not an error: every suggestion above is still good.
+            print(f"\nNothing was assembled — {blocked}")
+            return EXIT_OK
+        print(f"\n{built} assembled, {failed} failed")
+        return EXIT_DEGRADED if failed else EXIT_OK
+    finally:
+        conn.close()
+
+
 def cmd_prefill(args: argparse.Namespace) -> int:
     """Work out what goes in every box of every form worth applying to.
 
@@ -2268,6 +2507,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"answer bank (default: {config.ANSWERS_YAML})")
     w.add_argument("--db", default=None)
     w.add_argument("--since", default=None)
+    w.add_argument("--plugins", default=None,
+                   help=f"path to plugins.yaml (default: {config.PLUGINS_YAML})")
     w.add_argument("--budget", type=int, default=None,
                    help="stop after N units (default: drain the task)")
     w.add_argument("--concurrency", type=int, default=None,
@@ -2296,12 +2537,33 @@ def build_parser() -> argparse.ArgumentParser:
     rk.add_argument("--answers", default=None)
     rk.add_argument("--db", default=None)
     rk.add_argument("--since", default=None)
+    rk.add_argument("--plugins", default=None,
+                    help=f"path to plugins.yaml (default: {config.PLUGINS_YAML})")
     rk.add_argument("--limit", type=int, default=None,
                     help="judge at most N postings (scoring always covers all)")
     rk.add_argument("--concurrency", type=int, default=None)
     rk.add_argument("--dry-run", action="store_true")
     _llm_flags(rk)
     rk.set_defaults(func=cmd_rank)
+
+    tl = sub.add_parser(
+        "tailor",
+        help="assemble a tailored resume from the edits `work` proposed",
+    )
+    tl.add_argument("action", nargs="?", default="build", choices=["build", "dismiss"])
+    tl.add_argument("--company", default=None, help="only this company")
+    tl.add_argument("--job-id", default=None, dest="job_id",
+                    help="with `dismiss`: which posting")
+    tl.add_argument("--limit", type=int, default=None, help="assemble at most N")
+    tl.add_argument("--resume-source", default=None, dest="resume_source",
+                    help=f"resume source (default: {config.RESUME_TEX})")
+    tl.add_argument("--attach", action="store_true",
+                    help="also use each result as that posting's resume")
+    tl.add_argument("--db", default=None)
+    tl.add_argument("--since", default=None)
+    # No `_llm_flags`: this pass opens no socket to a model, which is why it is a command
+    # and not a task. See cmd_tailor.
+    tl.set_defaults(func=cmd_tailor)
 
     pf = sub.add_parser(
         "prefill",
@@ -2369,7 +2631,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="rejects a phrase needs before it is suggested (default: 3)")
     e.set_defaults(func=cmd_eval)
 
-    pl = sub.add_parser("plugins", help="list, enable, disable or purge an import plugin")
+    pl = sub.add_parser(
+        "plugins",
+        help="list, enable, disable or configure a plugin (a feed, or a model role)",
+    )
     pl.add_argument("action", choices=["list", "enable", "disable", "set", "purge"])
     pl.add_argument("name", nargs="?", default=None)
     pl.add_argument("options", nargs="*", help="key=value pairs, for `set`")

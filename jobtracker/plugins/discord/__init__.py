@@ -133,6 +133,46 @@ class Discord(Plugin):
     summary = "import job postings a bot announces in one Discord channel"
     page_size = PAGE
 
+    # -- settings --------------------------------------------------------------------
+    def defaults(self) -> dict:
+        """Exactly the six keys that used to be the global DEFAULTS dict.
+
+        Kept identical on purpose: an existing plugins.yaml written before plugins had
+        kinds must load unchanged, and it does because these are the keys it holds.
+        """
+        return {
+            "enabled": False,
+            # How far back the first read reaches. Only used when there is no cursor.
+            "backfill_days": 14,
+            # A feed announces and never retracts, so its postings close by age. 0
+            # disables that, which is a real choice meaning "only ever close for a
+            # better-known reason".
+            "expire_after_days": 90,
+            # Names the posting group: "Discord: #new-grad-jobs" in the dashboard.
+            "label": "",
+            "channel_id": "",
+            "guild_id": "",
+        }
+
+    def validate(self, settings: dict) -> None:
+        """Discord's own rules. These fired for every plugin until kinds existed."""
+        from ..settings import InvalidSettings
+
+        for key in ("backfill_days", "expire_after_days"):
+            if settings.get(key, 0) < 0:
+                raise InvalidSettings(f"discord: `{key}` cannot be negative")
+        if settings.get("channel_id") and not settings["channel_id"].isdigit():
+            raise InvalidSettings(
+                "discord: `channel_id` must be the numeric id Discord's "
+                "'Copy Channel ID' gives you, not a channel name"
+            )
+        if settings.get("guild_id") and not settings["guild_id"].isdigit():
+            raise InvalidSettings("discord: `guild_id` must be numeric")
+
+    def describe_cursor(self, cursor: str) -> str:
+        """A Discord message id encodes its own timestamp, so this is a real date."""
+        return day_of(cursor) or cursor
+
     # -- availability ----------------------------------------------------------------
     def unavailable_reason(self, settings: dict) -> Optional[str]:
         if not config.DISCORD_TOKEN:

@@ -1,4 +1,12 @@
-# Import plugins: feeds of postings that are not boards in companies.yaml.
+# Plugins: the parts of this system you switch on and off.
+#
+# Two kinds. An IMPORT plugin is a feed of postings that is not a board in
+# companies.yaml (discord, below). A TASK plugin is the switch for one of the bounded
+# model roles in jobtracker/tasks/ — it reads no feed and holds no cursor, and the only
+# setting it has is `enabled`.
+#
+# Each plugin declares its own settings, so a key below belongs to the plugin it sits
+# under and nowhere else. An unknown key is refused rather than ignored.
 #
 # Copy this to `plugins.yaml` (gitignored) or just run the commands — every writer is
 # something you typed, and nothing scheduled ever touches this file:
@@ -7,7 +15,7 @@
 #   jobtracker plugins enable discord
 #   jobtracker plugins set discord channel_id=123456789012345678 label=new-grad-jobs
 #   jobtracker plugins disable discord
-#   jobtracker plugins purge discord            # dry run; --write applies
+#   jobtracker plugins purge discord            # dry run; --write applies (feeds only)
 #
 # THE BOT TOKEN IS NOT IN THIS FILE and must not be put here. It is
 # $JOBTRACKER_DISCORD_TOKEN, in the environment. A config file gets `cat`ed into a
@@ -44,3 +52,23 @@ discord:
   # rather than by disappearing from a board. 0 means never expire, which is a real
   # choice — it means "only ever close for a better-known reason".
   expire_after_days: 90
+
+# The bounded model roles. `level`, `judge` and `inbox` are on unless you say otherwise —
+# they predate this switch, and adding it was not meant to change what anyone's queue
+# does. `tailor` is off, like any newly installed plugin.
+#
+# These entries are optional. Delete the block and every role keeps its default.
+
+tailor:
+  # Reads a posting's description and your resume, and proposes edits to the resume.
+  # It only ever proposes: `jobtracker tailor build` is what assembles a PDF, and
+  # `--attach` is what makes one a posting's resume. Needs $JOBTRACKER_RESUME_TEX to
+  # point at a LaTeX resume; without one it reports itself unavailable rather than idle.
+  enabled: false
+
+# level:
+#   enabled: true
+# judge:
+#   enabled: true
+# inbox:
+#   enabled: true

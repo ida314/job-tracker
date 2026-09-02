@@ -122,12 +122,29 @@ def test_prefill_is_not_a_task():
     assert get_task("prefill") is None
 
 
-def test_inbox_runs_last_so_a_busy_mailbox_cannot_starve_the_pipeline():
+def test_inbox_runs_after_the_chain_so_a_busy_mailbox_cannot_starve_it():
     """The mail queue refills from an external stream on a schedule nothing here
     controls. Ahead of `level` a chatty inbox would keep the pipeline's own stages
-    permanently waiting for a queue that never drains."""
-    assert task_names()[-1] == "inbox"
+    permanently waiting for a queue that never drains.
+
+    It used to assert `task_names()[-1] == "inbox"`, which stopped being the claim when
+    `tailor` arrived behind it. What was load-bearing was "after the stages it could
+    starve", not "last" — see the test below for why something else is last now.
+    """
     assert get_task("inbox").priority > get_task("judge").priority
+    assert get_task("inbox").priority > get_task("level").priority
+
+
+def test_tailor_runs_last_because_one_resume_edit_re_keys_every_unit():
+    """`tailor`'s unit_key is a hash of the resume text, not of the posting.
+
+    That is what makes a rewritten resume re-ask every posting — the property it is there
+    for — and it is exactly why it cannot go earlier. Editing one line re-keys the entire
+    queue at once, so ahead of `inbox` a single save would push a mailbox behind several
+    hundred units. Same starvation argument `inbox` makes, one notch up.
+    """
+    assert task_names()[-1] == "tailor"
+    assert get_task("tailor").priority > get_task("inbox").priority
 
 
 def test_the_first_task_with_work_wins(criteria, profile):
@@ -501,3 +518,77 @@ def test_a_down_router_and_an_empty_queue_do_not_read_the_same(
     out = capsys.readouterr().out
     assert expected in out
     assert forbidden not in out
+
+
+# -- the switch ----------------------------------------------------------------------
+def test_a_task_switched_off_is_absent_from_the_survey_not_unavailable(criteria, profile):
+    """Switched off and misconfigured are different things to see in a report.
+
+    One is a decision you typed and there is nothing to go and fix; the other is a fault.
+    Listing a disabled task with a reason beside it reads as the second and sends you
+    looking for a problem you created on purpose — the same conflation that lets a feed
+    quietly stop importing.
+    """
+    conn = store.connect(":memory:")
+    _seed(conn, [("1", "Backend Software Engineer", "d", Decision.UNCERTAIN)])
+    ctx = _ctx(criteria, profile)
+
+    named = [c.task.name for c in survey(conn, ctx, enabled={"judge", "inbox"})]
+    assert "level" not in named
+    assert "judge" in named
+    conn.close()
+
+
+def test_a_switched_off_task_is_never_asked_for_its_queue(criteria, profile):
+    """The switch has to come before the query.
+
+    Otherwise a machine that turned a role off still pays for its backlog every night —
+    and `pending()` is the most expensive thing a task does.
+    """
+    class _Exploding(Task):
+        name = "explodes"
+        priority = 99
+        summary = "never runs"
+
+        def pending(self, conn, ctx, limit=None):
+            raise AssertionError("a switched-off task was asked for its queue")
+
+    from jobtracker.tasks.base import _REGISTRY
+
+    _REGISTRY["explodes"] = _Exploding()
+    try:
+        conn = store.connect(":memory:")
+        survey(conn, _ctx(criteria, profile), enabled={"level"})
+        conn.close()
+    finally:
+        del _REGISTRY["explodes"]
+
+
+def test_no_switch_set_means_every_task_runs(criteria, profile):
+    """A box with no plugins.yaml runs the queue it ran yesterday.
+
+    `enabled=None` is "all of them", which is what keeps every caller that predates the
+    switch — and every test here — working unchanged.
+    """
+    conn = store.connect(":memory:")
+    ctx = _ctx(criteria, profile)
+    assert ([c.task.name for c in survey(conn, ctx)]
+            == [c.task.name for c in survey(conn, ctx, enabled=set(task_names()))])
+    conn.close()
+
+
+def test_the_tasks_package_never_reads_plugins_yaml():
+    """A file read inside `survey()` would make the queue depend on what is on disk.
+
+    It would also make every test in this file depend on the developer's plugins.yaml.
+    The enabled set is an argument for exactly that reason, and the dependency runs one
+    way: `plugins/` may import `tasks/`, never the reverse.
+    """
+    import pathlib
+
+    package = pathlib.Path(config.__file__).parent / "tasks"
+    for source in package.glob("*.py"):
+        text = source.read_text()
+        assert "PLUGINS_YAML" not in text, source.name
+        assert "import plugins" not in text, source.name
+        assert "from ..plugins" not in text, source.name

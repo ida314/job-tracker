@@ -274,6 +274,39 @@ CREATE TABLE IF NOT EXISTS posting_resumes (
     PRIMARY KEY (company, ats_job_id)
 );
 
+-- What `tailor` proposes changing in your resume for one posting. Written by the task,
+-- and read by exactly one thing: the page that shows it to you.
+--
+-- That single reader is the invariant, not an accident of there being nothing else yet.
+-- DESIGN.md 8.1 is about a bounded role whose output was cached into `form_fields` and
+-- replayed by deterministic code at every later company — "a model that writes into a
+-- cache the rules then read back is not off the main loop; it is on it, one night later".
+-- So nothing joins this table into prefill, ranking or matching, and a suggestion reaches
+-- a real application only by you pressing a button.
+--
+-- `edits` is JSON: [{section, current_line, suggestion, evidence}]. Both `current_line`
+-- and `evidence` are verbatim quotes — from the resume and from the job description
+-- respectively — checked before the row is written, which is what keeps an invented
+-- requirement and an invented resume line off the page.
+--
+-- `resume_hash` is over the resume's TEXT, not its filename. `Answers.hash` covers only
+-- the basename, so a .tex edited in place would not move it; this is also the task's
+-- `unit_key`, which is what makes a rewritten resume re-ask every posting.
+--
+-- `resolution` mirrors `mail_proposals`: pending until you accept or dismiss it. Dismissed
+-- is a resolution and not a delete, for the reason it is there — deleting is what would
+-- let the next run propose the very same thing again.
+CREATE TABLE IF NOT EXISTS resume_suggestions (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    edits       TEXT NOT NULL,
+    resume_hash TEXT NOT NULL,
+    resolution  TEXT NOT NULL DEFAULT 'pending',
+    proposed_at TEXT NOT NULL,
+    resolved_at TEXT,
+    PRIMARY KEY (company, ats_job_id)
+);
+
 -- Mail the deterministic narrower tied to a row in `applications`. Written only by
 -- `jobtracker mail` — never by a task, never by the web server. Reading a mailbox is I/O,
 -- and the rule that made `check` cache descriptions applies unchanged: the `inbox` task
@@ -966,6 +999,10 @@ _PURGE_BY_COMPANY = [
     "postings", "verdicts", "rankings", "deferrals", "prefill_plans",
     "posting_resumes", "task_attempts", "form_fields", "board_health",
     "manual_checks",
+    # Machine-authored and re-derivable: the next `work` proposes them again from the
+    # description and the resume. Your ruling on one is not in here — accepting a
+    # suggestion attaches a file, and that lives in `posting_resumes`.
+    "resume_suggestions",
 ]
 
 # Deliberately NOT purged, and each for its own reason:
@@ -2349,6 +2386,109 @@ def set_posting_resume(
         """,
         (company, ats_job_id, filename, size, now),
     )
+
+
+# -- resume suggestions ---------------------------------------------------------------
+def matches_needing_tailoring(
+    conn: sqlite3.Connection, resume_hash: str, limit: Optional[int] = None
+) -> list[sqlite3.Row]:
+    """Scored, open matches whose suggestions were not made against this resume.
+
+    The intersection of what `judge` needs and what `prefill` needs: a match, still open,
+    with a cached description to read, and a score — because `tailor` works the postings
+    you are actually going to see, in the order you will see them.
+
+    `description != ''` matters as much as `IS NOT NULL`: NULL means never fetched and
+    `''` means fetched and genuinely empty, and neither is text a model can read.
+
+    The `resume_hash` comparison is what makes a unit leave the queue once it is done —
+    `run_task` recomputes `remaining` by re-reading `pending_count` rather than
+    subtracting, so a task whose queue does not shrink after `apply` reports a backlog
+    forever. Same mechanism `judge` gets from `prose_hash`, and it has the same second
+    effect: rewrite your resume and every posting is asked again.
+
+    Postings you have already applied to or skipped are excluded — a suggestion for a job
+    that is behind you is work nobody will read.
+    """
+    sql = """
+        SELECT p.company, p.ats_job_id, p.title, p.description, r.score
+        FROM postings p
+        JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        JOIN rankings r ON p.company=r.company AND p.ats_job_id=r.ats_job_id
+        LEFT JOIN applications a ON p.company=a.company AND p.ats_job_id=a.ats_job_id
+        LEFT JOIN deferrals d ON p.company=d.company AND p.ats_job_id=d.ats_job_id
+        LEFT JOIN resume_suggestions s
+               ON p.company=s.company AND p.ats_job_id=s.ats_job_id
+        WHERE v.verdict='match' AND p.closed_at IS NULL
+          AND r.score IS NOT NULL
+          AND p.description IS NOT NULL AND p.description != ''
+          AND a.company IS NULL
+          AND d.company IS NULL
+          AND (s.resume_hash IS NULL OR s.resume_hash != ?)
+        ORDER BY r.score DESC, p.company
+    """
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return list(conn.execute(sql, (resume_hash,)))
+
+
+def record_suggestions(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, edits: str,
+    resume_hash: str, now: str,
+) -> None:
+    """Store what `tailor` proposes for one posting. The caller commits.
+
+    Re-proposing resets `resolution` to pending, and that is right rather than rude: the
+    row is keyed by resume hash, so a re-proposal only happens when the resume itself
+    changed, and a ruling you made about the old wording is not a ruling about the new.
+    """
+    conn.execute(
+        """
+        INSERT INTO resume_suggestions (company, ats_job_id, edits, resume_hash,
+                                        resolution, proposed_at, resolved_at)
+        VALUES (?, ?, ?, ?, 'pending', ?, NULL)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            edits=excluded.edits, resume_hash=excluded.resume_hash,
+            resolution='pending', proposed_at=excluded.proposed_at, resolved_at=NULL
+        """,
+        (company, ats_job_id, edits, resume_hash, now),
+    )
+
+
+def get_suggestions(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    row = conn.execute(
+        "SELECT * FROM resume_suggestions WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+    return row
+
+
+def suggestions_by_posting(conn: sqlite3.Connection) -> dict:
+    """Every proposal, for cheap render-time lookup. The dashboard's one read."""
+    return {
+        (r["company"], r["ats_job_id"]): r
+        for r in conn.execute("SELECT * FROM resume_suggestions")
+    }
+
+
+def resolve_suggestions(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, resolution: str, now: str
+) -> bool:
+    """Mark a proposal accepted or dismissed. False if there was nothing to mark.
+
+    Dismissed is a resolution, never a delete — deleting is what would let the next run
+    propose the same edits again. `mail_proposals` draws the same distinction.
+    """
+    if resolution not in ("accepted", "dismissed"):
+        raise ValueError(f"unknown resolution {resolution!r}")
+    cur = conn.execute(
+        "UPDATE resume_suggestions SET resolution=?, resolved_at=? "
+        "WHERE company=? AND ats_job_id=?",
+        (resolution, now, company, ats_job_id),
+    )
+    return cur.rowcount > 0
 
 
 def get_posting_resume(

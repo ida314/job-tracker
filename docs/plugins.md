@@ -23,6 +23,56 @@ pure.
 
 ---
 
+## Two kinds of plugin
+
+Everything above is about **import** plugins, and for a while they were the only kind. A
+plugin now declares a `kind`, and there are two:
+
+| kind | what it is | driven by |
+|---|---|---|
+| `import` | a feed of postings that is not a board (Discord) | `plugins/runner.collect`, from `cmd_check` |
+| `task` | the switch for a bounded model role in `tasks/` | `tasks/runner`, from `jobtracker work` |
+
+A task plugin implements **nothing**. It has no `page_url`, no cursor, no `parse_page` —
+not stubbed out, genuinely absent, so handing one to the paging loop fails at the boundary
+rather than three layers into a request. The model role stays implemented in `tasks/`,
+identical to the ones that are not switchable; all the plugin adds is a line in
+`plugins.yaml`. `plugins/roles.py` derives one switch per registered task, which is what
+makes adding a role to the switchboard a change to a set of names rather than a module.
+
+Two consequences worth stating:
+
+- **`plugins/` may import `tasks/`; `tasks/` may not import `plugins/`.** `survey()` takes
+  the enabled set as an argument, so a task module is pure and cannot tell whether it is
+  switchable — and the queue does not depend on what is on disk.
+- **`purge` is import-only.** It removes postings a feed imported, and a model role imports
+  nothing; the postings it writes proposals *about* belong to whichever board owns them.
+
+`level`, `judge` and `inbox` default to **on** — they predate the switch, and adding it was
+not meant to change anyone's queue. `tailor` defaults to off, like any newly installed
+plugin. A switched-off task is **absent** from `work --dry-run`, not listed as unavailable:
+switched off is a decision you typed and there is nothing to go and fix, while a reason
+printed beside it reads as a fault.
+
+---
+
+## Each plugin declares its own settings
+
+There was one flat `DEFAULTS` dict here until the registry grew a second kind, and it did
+not survive contact with one: every plugin's config surface was the union of every plugin's
+keys, so `channel_id` was a valid setting on a model role and was `.isdigit()`-validated as
+one.
+
+Now `Plugin.defaults()` is the schema — an unknown key is refused, the **type** of a setting
+is the type of its default, and semantic rules (`channel_id` is numeric, a day count is not
+negative) live in `Plugin.validate()` on the plugin that owns them. `coerce` runs `validate`
+too, so `backfill_days=-3` is still refused while you are standing there rather than three
+layers down in `safewrite`.
+
+A plugins.yaml written before any of this loads unchanged, key for key. There is a test.
+
+---
+
 ## Running it
 
 ```bash
