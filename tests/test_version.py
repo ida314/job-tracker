@@ -55,6 +55,29 @@ def test_version_matches_pyproject():
     assert data["project"]["version"] == jobtracker.__version__
 
 
+def test_every_subpackage_is_in_the_wheel():
+    """`[tool.setuptools] packages` is an explicit list, so a new subpackage is opt-in.
+
+    Left out, it is silently absent from the container image and the failure wears the
+    costume of a quiet night: `plugins/` missing looks like a feed that imported nothing,
+    `resume/` missing looks like `tailor` having no suggestions to make. The pyproject
+    comment has warned about this since the plugins package landed, and nothing enforced
+    it — `jobtracker.resume` was duly left out on the way in.
+    """
+    import pathlib
+    import tomllib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    listed = set(tomllib.loads((root / "pyproject.toml").read_text())
+                 ["tool"]["setuptools"]["packages"])
+    found = {
+        "jobtracker." + d.relative_to(root / "jobtracker").as_posix().replace("/", ".")
+        for d in (root / "jobtracker").rglob("*")
+        if d.is_dir() and (d / "__init__.py").is_file() and "__pycache__" not in d.parts
+    }
+    assert found - listed == set(), f"not in pyproject: {sorted(found - listed)}"
+
+
 def test_version_chip_shows_the_build_when_there_is_one(monkeypatch):
     from jobtracker import dashboard
 
