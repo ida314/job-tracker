@@ -1,4 +1,4 @@
-"""LaTeX: the first resume format, and the only one today.
+r"""LaTeX: the first resume format, and the only one today.
 
 Reading it needs nothing — a .tex file is text, which is the whole reason the resume's
 source of truth is LaTeX rather than the PDF it compiles to. Writing it needs care, and
@@ -6,9 +6,9 @@ that care is `sanitize` below.
 
 Why a control-sequence allowlist is a security control
 ------------------------------------------------------
-TeX is a programming language with filesystem access. `\\input` reads a file into the
-document, `\\write`/`\\openout` create one, `\\catcode` and `\\csname` rewrite what the
-rest of the source even means, and under `--shell-escape` `\\write18` runs a shell
+TeX is a programming language with filesystem access. `\input` reads a file into the
+document, `\write`/`\openout` create one, `\catcode` and `\csname` rewrite what the
+rest of the source even means, and under `--shell-escape` `\write18` runs a shell
 command. A resume is assembled from text a language model composed, so "the model writes
 a suggestion into a document we then compile" is, without a guard, "the model writes a
 program we then run".
@@ -16,7 +16,7 @@ program we then run".
 So `sanitize` refuses any control sequence not on a small list of the ones a resume line
 actually needs — emphasis, escapes, and the odd spacing macro. An allowlist rather than a
 blocklist for the usual reason: the blocklist is a guess about what is dangerous, and
-`\\csname` composes new command names out of characters, so guessing wrong is quiet.
+`\csname` composes new command names out of characters, so guessing wrong is quiet.
 
 This is belt *and* braces. `assemble.py` also compiles with shell-escape explicitly off,
 in a scratch directory, under a timeout. Either alone would probably do; the combination

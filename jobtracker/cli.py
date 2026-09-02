@@ -26,6 +26,8 @@ Subcommands:
   applications  list what you applied to, grouped by what needs doing
   mail          read the job-search mailbox and propose application updates; it never
                 writes to the mailbox. `work --task inbox` is what reads the candidates
+  tailor        assemble a tailored resume from the edits `work --task tailor` proposed;
+                --attach uses each result as that posting's resume
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
   repair        read careers pages for broken boards' new slugs; --write applies
   plugins       list, enable, disable or configure a plugin (a feed, or a model role)
@@ -1461,6 +1463,92 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
 
 # -- prefill -----------------------------------------------------------------------
+def cmd_tailor(args: argparse.Namespace) -> int:
+    """Assemble a tailored resume from suggestions `tailor` already proposed.
+
+    Deterministic, and deliberately not a `work` task for the reason `prefill` left that
+    queue on 2026-08-25: it asks a model nothing, and `cmd_work` returns early when no
+    router is configured. A pass that needs no model must not be gated behind one being
+    reachable, or a night with the GPU down assembles nothing and reports it as though
+    there were nothing to assemble.
+
+    It never writes to your resume source. It applies the edits to a copy in memory,
+    compiles that, and writes a NEW file under TAILORED_DIR. Attaching one to an
+    application is a separate act — a button on the page, or `--attach` here.
+    """
+    from . import resume as resume_mod, resumes
+
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = args.since or _today()
+    try:
+        text, fmt, _resume_hash = _load_resume(getattr(args, "resume_source", None))
+        if text is None or fmt is None:
+            print(f"No resume source at {config.RESUME_TEX}.", file=sys.stderr)
+            print("  Write one, or set $JOBTRACKER_RESUME_TEX.", file=sys.stderr)
+            return 1
+
+        rows = [
+            row for row in store.suggestions_by_posting(conn).values()
+            if row["resolution"] != "dismissed"
+        ]
+        if args.company:
+            rows = [r for r in rows if r["company"] == args.company]
+        if not rows:
+            print("Nothing to assemble — no suggestions have been proposed yet.")
+            print("  `jobtracker plugins enable tailor`, then `jobtracker work`.")
+            return 0
+        rows.sort(key=lambda r: (r["company"], r["ats_job_id"]))
+        if args.limit:
+            rows = rows[:args.limit]
+
+        # Reported once, up front, rather than as N identical failures. A missing engine
+        # is one fact about this machine, not one fact per posting.
+        blocked = fmt.unavailable_reason()
+        built = failed = 0
+        for row in rows:
+            edits = [
+                resume_mod.Edit(**e) for e in json.loads(row["edits"] or "[]")
+            ]
+            tailored, applied = fmt.apply_edits(text, edits)
+            head = f"{row['company']} — {row['ats_job_id']}"
+            if not applied:
+                # The resume moved under a proposal made against an older version of it.
+                print(f"  {head}: none of {len(edits)} edit(s) still apply — re-run work")
+                continue
+            if blocked:
+                print(f"  {head}: {applied}/{len(edits)} edit(s) ready, not assembled")
+                continue
+
+            stem = resumes.stored_name(row["company"], row["ats_job_id"], "").rstrip(".")
+            try:
+                blob = resume_mod.assemble(fmt, tailored, stem=stem or "resume")
+            except resume_mod.AssemblyFailed as exc:
+                print(f"  {head}: {exc}", file=sys.stderr)
+                failed += 1
+                continue
+            out = config.TAILORED_DIR / f"{stem}.pdf"
+            resume_mod.write_pdf(out, blob)
+            built += 1
+            print(f"  {head}: {applied} edit(s) -> {out}")
+            if args.attach:
+                store.set_posting_resume(
+                    conn, row["company"], row["ats_job_id"], out.name, len(blob), today
+                )
+                store.resolve_suggestions(
+                    conn, row["company"], row["ats_job_id"], "accepted", today
+                )
+                conn.commit()
+
+        if blocked:
+            # Named, not silent, and not an error: every suggestion above is still good.
+            print(f"\nNothing was assembled — {blocked}")
+            return EXIT_OK
+        print(f"\n{built} assembled, {failed} failed")
+        return EXIT_DEGRADED if failed else EXIT_OK
+    finally:
+        conn.close()
+
+
 def cmd_prefill(args: argparse.Namespace) -> int:
     """Work out what goes in every box of every form worth applying to.
 
@@ -2429,6 +2517,23 @@ def build_parser() -> argparse.ArgumentParser:
     rk.add_argument("--dry-run", action="store_true")
     _llm_flags(rk)
     rk.set_defaults(func=cmd_rank)
+
+    tl = sub.add_parser(
+        "tailor",
+        help="assemble a tailored resume from the edits `work` proposed",
+    )
+    tl.add_argument("action", nargs="?", default="build", choices=["build"])
+    tl.add_argument("--company", default=None, help="only this company")
+    tl.add_argument("--limit", type=int, default=None, help="assemble at most N")
+    tl.add_argument("--resume-source", default=None, dest="resume_source",
+                    help=f"resume source (default: {config.RESUME_TEX})")
+    tl.add_argument("--attach", action="store_true",
+                    help="also use each result as that posting's resume")
+    tl.add_argument("--db", default=None)
+    tl.add_argument("--since", default=None)
+    # No `_llm_flags`: this pass opens no socket to a model, which is why it is a command
+    # and not a task. See cmd_tailor.
+    tl.set_defaults(func=cmd_tailor)
 
     pf = sub.add_parser(
         "prefill",

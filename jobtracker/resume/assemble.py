@@ -1,4 +1,4 @@
-"""Turning a source document into a PDF. The one place this repo shells out.
+r"""Turning a source document into a PDF. The one place this repo shells out.
 
 Nothing else in jobtracker runs a subprocess — there is no `subprocess`, `Popen` or
 `os.system` anywhere else in the package, and Playwright manages its own browser through
@@ -13,10 +13,10 @@ The bounds, and what each one is for:
 * **A scratch directory per run.** The source is copied into a fresh temp dir and the
   engine is run with that as its cwd, so a document that writes files writes them
   somewhere that is deleted a moment later — and cannot reach `data/` or the repo.
-* **A timeout.** TeX loops. `\\def\\x{\\x}\\x` is a hang, not an error, and a nightly job
+* **A timeout.** TeX loops. `\def\x{\x}\x` is a hang, not an error, and a nightly job
   that hangs is worse than one that fails.
 * **No network, no shell-escape.** `latex.command()` passes `--untrusted`, which is
-  tectonic's own refusal of `\\write18` and friends.
+  tectonic's own refusal of `\write18` and friends.
 * **Output is read back as bytes and returned**, never left on disk for a caller to find.
   Where it is stored is the caller's decision, not this module's.
 
