@@ -28,7 +28,7 @@ Subcommands:
                 writes to the mailbox. `work --task inbox` is what reads the candidates
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
   repair        read careers pages for broken boards' new slugs; --write applies
-  plugins       list, enable, disable, configure or purge an import plugin
+  plugins       list, enable, disable or configure a plugin (a feed, or a model role)
   add-company   append a curated entry to companies.yaml
   forget-learned  sweep every resolved label the rules and your aliases cannot
                 explain (the one-shot for a database that ran prefill's model pass)
@@ -303,8 +303,11 @@ def _active_plugins(plugins_path) -> list:
         return []
 
     active = []
-    for plugin in plugins_mod.all_plugins():
-        settings = {**plugin_settings.DEFAULTS, **configured.get(plugin.name, {})}
+    # Import plugins only. A task plugin has no feed to read, and handing one to the
+    # paging loop would call `page_url` on a model role.
+    for plugin in plugins_mod.plugins_of_kind(plugins_mod.KIND_IMPORT):
+        settings = {**plugin_settings.defaults_for(plugin.name),
+                    **configured.get(plugin.name, {})}
         if not settings.get("enabled"):
             continue
         why = plugin.unavailable_reason(settings)
@@ -313,6 +316,27 @@ def _active_plugins(plugins_path) -> list:
             continue
         active.append((plugin, settings))
     return active
+
+
+def _enabled_tasks(plugins_path) -> set:
+    """The task names switched on in plugins.yaml.
+
+    The mirror of `_active_plugins`, and it makes the same refusal for the same reason: a
+    malformed plugins.yaml means **no switched task runs**, rather than every task
+    running ungoverned. A curated file that says something unactionable is not permission.
+
+    A task nobody has a switch for is on — that is what keeps a box with no plugins.yaml
+    running the queue it ran yesterday.
+    """
+    from . import plugins as plugins_mod
+    from .plugins import settings as plugin_settings
+
+    try:
+        configured = plugin_settings.load_settings(plugins_path)
+    except plugin_settings.InvalidSettings as exc:
+        log.error("plugins.yaml is invalid, so no switched task ran: %s", exc)
+        return set()
+    return plugins_mod.enabled_task_names(configured)
 
 
 def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degraded) -> None:
@@ -417,6 +441,18 @@ def cmd_plugins(args: argparse.Namespace) -> int:
         return 1
 
     if action == "purge":
+        if plugin.kind == plugins_mod.KIND_TASK:
+            # Purge removes what a feed *imported*. A model role imports nothing: it
+            # writes proposals about postings some board already owns, and deleting the
+            # postings because you turned a role off would take the board's rows with
+            # them. Disabling it is the whole of switching it off.
+            print(
+                f"{plugin.name} is a model role, not a feed — it imports no postings, "
+                f"so there is nothing to purge.\n"
+                f"  `jobtracker plugins disable {plugin.name}` switches it off.",
+                file=sys.stderr,
+            )
+            return 1
         return _plugins_purge(args, plugin)
 
     try:
@@ -432,7 +468,9 @@ def cmd_plugins(args: argparse.Namespace) -> int:
                     print(f"expected key=value, got {pair!r}", file=sys.stderr)
                     return 1
                 key, _, value = pair.partition("=")
-                options[key.strip()] = plugin_settings.coerce(key.strip(), value)
+                options[key.strip()] = plugin_settings.coerce(
+                    plugin.name, key.strip(), value
+                )
             settings = plugin_settings.set_options(path, plugin.name, options)
     except plugin_settings.InvalidSettings as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -449,15 +487,20 @@ def cmd_plugins(args: argparse.Namespace) -> int:
         # nightly run is the first thing that tells you.
         print(f"  cannot run yet: {why}")
     elif action == "enable":
-        days = settings.get("backfill_days")
-        print(f"  the next `check` will read the last {days} day(s), then only what is new")
+        if plugin.kind == plugins_mod.KIND_TASK:
+            print("  the next `jobtracker work` will pick it up")
+        else:
+            days = settings.get("backfill_days")
+            print(
+                f"  the next `check` will read the last {days} day(s), "
+                f"then only what is new"
+            )
     return 0
 
 
 def _plugins_list(args: argparse.Namespace, path: Path) -> int:
     from . import plugins as plugins_mod
     from .plugins import settings as plugin_settings
-    from .plugins.discord import day_of
 
     try:
         configured = plugin_settings.load_settings(path)
@@ -468,32 +511,56 @@ def _plugins_list(args: argparse.Namespace, path: Path) -> int:
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     try:
         for plugin in plugins_mod.all_plugins():
-            settings = {**plugin_settings.DEFAULTS, **configured.get(plugin.name, {})}
-            company = plugin.company(settings)
-            counts = store.plugin_posting_counts(conn, company.name)
+            settings = {**plugin_settings.defaults_for(plugin.name),
+                        **configured.get(plugin.name, {})}
             state = "enabled" if settings.get("enabled") else "disabled"
-            print(f"{plugin.name}  [{state}]  {plugin.summary}")
+            print(f"{plugin.name}  [{state}]  ({plugin.kind})  {plugin.summary}")
             why = plugin.unavailable_reason(settings)
             if why:
                 print(f"  cannot run: {why}")
-            print(f"  group   : {company.name}")
-            if settings.get("label"):
-                print(f"  label   : {settings['label']}")
-            # The channel id is printed; the token never is, not even a prefix.
-            if settings.get("channel_id"):
-                print(f"  channel : {settings['channel_id']}")
-            cursor = store.get_plugin_state(conn, plugin.name).get("cursor")
-            if cursor:
-                print(f"  read to : {day_of(cursor) or cursor}")
+            if plugin.kind == plugins_mod.KIND_TASK:
+                _print_task_plugin(plugin)
             else:
-                print(f"  read to : nothing yet — first run covers "
-                      f"{settings.get('backfill_days')} day(s)")
-            print(f"  postings: {counts['total']} total · {counts['open']} open · "
-                  f"{counts['applied']} applied")
+                _print_import_plugin(conn, plugin, settings)
             print()
     finally:
         conn.close()
     return 0
+
+
+def _print_task_plugin(plugin) -> None:
+    """A model role has no group, no cursor and no postings of its own.
+
+    It reports the two things that decide when it runs: where it sits in the queue, and
+    what the queue would ask it. Printing a feed's fields here — `read to`, `postings` —
+    would be reporting numbers that belong to whichever board owns those rows.
+    """
+    from .tasks import get_task
+
+    task = get_task(plugin.task_name)
+    if task is None:
+        print("  role    : not registered — this switch controls nothing")
+        return
+    print(f"  role    : priority {task.priority}, run by `jobtracker work`")
+
+
+def _print_import_plugin(conn, plugin, settings: dict) -> None:
+    company = plugin.company(settings)
+    counts = store.plugin_posting_counts(conn, company.name)
+    print(f"  group   : {company.name}")
+    if settings.get("label"):
+        print(f"  label   : {settings['label']}")
+    # The channel id is printed; the token never is, not even a prefix.
+    if settings.get("channel_id"):
+        print(f"  channel : {settings['channel_id']}")
+    cursor = store.get_plugin_state(conn, plugin.name).get("cursor")
+    if cursor:
+        print(f"  read to : {plugin.describe_cursor(cursor)}")
+    else:
+        print(f"  read to : nothing yet — first run covers "
+              f"{settings.get('backfill_days')} day(s)")
+    print(f"  postings: {counts['total']} total · {counts['open']} open · "
+          f"{counts['applied']} applied")
 
 
 def _plugins_purge(args: argparse.Namespace, plugin) -> int:
@@ -1106,7 +1173,8 @@ def _refresh_gap_stubs(conn, ctx) -> int:
 UNREACHABLE = object()
 
 
-async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None):
+async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None,
+                enabled: set | None = None):
     """Build a client, run one task, tear the client down. Async because the SDK is."""
     from . import llm as llm_pkg
     from .tasks import run_next
@@ -1127,6 +1195,7 @@ async def _work(args: argparse.Namespace, conn, ctx, task_name: str | None):
             task_name=task_name,
             budget=args.budget,
             concurrency=args.concurrency or DEFAULT_CONCURRENCY,
+            enabled=enabled,
         )
     finally:
         await client.aclose()
@@ -1152,6 +1221,15 @@ def cmd_work(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
+    enabled = _enabled_tasks(getattr(args, "plugins", None))
+    if args.task and args.task not in enabled:
+        # Exit 0, not 1: you switched it off, so this is the system doing what you said.
+        # Falling through to the survey would print "Nothing to do — every task is
+        # drained", which is false and sends you looking for an empty queue.
+        print(f"{args.task} is switched off in plugins.yaml.")
+        print(f"  `jobtracker plugins enable {args.task}` turns it on.")
+        return 0
+
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
 
@@ -1164,7 +1242,7 @@ def cmd_work(args: argparse.Namespace) -> int:
 
     try:
         ctx = _build_context(args, today, fetcher=fetcher)
-        candidates = survey(conn, ctx)
+        candidates = survey(conn, ctx, enabled=enabled)
 
         if args.dry_run:
             _print_survey(candidates)
@@ -1184,7 +1262,7 @@ def cmd_work(args: argparse.Namespace) -> int:
             print("  (or $JOBTRACKER_LLM_URL / $SIR_BASE_URL)")
             return 0
 
-        report = asyncio.run(_work(args, conn, ctx, args.task))
+        report = asyncio.run(_work(args, conn, ctx, args.task, enabled))
         if report is UNREACHABLE:
             _print_survey(candidates)
             print("\nRouter unreachable — the queue was left as it was.")
@@ -1308,7 +1386,11 @@ def cmd_rank(args: argparse.Namespace) -> int:
         args.concurrency = getattr(args, "concurrency", None) or 4
         ctx = _build_context(args, today)
         log.info("judging %d match(es) against profile %s", len(pending), profile.prose_hash)
-        report = asyncio.run(_work(args, conn, ctx, "judge"))
+        # Switched off means switched off, whichever command reaches the task. `rank` is
+        # `work --task judge` aimed from a different door, not an exemption from it.
+        report = asyncio.run(
+            _work(args, conn, ctx, "judge", _enabled_tasks(getattr(args, "plugins", None)))
+        )
         if report is not None and report is not UNREACHABLE:
             # `judged` and `unreadable` come off the task report rather than being
             # recounted here — the runner is what actually knows, and it already
@@ -2268,6 +2350,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"answer bank (default: {config.ANSWERS_YAML})")
     w.add_argument("--db", default=None)
     w.add_argument("--since", default=None)
+    w.add_argument("--plugins", default=None,
+                   help=f"path to plugins.yaml (default: {config.PLUGINS_YAML})")
     w.add_argument("--budget", type=int, default=None,
                    help="stop after N units (default: drain the task)")
     w.add_argument("--concurrency", type=int, default=None,
@@ -2296,6 +2380,8 @@ def build_parser() -> argparse.ArgumentParser:
     rk.add_argument("--answers", default=None)
     rk.add_argument("--db", default=None)
     rk.add_argument("--since", default=None)
+    rk.add_argument("--plugins", default=None,
+                    help=f"path to plugins.yaml (default: {config.PLUGINS_YAML})")
     rk.add_argument("--limit", type=int, default=None,
                     help="judge at most N postings (scoring always covers all)")
     rk.add_argument("--concurrency", type=int, default=None)
@@ -2369,7 +2455,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="rejects a phrase needs before it is suggested (default: 3)")
     e.set_defaults(func=cmd_eval)
 
-    pl = sub.add_parser("plugins", help="list, enable, disable or purge an import plugin")
+    pl = sub.add_parser(
+        "plugins",
+        help="list, enable, disable or configure a plugin (a feed, or a model role)",
+    )
     pl.add_argument("action", choices=["list", "enable", "disable", "set", "purge"])
     pl.add_argument("name", nargs="?", default=None)
     pl.add_argument("options", nargs="*", help="key=value pairs, for `set`")

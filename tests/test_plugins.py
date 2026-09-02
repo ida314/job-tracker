@@ -90,8 +90,18 @@ def test_an_absent_plugins_file_is_a_normal_state_not_an_error(tmp_path):
 
 
 def test_a_plugin_is_off_until_you_say_otherwise():
-    """`enabled` defaults False, so installing a plugin never starts reading anything."""
-    assert plugin_settings.DEFAULTS["enabled"] is False
+    """Installing an import plugin never starts reading anything.
+
+    Asserted over every registered import plugin rather than over one shared dict,
+    because the schema is per-plugin now and a dict nobody consults would keep passing
+    this test while a plugin quietly defaulted itself on. Task plugins are deliberately
+    excluded: the three roles that predate the switch default to on, so that adding the
+    switch changed nothing for anyone who does not use it.
+    """
+    from jobtracker.plugins import KIND_IMPORT, plugins_of_kind
+
+    for plugin in plugins_of_kind(KIND_IMPORT):
+        assert plugin_settings.defaults_for(plugin.name)["enabled"] is False, plugin.name
 
 
 def test_enabling_writes_through_safewrite_and_a_refused_candidate_writes_nothing(tmp_path):
@@ -109,13 +119,20 @@ def test_enabling_writes_through_safewrite_and_a_refused_candidate_writes_nothin
     "key,value", [("backfill_days", "soon"), ("backfill_days", "-3"), ("enabled", "maybe")],
 )
 def test_a_bad_value_is_refused_at_the_cli_not_at_one_am(key, value):
+    """`-3` is the one that matters here.
+
+    Its refusal is a *semantic* rule, and semantic rules moved onto the plugin when the
+    schema went per-plugin. So `coerce` has to run `validate` as well as convert, or the
+    refusal degrades from "refused while you are standing there" to a RefusedWrite three
+    layers down in safewrite — which is the failure this test is named after.
+    """
     with pytest.raises(plugin_settings.InvalidSettings):
-        plugin_settings.coerce(key, value)
+        plugin_settings.coerce("discord", key, value)
 
 
 def test_setting_an_unknown_key_is_refused():
     with pytest.raises(plugin_settings.InvalidSettings):
-        plugin_settings.coerce("colour", "blue")
+        plugin_settings.coerce("discord", "colour", "blue")
 
 
 def test_a_channel_name_is_refused_because_discord_wants_the_numeric_id(tmp_path):
@@ -437,3 +454,123 @@ def test_purge_names_the_rows_you_applied_to_before_removing_anything():
     store.record_application(conn, "Feed", "1", "SWE", "applied", "2026-08-03")
     blockers = store.purge_blockers(conn, "Feed")
     assert [b["ats_job_id"] for b in blockers] == ["1"]
+
+
+# -- kinds ---------------------------------------------------------------------------
+def test_a_plugin_must_declare_a_kind_a_loop_actually_owns():
+    """A plugin of no kind is one `plugins_of_kind` never returns.
+
+    Which reads exactly like a plugin that is switched off — so it is refused at
+    registration, in front of whoever wrote it, rather than discovered as an absence at
+    01:00 by a loop that never picked it up.
+    """
+    class _Kindless(base.BasePlugin):
+        name = "kindless"
+        kind = "neither"
+
+    with pytest.raises(ValueError):
+        base.register(_Kindless())
+
+
+def test_only_import_plugins_reach_the_feed_loop():
+    """`runner.collect`'s first act is an HTTP request for `plugin.page_url(...)`.
+
+    Handed a model role it would ask a thing with no URL for one. The kind filter is what
+    stops that, and `cmd_check` must use it rather than `all_plugins()`.
+    """
+    from jobtracker import plugins as plugins_mod
+
+    imports = [p.name for p in plugins_mod.plugins_of_kind(plugins_mod.KIND_IMPORT)]
+    tasks_ = [p.name for p in plugins_mod.plugins_of_kind(plugins_mod.KIND_TASK)]
+    assert "discord" in imports and "discord" not in tasks_
+    assert "judge" in tasks_ and "judge" not in imports
+
+
+def test_a_task_plugin_is_never_asked_for_a_company_a_cursor_or_a_page():
+    """It does not implement the feed protocol — it does not have it.
+
+    The failure is then an AttributeError at the boundary, not a NotImplementedError
+    three layers into a paging loop that has already opened a socket.
+    """
+    from jobtracker import plugins as plugins_mod
+
+    for plugin in plugins_mod.plugins_of_kind(plugins_mod.KIND_TASK):
+        for method in ("company", "page_url", "page_cursor", "parse_page"):
+            assert not hasattr(plugin, method), f"{plugin.name}.{method}"
+
+
+def test_every_task_plugin_switches_a_task_that_exists():
+    """A switch pointing at nothing is a control that silently does nothing."""
+    from jobtracker import plugins as plugins_mod
+    from jobtracker.tasks import get_task
+
+    for plugin in plugins_mod.plugins_of_kind(plugins_mod.KIND_TASK):
+        assert get_task(plugin.task_name) is not None, plugin.name
+
+
+# -- the schema ----------------------------------------------------------------------
+def test_a_plugin_only_accepts_the_settings_it_declares(tmp_path):
+    """The flat DEFAULTS let any plugin be pointed at a Discord channel.
+
+    `channel_id` was a valid setting on every plugin and was `.isdigit()`-validated as
+    one, so the config surface of each was the union of all of them.
+    """
+    path = tmp_path / "plugins.yaml"
+    path.write_text('judge:\n  enabled: true\n  channel_id: "123"\n')
+    with pytest.raises(plugin_settings.InvalidSettings):
+        plugin_settings.load_settings(path)
+
+
+def test_an_existing_discord_file_loads_unchanged_after_the_split(tmp_path):
+    """The migration property, asserted key by key.
+
+    A plugins.yaml written before plugins had kinds holds exactly these six keys with
+    exactly these defaults. `set_options` trims values equal to their default, so a
+    changed default would silently re-interpret a value already on disk.
+    """
+    path = tmp_path / "plugins.yaml"
+    path.write_text(
+        "discord:\n"
+        "  enabled: true\n"
+        '  channel_id: "123456789012345678"\n'
+        '  guild_id: "987654321098765432"\n'
+        "  label: new-grad-jobs\n"
+        "  backfill_days: 14\n"
+        "  expire_after_days: 90\n"
+    )
+    got = plugin_settings.load_settings(path)["discord"]
+    assert got == {
+        "enabled": True,
+        "channel_id": "123456789012345678",
+        "guild_id": "987654321098765432",
+        "label": "new-grad-jobs",
+        "backfill_days": 14,
+        "expire_after_days": 90,
+    }
+
+
+def test_the_day_counts_are_discords_rule_and_not_every_plugins(tmp_path):
+    """`expire_after_days` is not a setting a model role has, so its rule is not one
+    a model role is held to. That was the whole defect in one global dict."""
+    assert "expire_after_days" not in plugin_settings.defaults_for("judge")
+    assert "expire_after_days" in plugin_settings.defaults_for("discord")
+
+
+def test_priority_is_not_a_setting_plugins_yaml_accepts(tmp_path):
+    """Priority is the pipeline's dependency chain, not a preference.
+
+    In yaml it would put half the queue's ordering in a file, make `all_tasks()` a
+    function of what is on disk, and make the ordering test a statement about one
+    machine. It falls out of the unknown-key rejection for free; this says so on purpose.
+    """
+    path = tmp_path / "plugins.yaml"
+    path.write_text("judge:\n  enabled: true\n  priority: 5\n")
+    with pytest.raises(plugin_settings.InvalidSettings):
+        plugin_settings.load_settings(path)
+
+
+def test_a_cursor_is_described_by_the_plugin_that_minted_it():
+    """`plugins list` decoded every plugin's cursor with Discord's snowflake decoder,
+    imported straight into the CLI. Invisible with one feed; a confidently wrong date
+    for the second."""
+    assert base.Plugin().describe_cursor("whatever-this-is") == "whatever-this-is"
