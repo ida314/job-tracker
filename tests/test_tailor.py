@@ -289,3 +289,52 @@ def _seed_scored(conn, score=88.5):
         (score, "2026-09-01" if score is not None else None),
     )
     conn.commit()
+
+
+# -- dismissing ----------------------------------------------------------------------
+def test_dismissing_keeps_the_row_so_it_is_not_proposed_again():
+    """Dismissed is a resolution, never a delete.
+
+    Deleting is what would let the next run propose exactly the same edits again — the
+    rule `mail_proposals` follows. The row stays, keyed by the resume hash that produced
+    it, so it comes back on its own when the resume changes and not before.
+    """
+    conn = store.connect(":memory:")
+    _seed_scored(conn)
+    store.record_suggestions(conn, "Acme", "1", "[]", "hash-1", "2026-09-01")
+
+    assert store.resolve_suggestions(conn, "Acme", "1", "dismissed", "2026-09-02")
+    row = store.get_suggestions(conn, "Acme", "1")
+    assert row is not None and row["resolution"] == "dismissed"
+    # Still out of the queue for this resume, and back in for a different one.
+    assert store.matches_needing_tailoring(conn, "hash-1") == []
+    assert len(store.matches_needing_tailoring(conn, "hash-2")) == 1
+    conn.close()
+
+
+def test_resolving_something_that_was_never_proposed_is_false_not_a_write():
+    conn = store.connect(":memory:")
+    assert store.resolve_suggestions(conn, "Nope", "9", "dismissed", "2026-09-01") is False
+    conn.close()
+
+
+def test_a_resolution_outside_the_two_is_refused():
+    """`resolution` is an enum in prose only, so the writer is where it is enforced."""
+    conn = store.connect(":memory:")
+    _seed_scored(conn)
+    store.record_suggestions(conn, "Acme", "1", "[]", "hash-1", "2026-09-01")
+    with pytest.raises(ValueError):
+        store.resolve_suggestions(conn, "Acme", "1", "maybe", "2026-09-01")
+    conn.close()
+
+
+def test_re_proposing_reopens_a_ruling_made_about_different_wording():
+    """The row is keyed by resume hash, so a re-proposal only happens when the resume
+    itself changed — and a ruling about the old edits is not a ruling about the new."""
+    conn = store.connect(":memory:")
+    _seed_scored(conn)
+    store.record_suggestions(conn, "Acme", "1", "[]", "hash-1", "2026-09-01")
+    store.resolve_suggestions(conn, "Acme", "1", "dismissed", "2026-09-01")
+    store.record_suggestions(conn, "Acme", "1", "[]", "hash-2", "2026-09-02")
+    assert store.get_suggestions(conn, "Acme", "1")["resolution"] == "pending"
+    conn.close()

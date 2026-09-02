@@ -1474,28 +1474,56 @@ def cmd_tailor(args: argparse.Namespace) -> int:
 
     It never writes to your resume source. It applies the edits to a copy in memory,
     compiles that, and writes a NEW file under TAILORED_DIR. Attaching one to an
-    application is a separate act — a button on the page, or `--attach` here.
+    application is a separate act — `--attach` here.
+
+    `dismiss` is the other half of that, and it exists so `dismissed` is a state something
+    can actually reach: a proposal you do not want, kept rather than deleted. Deleting is
+    what would let the next run propose exactly the same edits again — the rule
+    `mail_proposals` follows. It comes back on its own when the resume changes, because
+    that is a different question.
     """
     from . import resume as resume_mod, resumes
 
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     try:
+        if args.action == "dismiss":
+            if not (args.company and args.job_id):
+                print("dismiss needs a company and a job id", file=sys.stderr)
+                return 1
+            moved = store.resolve_suggestions(
+                conn, args.company, args.job_id, "dismissed", today
+            )
+            conn.commit()
+            if not moved:
+                print(f"no suggestions for {args.company} {args.job_id}", file=sys.stderr)
+                return 1
+            # Dismissed, never deleted — the `mail_proposals` rule. Deleting is what would
+            # let the next run propose exactly the same edits again. They come back on
+            # their own when the resume changes, because that is a different question.
+            print(f"{args.company} {args.job_id}: dismissed; `tailor build` will skip it")
+            return EXIT_OK
+
         text, fmt, _resume_hash = _load_resume(getattr(args, "resume_source", None))
         if text is None or fmt is None:
             print(f"No resume source at {config.RESUME_TEX}.", file=sys.stderr)
             print("  Write one, or set $JOBTRACKER_RESUME_TEX.", file=sys.stderr)
             return 1
 
-        rows = [
-            row for row in store.suggestions_by_posting(conn).values()
-            if row["resolution"] != "dismissed"
-        ]
+        every = list(store.suggestions_by_posting(conn).values())
         if args.company:
-            rows = [r for r in rows if r["company"] == args.company]
+            every = [r for r in every if r["company"] == args.company]
+        rows = [row for row in every if row["resolution"] != "dismissed"]
         if not rows:
-            print("Nothing to assemble — no suggestions have been proposed yet.")
-            print("  `jobtracker plugins enable tailor`, then `jobtracker work`.")
+            # Two different states, and saying the first about the second is the
+            # absence-read-as-a-cause mistake: one sends you to enable a plugin, the
+            # other says the system did what you told it to.
+            if every:
+                print(f"Nothing to assemble — all {len(every)} proposal(s) are dismissed.")
+                print("  They return on their own when the resume changes.")
+            else:
+                print("Nothing to assemble — no suggestions have been proposed yet.")
+                print("  `jobtracker plugins enable tailor`, then `jobtracker work`.")
             return 0
         rows.sort(key=lambda r: (r["company"], r["ats_job_id"]))
         if args.limit:
@@ -2522,8 +2550,10 @@ def build_parser() -> argparse.ArgumentParser:
         "tailor",
         help="assemble a tailored resume from the edits `work` proposed",
     )
-    tl.add_argument("action", nargs="?", default="build", choices=["build"])
+    tl.add_argument("action", nargs="?", default="build", choices=["build", "dismiss"])
     tl.add_argument("--company", default=None, help="only this company")
+    tl.add_argument("--job-id", default=None, dest="job_id",
+                    help="with `dismiss`: which posting")
     tl.add_argument("--limit", type=int, default=None, help="assemble at most N")
     tl.add_argument("--resume-source", default=None, dest="resume_source",
                     help=f"resume source (default: {config.RESUME_TEX})")

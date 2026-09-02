@@ -112,7 +112,12 @@ Three more things stand behind it, and none is redundant:
 jobtracker tailor build                  # apply + compile, write to $JOBTRACKER_TAILORED
 jobtracker tailor build --company Acme   # just one
 jobtracker tailor build --attach         # ...and use each result as that posting's resume
+jobtracker tailor dismiss --company Acme --job-id 42   # not these edits
 ```
+
+`dismiss` keeps the row rather than deleting it, which is `mail_proposals`' rule: deleting
+is what would let the next run propose exactly the same edits again. It comes back on its
+own when the resume changes, because that is a different question.
 
 `build` is **not a task**, and that is the `prefill` lesson rather than a naming choice:
 `cmd_work` returns early when no router is configured, so a pass that needs no model would
@@ -120,8 +125,17 @@ silently do nothing on a night the GPU is down. It asks nothing of a model and a
 
 **Nothing writes to your resume source.** Edits are applied to a copy in memory, the result
 is a new file under `$JOBTRACKER_TAILORED`, and `--attach` records it through the
-per-posting override that already existed (`posting_resumes` + `prefill.retarget_resume`) —
-the same mechanism the dashboard's "Use for this posting" button uses.
+per-posting override that already existed — `store.set_posting_resume`, exactly what the
+dashboard's "Use for this posting" button writes.
+
+It writes only that, and the rest is machinery that was already there. The stored prefill
+plan goes stale on its own, because `matches_needing_prefill` compares `prefill_plans.
+resume_key` against `posting_resumes.filename` and re-plans the row when they differ. And
+at apply time `cmd_apply_to` and `server._api_apply_to` both run `prefill.retarget_resume`
+over the stored plan, which is what stops `browser._plan_index` handing the browser the
+resume the plan was built with. Attaching does not need to do either, and doing one of them
+here would be a third place that has to agree with the other two about which file goes out
+under your name.
 
 Two outcomes that are reported rather than hidden:
 
@@ -130,6 +144,9 @@ Two outcomes that are reported rather than hidden:
   because the unit key is a hash of the resume text.
 - **No toolchain** is named once, up front, and exits **0**. Every suggestion it holds is
   still good; a machine without TeX is a normal state, not a broken one.
+- **"Nothing to assemble" says which nothing it means** — no proposals yet (go enable the
+  plugin) or all of them dismissed (the system did what you told it). Saying the first
+  about the second is the absence-read-as-a-cause mistake this pipeline keeps naming.
 
 ## Where it runs
 

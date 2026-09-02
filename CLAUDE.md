@@ -1056,6 +1056,11 @@ and the first that composes prose** — so the bound is not the shape of the ans
   multiplies the nightly pull for something it never runs. CI asserts
   `latex.unavailable_reason() is None` on the published image, the same way it asserts
   Playwright — a lost capability otherwise looks exactly like a working deployment.
+- **`dismissed` is reachable, and kept.** `jobtracker tailor dismiss` is the only way to
+  set it, and it exists because a state nothing can reach is dead weight that reads as a
+  feature. Kept rather than deleted — deleting is what would let the next run propose the
+  same edits again (`mail_proposals`' rule) — and it reopens when the resume hash moves,
+  because a ruling about the old wording is not a ruling about the new.
 - **Priority 50, last.** It consumes what `judge` produces and feeds nothing, so the chain
   does not fix its number; it is behind `inbox` because its unit key is a hash of the resume
   **text**, so one edit re-keys every posting at once. (`Answers.hash` covers only a
