@@ -13,7 +13,13 @@ from .base import (  # noqa: F401
     get_format,
     register,
 )
-from .assemble import AssemblyFailed, assemble, write_pdf  # noqa: F401
+from .assemble import (  # noqa: F401
+    AssemblyFailed,
+    assemble,
+    tailored_path,
+    tailored_stem,
+    write_pdf,
+)
 from . import latex  # noqa: F401  (side effect: register())
 
 __all__ = [
@@ -21,6 +27,8 @@ __all__ = [
     "ResumeFormat",
     "AssemblyFailed",
     "assemble",
+    "tailored_path",
+    "tailored_stem",
     "write_pdf",
     "for_path",
     "formats",

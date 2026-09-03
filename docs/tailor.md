@@ -164,9 +164,31 @@ the phrase from the job description it answers. That phrase is why the block is 
 rendering — it is a verbatim quote, so the page can say *why* an edit was proposed instead
 of asking you to take it on trust. The Today card carries a count.
 
-**Neither surface has a button, in either mode.** Accepting means compiling a document, and
-a control on either page would put a model-authored PDF one click from a real application
-with the diff unread.
+**Neither surface has a button, in either mode.** Accepting means attaching a document to an
+application, and a control on either page would put a model-authored PDF one click from a
+real application with the diff unread.
+
+## Getting the PDF from the page
+
+Every posting row outside the three picks — both tables on the All postings tab, and the
+drawer under Today — carries a chip when `tailor` has proposed something, and beside it a
+`↓`. Under `serve` only: the static dashboard renders no actions column, and the download is
+a `/api/` href, which is as dead in a mailed file as a button would be.
+
+The `↓` is a build button until the PDF exists and a download link afterwards, because
+nothing stores the path — `resume_suggestions` has no path column, so the file's own presence
+under `$JOBTRACKER_TAILORED` is what "built" means. Pressing it POSTs to `/api/tailor-build`,
+which compiles on a daemon thread and answers `building` / `ready` / `error`; the page polls
+the same endpoint, which starts at most one build per posting.
+
+**This is not accepting.** A compile sends nothing to an employer and a downloaded PDF is a
+document you then read. Attaching one to an application is still `tailor build --attach`,
+after the diff has been read at `/apply`, which is where the reasoning is rendered.
+
+Every refusal is named rather than generic, because the build runs where nothing can report
+back to the click: no suggestions, dismissed ones, no resume source, no edit that still
+applies, and — the one most people will meet — no TeX engine, since tectonic is in the serve
+image only.
 
 ## Why `resume_suggestions` has exactly one reader
 

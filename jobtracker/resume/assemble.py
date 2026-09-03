@@ -109,3 +109,29 @@ def write_pdf(path: Path, blob: bytes) -> None:
     tmp = path.with_suffix(path.suffix + ".part")
     tmp.write_bytes(blob)
     shutil.move(str(tmp), str(path))
+
+
+def tailored_stem(company: str, ats_job_id: str) -> str:
+    """The basename, without suffix, of the tailored resume for one posting.
+
+    Derived, never stored: `resume_suggestions` has no path column, so the file's own
+    existence is what "this posting has a built resume" means. That makes agreeing on the
+    derivation load-bearing — four callers reach for this file (`tailor build`, the build
+    endpoint, the download route, and the dashboard cell that decides which of the two to
+    render), and a second copy of the expression is how the button and the terminal come
+    to mean different files.
+
+    `resumes.stored_name` slugs to `[a-z0-9_]`, so nothing a company or a job id contains
+    can put a separator or a `..` in the result — which is what lets the download route
+    take these two strings straight off a query string.
+    """
+    from .. import resumes
+
+    return resumes.stored_name(company, ats_job_id, "").rstrip(".") or "resume"
+
+
+def tailored_path(company: str, ats_job_id: str) -> Path:
+    """Where `tailor build` writes that posting's PDF, and where everything looks for it."""
+    from .. import config
+
+    return config.TAILORED_DIR / f"{tailored_stem(company, ats_job_id)}.pdf"

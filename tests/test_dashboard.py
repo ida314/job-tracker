@@ -5,7 +5,11 @@ that renders fine can still be silently wrong — an unescaped title, a javascri
 a row that carries the wrong tier and so hides under the wrong filter chip.
 """
 
-from jobtracker import dashboard, store
+import json
+from pathlib import Path
+from unittest import mock
+
+from jobtracker import config, dashboard, resume, store
 from jobtracker.models import Company, Decision, Posting, Verdict
 
 
@@ -562,16 +566,34 @@ def test_the_rest_of_the_ranking_needs_no_js_and_is_not_filterable():
     assert "data-filterable" not in panel
 
 
-def test_the_rest_of_the_ranking_carries_no_buttons_in_either_mode():
-    """A pick is what has buttons. Anything else would put `.pick [data-act]` on more
-    than the three cards the disposition handler is written for."""
+def test_the_rest_of_the_ranking_carries_no_disposition_control_in_either_mode():
+    """A pick is what gets dispositioned. `dashboard._JS` selects `.pick [data-act]`, and
+    that selector has to keep meaning exactly the three cards — so no row below them may
+    carry the attribute, whatever else it carries.
+
+    The rule used to be "no buttons here at all", which was this same reason expressed
+    through an absence. The drawer now offers the two controls that are not queue
+    decisions — put it in the tracker, get its tailored resume — so the reason is carried
+    by the attribute directly. Skip and snooze are still a card's alone.
+    """
     conn = _ranked_pool(6)
     for interactive in (False, True):
         doc = dashboard.build_dashboard(conn, [_company("Acme", 1), _company("Zeta", 3)],
                                         "2026-07-22", interactive=interactive)
         rest = doc[doc.index('<details class="rest">'):doc.index("</details>")]
-        assert "<button" not in rest
         assert "data-act" not in rest
+        assert 'data-act="skipped"' not in rest and 'data-act="snoozed"' not in rest
+
+
+def test_the_rest_of_the_ranking_carries_no_controls_in_the_static_file():
+    """The offline artifact rule, at the drawer. A button in a mailed file has nowhere to
+    POST, and a dead control is worse than no control."""
+    conn = _ranked_pool(6)
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1), _company("Zeta", 3)],
+                                    "2026-07-22", interactive=False)
+    rest = doc[doc.index('<details class="rest">'):doc.index("</details>")]
+    assert "<button" not in rest
+    assert "/api/" not in rest
 
 
 def test_the_rest_of_the_ranking_excludes_what_you_applied_to_or_skipped():
@@ -761,3 +783,182 @@ def test_the_suggestion_line_carries_no_button_in_either_mode():
         block = panel[start:panel.index("</div>", start)]
         assert "<button" not in block, interactive
         assert "data-act" not in block, interactive
+
+
+# -- the actions cell ---------------------------------------------------------------
+def _all_panel(doc):
+    return doc[doc.index('data-panel-body="all"'):doc.index('data-panel-body="boards"')]
+
+
+def _suggest(conn, company, jid, n=3, resolution="pending"):
+    edits = [{"section": "experience", "current_line": f"line {i}",
+              "suggestion": f"better {i}", "evidence": f"they want {i}"}
+             for i in range(n)]
+    store.record_suggestions(conn, company, jid, json.dumps(edits), "hash1", "2026-07-22")
+    if resolution != "pending":
+        store.resolve_suggestions(conn, company, jid, resolution, "2026-07-22")
+    conn.commit()
+
+
+def test_the_actions_column_exists_only_under_serve():
+    """The offline artifact rule, at the postings tables. `jobtracker dashboard` writes a
+    file that may be mailed and opened years later; a button in it has nowhere to POST."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    static = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22"))
+    live = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                interactive=True))
+    assert 'class="track"' not in static
+    assert "<th class=\"act\">Actions</th>" not in static
+    assert "/api/" not in static
+    assert 'class="track"' in live
+    assert '<th class="act">Actions</th>' in live
+
+
+def test_the_actions_column_reaches_matches_and_uncertain_alike():
+    """One renderer, so both tabs get it. A job you applied to by hand is as likely to be
+    sitting in the uncertain pile as in the matches one."""
+    # Both in one sync: `sync_postings` closes every posting absent from the fetch, so a
+    # second call naming only job 2 would close job 1 and leave one row on the page.
+    conn = store.connect(":memory:")
+    store.sync_postings(conn, "Acme", [
+        Posting("Acme", "1", "Backend Engineer", "https://x/1", "New York, NY"),
+        Posting("Acme", "2", "Engineer", "https://x/2", "New York, NY"),
+    ], "2026-07-01")
+    store.record_verdict(
+        conn, Verdict("Acme", "1", Decision.MATCH, "why", "rules"), "2026-07-01")
+    store.record_verdict(
+        conn, Verdict("Acme", "2", Decision.UNCERTAIN, "no level", "rules"), "2026-07-01")
+    conn.commit()
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                 interactive=True))
+    assert panel.count('class="track"') == 2
+    assert 'data-job="1"' in panel and 'data-job="2"' in panel
+
+
+def test_the_colspan_follows_the_actions_column():
+    """The group head spans the row. `cols` and the header come out of the same two flags
+    in one place, so a column added to one cannot go missing from the other."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    for interactive, matches_span in ((False, 3), (True, 4)):
+        panel = _all_panel(dashboard.build_dashboard(
+            conn, [_company("Acme", 1)], "2026-07-22", interactive=interactive))
+        start = panel.index("<thead><tr>") + len("<thead><tr>")
+        head = panel[start:panel.index("</thead>")]
+        assert head.count("<th") == matches_span
+        assert f'colspan="{matches_span}"' in panel
+
+
+def test_a_posting_already_in_the_tracker_offers_a_state_not_a_button():
+    """Re-tracking upserts harmlessly, but it appends a second `applied` event — and a
+    live-looking control on a job you already applied to is the page disagreeing with
+    itself about what it knows."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    store.record_application(conn, "Acme", "1", "Backend Engineer", "applied",
+                             "2026-07-22T09:00:00")
+    conn.commit()
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                 interactive=True))
+    assert 'class="tracked"' in panel
+    assert 'class="track"' not in panel
+
+
+def test_the_tailor_chip_is_absent_until_something_is_proposed():
+    """`tailor` ships switched off. A permanent "0 edits" on every row of a table
+    thousands long is noise about a feature you have not enabled — `_tailor_line`'s rule,
+    applied to the cell."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                 interactive=True))
+    assert "tchip" not in panel
+
+    _suggest(conn, "Acme", "1", 3)
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                 interactive=True))
+    assert '<span class="tchip"' in panel
+    assert "3 suggested resume edits" in panel
+    assert 'class="tailor-build"' in panel
+
+
+def test_a_dismissed_suggestion_shows_its_state_and_offers_no_build():
+    """Dismissed is a resolution, kept rather than deleted. It reads as a decision you
+    made, not as work waiting to be done."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _suggest(conn, "Acme", "1", 2, resolution="dismissed")
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                 interactive=True))
+    assert "tchip done" in panel
+    assert "(dismissed)" in panel
+    assert "tailor-build" not in panel
+    assert "tailor-dl" not in panel
+
+
+def test_a_built_resume_renders_a_download_and_not_a_build_button():
+    """The file's own existence is what "built" means — nothing records the path. So the
+    cell asks the same question the download route will answer."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _suggest(conn, "Acme", "1", 2)
+    stem = resume.tailored_stem("Acme", "1")
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                    interactive=True)
+    assert "tailor-build" in _all_panel(doc)
+
+    with mock.patch.object(dashboard, "_built_resumes", return_value={stem}):
+        panel = _all_panel(dashboard.build_dashboard(
+            conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
+    assert 'class="tailor-dl"' in panel
+    assert "tailor-build" not in panel
+    assert "/api/tailored?company=Acme&amp;job=1" in panel
+
+
+def test_the_download_link_escapes_its_query_string():
+    """A company name is third-party text and lands in a URL and in markup at once."""
+    conn = _matches(('A&B "Co"', "x/1", "Backend Engineer", "New York, NY"))
+    _suggest(conn, 'A&B "Co"', "x/1", 1)
+    stem = resume.tailored_stem('A&B "Co"', "x/1")
+    with mock.patch.object(dashboard, "_built_resumes", return_value={stem}):
+        panel = _all_panel(dashboard.build_dashboard(
+            conn, [_company('A&B "Co"', 1)], "2026-07-22", interactive=True))
+    assert "A%26B%20%22Co%22" in panel
+    assert 'href="/api/tailored?company=A%26B%20%22Co%22&amp;job=x%2F1"' in panel
+
+
+def test_the_actions_controls_have_their_handlers_on_the_page_that_renders_them():
+    """The regression this repo already shipped: a button rendered by one file with its
+    handler in another file's script, so every click did nothing at all."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _suggest(conn, "Acme", "1", 2)
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                    interactive=True)
+    script = doc[doc.rindex("<script>"):doc.rindex("</script>")]
+    for cls in ("track", "tailor-build"):
+        assert f'class="{cls}"' in doc, cls
+        assert f"button.{cls}" in script, cls
+    for endpoint in ("/api/disposition", "/api/tailor-build", "/api/tailored"):
+        assert endpoint in script, endpoint
+    assert doc.count("<script>") == 1
+
+
+def test_the_actions_cell_never_carries_a_disposition_attribute():
+    """`.pick [data-act]` has to keep meaning exactly the three cards, whatever else the
+    rows below them grow."""
+    conn = _ranked_pool(6)
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1), _company("Zeta", 3)],
+                                    "2026-07-22", interactive=True)
+    for panel in (_all_panel(doc), _today_panel(doc)[doc.index('<details class="rest">')
+                                                    - doc.index('data-panel-body="today"'):]):
+        assert "data-act" not in panel
+
+
+def test_the_drawer_offers_the_same_two_controls_under_serve():
+    conn = _ranked_pool(6)
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1), _company("Zeta", 3)],
+                                    "2026-07-22", interactive=True)
+    rest = doc[doc.index('<details class="rest">'):doc.index("</details>")]
+    assert rest.count('class="track"') == 3
+    assert "data-act" not in rest
+
+
+def test_a_missing_tailored_directory_reads_as_nothing_built():
+    """The ordinary state on a machine that has never run `tailor build`."""
+    with mock.patch.object(config, "TAILORED_DIR", Path("/nonexistent/tailored")):
+        assert dashboard._built_resumes() == set()

@@ -425,8 +425,10 @@ already committed to outranks the raw corpus.
   company, numbered with the real rank. `<details>` because it opens with no script and is not
   a table the filter JS could reach. Built from `rank.available(...)[3:]` — **never** raw
   `ranked_matches`, or a job you applied to this morning reappears on the page it left. **No
-  buttons in it, in either mode**: a pick is what has buttons, which keeps `.pick [data-act]`
-  meaning exactly three cards.
+  `data-act` in it, in either mode**: a pick is what gets dispositioned, which keeps
+  `.pick [data-act]` meaning exactly three cards. That rule used to read "no buttons in it"
+  and was narrowed on 2026-09-02, when the drawer and both postings tables gained the actions
+  cell — see "The actions cell". Skip and snooze are still a card's alone.
 - **The picks must never be a `table[data-filterable]`.** The filter JS selects those, so a
   tier or location filter set on another tab would silently empty a curated list. Tested.
 - **Disposition buttons only exist under `serve`** (`build_dashboard(interactive=True)`).
@@ -506,6 +508,68 @@ already committed to outranks the raw corpus.
 - **Location sorts, never filters.** Rows come out NYC-first (`match.location_rank()`), NYC
   rows carry a pin, and the location dropdown defaults to "Anywhere". A location filter the
   user did not choose would silently hide roles they asked to see.
+
+## The actions cell
+
+Added 2026-09-02. One cell on every posting row that is not a pick — both tables on the All
+postings tab and the `<details>` drawer under Today — carrying **+ tracker** and, when
+`tailor` has proposed something, a chip and a way to get the compiled PDF.
+`dashboard._track_cell` renders it; `server._api_tailor_build` and `GET /api/tailored` are
+the two new endpoints.
+
+The gap it closes: the outer loop could only be started from one of the three cards. Every
+other route to a job rendered a link, so applying to something you found on the All postings
+tab meant opening `/applications` and retyping a job the database already held.
+
+- **`interactive`-only, whole column.** No `<th>`, no `<td>`, nothing, in the static file —
+  including the download link, which is a `/api/` href and so just as dead in a mailed file
+  as a button. `cols` (the group head's colspan) and the header come out of the same two
+  flags in one place, so a column added to one cannot go missing from the other.
+- **The button is `button.track` and carries no `data-act`.** That attribute is how
+  `dashboard._JS` selects the three disposition buttons, and it has to keep meaning exactly
+  that. The rule the drawer used to state as "no buttons here" is now carried by the
+  attribute directly; skip and snooze remain a pick's, because they are queue decisions and
+  a rest row is not a queue slot.
+- **It reuses `/api/disposition` with `action: "applied"`.** No new write path: a job tracked
+  from a table gets the same `advance_application` with url/location copied off the posting,
+  the same `source: "tracked"`, the same follow-up reminder, and leaves the queue through the
+  same `rank.is_available` as one tracked from a card.
+- **A row already in the tracker renders a state, not a control.** Re-tracking upserts
+  harmlessly but appends a second `applied` event, and a live-looking button on a job you
+  applied to is the page disagreeing with itself.
+- **The handler swaps in place; it does not `location.reload()`** as the picks handler does.
+  A reload of the All postings tab discards the filter you typed and where you had scrolled,
+  and nothing else on the page has to move. Both handlers are **delegated** rather than one
+  listener per button — these tables carry thousands of rows, and delegation is also what
+  keeps working after a button is replaced by the chip or the link.
+- **The tailor chip is absent when nothing was proposed**, `_tailor_line`'s rule applied to a
+  cell: `tailor` ships switched off, and a permanent "0 edits" on every row of a table
+  thousands long is noise about a feature you have not enabled. `dismissed` renders muted
+  with no build control — a decision you made, not work waiting.
+- **`resume.tailored_stem` / `tailored_path` are the single derivation**, and that is
+  load-bearing because nothing stores the path: `resume_suggestions` has no path column, so
+  the file's own existence is what "built" means. Four callers ask (`tailor build`, both
+  endpoints, the cell), and a second copy of the expression is how the button and the
+  terminal come to mean different files. `build_dashboard` lists the directory **once**
+  (`_built_resumes`) rather than a `stat` per row.
+- **`/api/tailor-build` is start and poll at once**, because the compile is a subprocess on a
+  daemon thread and the page has to be able to ask how it is going. Idempotent: at most one
+  build per posting, `ready` the moment the file exists, and a failure is reported once and
+  then cleared so the next click is a fresh attempt rather than a permanent refusal about a
+  compile that failed an hour ago.
+- **Everything knowable is decided before the thread exists** — the `_api_apply_to` rule.
+  Suggestions present and not dismissed, the resume source loads, at least one edit still
+  applies, and there *is* an engine, all on the request thread. The thread runs `assemble`
+  and `write_pdf` and nothing else; it opens no database connection and needs none. On a box
+  without tectonic (which is every box but the serve image) the refusal **names the engine**,
+  because an exception on a daemon thread reaches the log and nowhere else, and an unnamed
+  failure here is a button spinning over a compile that never began.
+- **A success drops its `_BUILDS` entry rather than writing "ready".** One fact kept in two
+  places is one that can disagree, and the file is the fact.
+- **`_send_bytes` grew a `filename`**, which is what makes the response a download rather
+  than something rendered in the tab. Second byte-returning route after the apply preview.
+  No CSP change: `default-src 'none'` does not govern link navigation and `form-action`
+  governs forms — worth stating, because a silent CSP block looks exactly like a broken route.
 
 ## Applications: the outer loop
 
@@ -960,9 +1024,14 @@ first that composes prose** — so the bound is not the shape of the answer.
   does not fix its number; it is behind `inbox` because its unit key is a hash of the resume
   **text**, so one edit re-keys every posting at once. (`Answers.hash` covers only a resume's
   basename and cannot be reused for this.)
-- **Neither surface has a button, in either mode.** Accepting means compiling a document; a
-  control on the Today card or `/apply` would put a model-authored PDF one click from an
-  application with the diff unread, and would widen what `.pick [data-act]` and `.lf` select.
+- **Nothing anywhere accepts an edit on a click.** That was written as "neither surface has
+  a button, in either mode", and the ban it states is on *accepting*: a control that attached
+  a model-authored PDF to an application with the diff unread. Attaching is still
+  `tailor build --attach`, after reading the diff at `/apply`. **Building and downloading are
+  not accepting** and are allowed from the actions cell since 2026-09-02 — a compile sends
+  nothing to an employer, and a PDF you download is a document you then read. The Today card
+  and `/apply` still carry no control of any kind, which is what keeps `.pick [data-act]` and
+  `.lf` selecting exactly what they did.
 
 ## The ambiguity pass
 

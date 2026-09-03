@@ -32,9 +32,11 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 import signal
 import sqlite3
 import threading
+import urllib.parse
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -50,6 +52,7 @@ from . import (
     dashboard as dashboard_mod,
     live,
     rank as rank_mod,
+    resume as resume_mod,
     resumes,
     safewrite,
     store,
@@ -105,6 +108,14 @@ _APPLY_LOCK = threading.Lock()
 # Queuing would stack a second multi-second freeze behind the first on a server that
 # handles one request at a time, which is the shape this whole file avoids.
 _VERIFY_LOCK = threading.Lock()
+
+# Tailored-resume compiles in flight, keyed by posting, holding "building" or the reason
+# the last attempt failed. A success DROPS its entry rather than writing "ready": the PDF
+# existing on disk is what ready means, and one fact kept in two places is one that can
+# disagree. Unlike `_APPLY_LOCK` this does not serialize anything — two postings can
+# compile at once, since tectonic runs in a scratch directory of its own.
+_BUILDS: dict[tuple[str, str], str] = {}
+_BUILD_LOCK = threading.Lock()
 
 
 # -- rendering (pure reads, testable without a server) ------------------------------
@@ -1715,17 +1726,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_bytes(self, data: bytes, ctype: str, status: int = 200) -> None:
-        """A response that is not text. Today that is exactly one thing: the preview.
+    def _send_bytes(self, data: bytes, ctype: str, status: int = 200,
+                    filename: str = "") -> None:
+        """A response that is not text: the apply preview, and a tailored resume.
 
-        `_send` encodes UTF-8, so it cannot carry a JPEG. Kept to the same CSP and given
-        `no-store` because the image changes every couple of seconds and a cached one is
-        a picture of a form you already filled in.
+        `_send` encodes UTF-8, so it cannot carry a JPEG or a PDF. Kept to the same CSP
+        and given `no-store` — the preview changes every couple of seconds, and a cached
+        resume is one built before the edits you just made.
+
+        `filename` marks the body as a download rather than something to render in the
+        tab. The name is quoted and stripped of anything that could end the header value,
+        though nothing reaching here is user-typed: it is minted by `tailored_stem`, which
+        slugs to `[a-z0-9_]`.
         """
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if filename:
+            safe = re.sub(r'[^A-Za-z0-9._-]', "_", filename)
+            self.send_header("Content-Disposition", f'attachment; filename="{safe}"')
         self.send_header("Content-Security-Policy", _CSP)
         self.end_headers()
         self.wfile.write(data)
@@ -1809,6 +1829,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_session(idle="idle=1" in self.path))
             elif path == "/api/session/preview.jpg":
                 self._send_preview()
+            elif path == "/api/tailored":
+                self._send_tailored()
             else:
                 self._send("<h1>404</h1>", 404)
         except Exception:  # noqa: BLE001
@@ -1859,6 +1881,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_posting_resume(payload))
             elif path == "/api/posting-resume/clear":
                 self._send_json(self._api_posting_resume_clear(payload))
+            elif path == "/api/tailor-build":
+                self._send_json(self._api_tailor_build(payload))
             elif path == "/api/prefill":
                 self._send_json(self._api_prefill(payload))
             elif path == "/api/apply-to":
@@ -3018,6 +3042,155 @@ class Handler(BaseHTTPRequestHandler):
         # itself: the form is now typed on that page, not in the window.
         return {"ok": True, "href": "/apply",
                 "detail": f"{swapped}opening {row['title'][:60]}…"}
+
+    # -- the tailored resume -------------------------------------------------------
+
+    def _send_tailored(self) -> None:
+        """Hand over one posting's tailored PDF, if `tailor build` has made it.
+
+        A GET because it is a download: the browser navigates, the file lands, and the
+        page you were on stays where it was. `default-src 'none'` does not govern link
+        navigation and `form-action 'none'` governs forms, so no CSP change is needed for
+        this — which is worth stating, because a silent CSP block looks exactly like a
+        broken route.
+
+        The path is not built from anything typed: `tailored_path` runs both strings
+        through `resumes.stored_name`, which slugs to `[a-z0-9_]`. The containment check
+        after it is belt and braces for the day that changes.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        company = (query.get("company") or [""])[0]
+        job_id = (query.get("job") or [""])[0]
+        if not company or not job_id:
+            self._send_json({"ok": False, "error": "company and job are required"}, 400)
+            return
+        path = resume_mod.tailored_path(company, job_id)
+        try:
+            inside = path.resolve().parent == config.TAILORED_DIR.resolve()
+        except OSError:
+            inside = False
+        if not inside:
+            self._send_json({"ok": False, "error": "not a tailored resume"}, 400)
+            return
+        try:
+            blob = path.read_bytes()
+        except OSError:
+            # Never built, or built and then deleted. Both are "there is nothing to
+            # download", and the page's answer to either is the build button.
+            self._send_json(
+                {"ok": False, "error": "no tailored resume has been built for this job"},
+                404,
+            )
+            return
+        self._send_bytes(blob, "application/pdf", filename=path.name)
+
+    def _api_tailor_build(self, payload: dict) -> dict:
+        """Build one posting's tailored resume, and report on a build already running.
+
+        One endpoint for both because the compile is a subprocess on a daemon thread: the
+        page has to be able to ask how it is going, and an endpoint that starts a second
+        build every time it is asked would be a worse answer than none. It is idempotent
+        — it starts at most one build per posting, and answers `ready` the moment the file
+        exists.
+
+        **Everything knowable is decided here, before the thread exists.** An exception on
+        a daemon thread reaches the log and nowhere else, which on a box with no TeX
+        engine is a button that spins forever over a compile that never began. So the
+        suggestions, the resume source, whether any edit still applies, and whether there
+        is an engine at all are all settled on the request thread, and the thread is left
+        with exactly one job: run the compiler and write the bytes.
+
+        What it does **not** do is accept anything. A built PDF is a document to read; it
+        reaches an application only through `tailor build --attach`, after the diff has
+        been read at `/apply`. That is the §8.1 rule and this endpoint sits inside it.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+
+        out = resume_mod.tailored_path(company, job_id)
+        if out.is_file():
+            return {"ok": True, "state": "ready"}
+
+        key = (company, job_id)
+        with _BUILD_LOCK:
+            state = _BUILDS.get(key)
+            if state == "building":
+                return {"ok": True, "state": "building"}
+            if state:
+                # Reported once and cleared, so the next click is a fresh attempt rather
+                # than a permanent refusal about a compile that failed an hour ago.
+                del _BUILDS[key]
+                return {"ok": True, "state": "error", "error": state}
+
+        conn = self._conn()
+        try:
+            row = store.get_suggestions(conn, company, job_id)
+        finally:
+            conn.close()
+        if row is None:
+            return {"ok": False, "error": "tailor has not proposed anything for this job"}
+        if row["resolution"] == "dismissed":
+            return {"ok": False,
+                    "error": "these suggestions are dismissed — they come back when the "
+                             "resume changes"}
+
+        from .cli import _load_resume
+
+        text, fmt, _digest = _load_resume()
+        if text is None or fmt is None:
+            return {"ok": False,
+                    "error": f"no resume source at {config.RESUME_TEX} — write one, or "
+                             "set $JOBTRACKER_RESUME_TEX"}
+        try:
+            edits = [resume_mod.Edit(**e) for e in json.loads(row["edits"] or "[]")]
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": f"the stored suggestions did not parse: {exc}"}
+
+        tailored, applied = fmt.apply_edits(text, edits)
+        if not applied:
+            # The resume moved under a proposal made against an older version of it.
+            return {"ok": False,
+                    "error": f"none of {len(edits)} edit(s) still apply — re-run "
+                             "`jobtracker work --task tailor`"}
+
+        blocked = fmt.unavailable_reason()
+        if blocked:
+            # Named rather than generic. Twice in this repo's history a fixed message
+            # about a missing dependency pointed at the wrong cause.
+            return {"ok": False, "error": blocked}
+
+        stem = resume_mod.tailored_stem(company, job_id)
+
+        def _run() -> None:
+            # The only thing on this thread is the subprocess and the write. Every input
+            # was computed above; it opens no database connection and needs none.
+            try:
+                blob = resume_mod.assemble(fmt, tailored, stem=stem)
+                resume_mod.write_pdf(out, blob)
+            except resume_mod.AssemblyFailed as exc:
+                with _BUILD_LOCK:
+                    _BUILDS[key] = str(exc)
+                return
+            except Exception as exc:  # noqa: BLE001 — a bad compile must not kill serve
+                log.exception("tailor build %s/%s failed", company, job_id)
+                with _BUILD_LOCK:
+                    _BUILDS[key] = f"the build failed: {exc}"
+                return
+            with _BUILD_LOCK:
+                # Dropped rather than set to "ready": the file existing is what ready
+                # means, and one fact with two records is one that can disagree.
+                _BUILDS.pop(key, None)
+            log.info("built tailored resume for %s/%s -> %s", company, job_id, out)
+
+        with _BUILD_LOCK:
+            _BUILDS[key] = "building"
+        threading.Thread(
+            target=_run, name=f"jobtracker-tailor-{stem}", daemon=True
+        ).start()
+        return {"ok": True, "state": "building",
+                "detail": f"compiling {applied} edit(s) into {out.name}"}
 
     # -- the live form -------------------------------------------------------------
     #
