@@ -12,12 +12,13 @@ import json
 import re
 import threading
 import time
+import urllib.parse
 from html.parser import HTMLParser
 
 import pytest
 import yaml
 
-from jobtracker import config, curation, dashboard, models, server, store
+from jobtracker import config, curation, dashboard, models, resume, server, store
 from jobtracker.criteria import load_criteria
 
 # Titles, locations and URLs all arrive from third-party ATS APIs and are
@@ -3418,3 +3419,343 @@ def test_showing_suggestions_is_still_a_pure_read(tmp_path):
     conn.close()
     assert row["resolution"] == "pending"
     assert row["resolved_at"] is None
+
+
+# -- the tailored resume ------------------------------------------------------------
+def _tailor_db(tmp_path, resolution="pending", n=2):
+    """A posting with suggestions against it, ready for the build endpoint."""
+    db = tmp_path / "tailor.db"
+    conn = store.connect(db)
+    store.sync_postings(conn, "Acme", [
+        models.Posting("Acme", "1", "Backend Engineer", "https://x/1", "NYC")
+    ], "2026-07-22")
+    store.record_verdict(
+        conn, models.Verdict("Acme", "1", models.Decision.MATCH, "why", "rules"),
+        "2026-07-22")
+    edits = [{"section": "experience", "current_line": f"line {i}",
+              "suggestion": f"better {i}", "evidence": f"they want {i}"}
+             for i in range(n)]
+    store.record_suggestions(conn, "Acme", "1", json.dumps(edits), "h1", "2026-07-22")
+    if resolution != "pending":
+        store.resolve_suggestions(conn, "Acme", "1", resolution, "2026-07-22")
+    conn.commit()
+    conn.close()
+    return db
+
+
+class _FakeFormat:
+    """A resume format that applies edits and reports an engine, without one."""
+
+    def __init__(self, applied=2, blocked=None):
+        self._applied = applied
+        self._blocked = blocked
+
+    def apply_edits(self, text, edits):
+        return text + " tailored", self._applied
+
+    def unavailable_reason(self):
+        return self._blocked
+
+
+def _no_thread(monkeypatch):
+    """Record thread starts instead of running them. Every refusal below must leave this
+    empty: a build that started before its inputs were checked reports its failure to the
+    log and to nobody else."""
+    started = []
+
+    class _Recorder:
+        def __init__(self, *a, **kw):
+            started.append(kw.get("name", ""))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(server.threading, "Thread", _Recorder)
+    return started
+
+
+def _with_resume(monkeypatch, text="line 0\nline 1\n", fmt=None):
+    from jobtracker import cli
+
+    monkeypatch.setattr(cli, "_load_resume",
+                        lambda *a, **kw: (text, fmt or _FakeFormat(), "h1"))
+
+
+def test_the_build_refuses_a_posting_tailor_never_read(tmp_path, monkeypatch):
+    db = tmp_path / "empty.db"
+    store.connect(db).close()
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch)
+    res = _handler_for(db, config.CRITERIA_YAML)._api_tailor_build(
+        {"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is False
+    assert "has not proposed" in res["error"]
+    assert started == []
+
+
+def test_the_build_refuses_dismissed_suggestions(tmp_path, monkeypatch):
+    """Dismissed is a decision you made. Rebuilding it from a button would undo that
+    silently — the way back is the resume changing, which re-asks the question."""
+    db = _tailor_db(tmp_path, resolution="dismissed")
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch)
+    res = _handler_for(db, config.CRITERIA_YAML)._api_tailor_build(
+        {"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is False
+    assert "dismissed" in res["error"]
+    assert started == []
+
+
+def test_the_build_names_a_missing_resume_source(tmp_path, monkeypatch):
+    from jobtracker import cli
+
+    db = _tailor_db(tmp_path)
+    started = _no_thread(monkeypatch)
+    monkeypatch.setattr(cli, "_load_resume", lambda *a, **kw: (None, None, ""))
+    res = _handler_for(db, config.CRITERIA_YAML)._api_tailor_build(
+        {"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is False
+    assert "JOBTRACKER_RESUME_TEX" in res["error"]
+    assert started == []
+
+
+def test_the_build_names_the_missing_engine_rather_than_spinning(tmp_path, monkeypatch):
+    """The one refusal this feature is most likely to meet: tectonic is in the serve
+    image only. An unnamed failure here is a button that spins over a compile that never
+    began, because an exception on a daemon thread reaches the log and nowhere else."""
+    db = _tailor_db(tmp_path)
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch, fmt=_FakeFormat(blocked="tectonic is not installed"))
+    res = _handler_for(db, config.CRITERIA_YAML)._api_tailor_build(
+        {"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is False
+    assert res["error"] == "tectonic is not installed"
+    assert started == []
+
+
+def test_the_build_refuses_when_the_resume_moved_under_the_proposal(tmp_path, monkeypatch):
+    db = _tailor_db(tmp_path)
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch, fmt=_FakeFormat(applied=0))
+    res = _handler_for(db, config.CRITERIA_YAML)._api_tailor_build(
+        {"company": "Acme", "ats_job_id": "1"})
+    assert res["ok"] is False
+    assert "still apply" in res["error"]
+    assert started == []
+
+
+def test_the_build_starts_one_thread_and_the_second_ask_is_the_poll(tmp_path, monkeypatch):
+    """The endpoint is both start and poll, because the compile is on a daemon thread and
+    the page has to be able to ask how it is going. Asking twice must not compile twice."""
+    db = _tailor_db(tmp_path)
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch)
+    h = _handler_for(db, config.CRITERIA_YAML)
+    server._BUILDS.clear()
+    try:
+        first = h._api_tailor_build({"company": "Acme", "ats_job_id": "1"})
+        second = h._api_tailor_build({"company": "Acme", "ats_job_id": "1"})
+        assert first["state"] == "building" and second["state"] == "building"
+        assert len(started) == 1
+    finally:
+        server._BUILDS.clear()
+
+
+def test_a_failed_build_is_reported_once_and_then_retried(tmp_path, monkeypatch):
+    """Cleared on the way out, so the next click is a fresh attempt rather than a
+    permanent refusal about a compile that failed an hour ago."""
+    db = _tailor_db(tmp_path)
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch)
+    h = _handler_for(db, config.CRITERIA_YAML)
+    server._BUILDS.clear()
+    server._BUILDS[("Acme", "1")] = "the document did not compile: Undefined control"
+    try:
+        first = h._api_tailor_build({"company": "Acme", "ats_job_id": "1"})
+        assert first["state"] == "error"
+        assert "Undefined control" in first["error"]
+        assert started == []
+        second = h._api_tailor_build({"company": "Acme", "ats_job_id": "1"})
+        assert second["state"] == "building"
+        assert len(started) == 1
+    finally:
+        server._BUILDS.clear()
+
+
+def test_an_existing_pdf_is_ready_without_compiling_anything(tmp_path, monkeypatch):
+    db = _tailor_db(tmp_path)
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch)
+    out = tmp_path / "tailored"
+    out.mkdir()
+    (out / f"{resume.tailored_stem('Acme', '1')}.pdf").write_bytes(b"%PDF-1.4 ok")
+    monkeypatch.setattr(config, "TAILORED_DIR", out)
+    res = _handler_for(db, config.CRITERIA_YAML)._api_tailor_build(
+        {"company": "Acme", "ats_job_id": "1"})
+    assert res == {"ok": True, "state": "ready"}
+    assert started == []
+
+
+class _Sink:
+    """Captures a response written by the handler's own send path."""
+
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.body = b""
+
+    def install(self, h):
+        h.send_response = lambda code, *a: setattr(self, "status", code)
+        h.send_header = lambda k, v: self.headers.__setitem__(k, v)
+        h.end_headers = lambda: None
+        h.wfile = self
+        return self
+
+    def write(self, data):
+        self.body += data
+
+
+def test_the_download_sends_the_pdf_as_an_attachment(tmp_path, monkeypatch):
+    out = tmp_path / "tailored"
+    out.mkdir()
+    name = f"{resume.tailored_stem('Acme', '1')}.pdf"
+    (out / name).write_bytes(b"%PDF-1.4 hello")
+    monkeypatch.setattr(config, "TAILORED_DIR", out)
+
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+    h.path = "/api/tailored?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h._send_tailored()
+
+    assert sink.status == 200
+    assert sink.body == b"%PDF-1.4 hello"
+    assert sink.headers["Content-Type"] == "application/pdf"
+    assert sink.headers["Content-Disposition"] == f'attachment; filename="{name}"'
+
+
+def test_the_download_is_a_404_when_nothing_has_been_built(tmp_path, monkeypatch):
+    """Never built and built-then-deleted are the same fact: there is nothing to hand
+    over, and the page's answer to either is the build button."""
+    out = tmp_path / "tailored"
+    out.mkdir()
+    monkeypatch.setattr(config, "TAILORED_DIR", out)
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+    h.path = "/api/tailored?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h._send_tailored()
+    assert sink.status == 404
+    assert json.loads(sink.body)["ok"] is False
+
+
+def test_the_download_refuses_a_request_naming_no_posting(tmp_path):
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+    h.path = "/api/tailored?company=Acme"
+    sink = _Sink().install(h)
+    h._send_tailored()
+    assert sink.status == 400
+
+
+def test_the_download_cannot_be_walked_out_of_the_tailored_directory(tmp_path, monkeypatch):
+    """`tailored_path` slugs both strings to `[a-z0-9_]`, so this is already impossible;
+    the containment check is what keeps it impossible if that ever changes."""
+    out = tmp_path / "tailored"
+    out.mkdir()
+    (tmp_path / "secret.pdf").write_bytes(b"%PDF secret")
+    monkeypatch.setattr(config, "TAILORED_DIR", out)
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+    h.path = "/api/tailored?company=" + urllib.parse.quote("../secret") + "&job="
+    sink = _Sink().install(h)
+    h._send_tailored()
+    assert sink.status in (400, 404)
+    assert b"secret" not in sink.body
+
+
+def test_adding_an_ordinary_posting_to_the_tracker_removes_it_from_the_queue(tmp_path):
+    """What the "+ tracker" button does. It reuses the picks' own endpoint, so a job
+    tracked from the All postings tab leaves tomorrow's ranking exactly as one tracked
+    from a card does."""
+    from jobtracker import rank as rank_mod
+    from jobtracker.tasks.judge import RankJudgment
+
+    db = _tailor_db(tmp_path)
+    conn = store.connect(db)
+    store.record_judgment(conn, "Acme", "1",
+                          RankJudgment("strong", "strong", "low", "good fit"),
+                          "ph", "2026-07-22")
+    store.set_score(conn, "Acme", "1", 90.0, "2026-07-22")
+    conn.commit()
+    assert len(rank_mod.available(store.ranked_matches(conn), "2026-07-22")) == 1
+    conn.close()
+
+    res = _handler_for(db, config.CRITERIA_YAML)._api_disposition(
+        {"company": "Acme", "ats_job_id": "1", "action": "applied"})
+    assert res["ok"] is True
+
+    conn = store.connect(db)
+    row = store.get_application(conn, "Acme", "1")
+    assert row["status"] == "applied"
+    assert row["source"] == "tracked"
+    assert row["url"] == "https://x/1"
+    assert rank_mod.available(store.ranked_matches(conn), "2026-07-22") == []
+    conn.close()
+
+
+def test_the_build_thread_writes_the_pdf_and_clears_its_own_state(tmp_path, monkeypatch):
+    """The thread body, actually run. Everything above it is a refusal test, so without
+    this the one path that produces a file is the one nothing exercises.
+
+    It also pins the half that is easy to get wrong: a success DROPS the entry rather
+    than writing "ready", because the file existing is what ready means.
+    """
+    db = _tailor_db(tmp_path)
+    out = tmp_path / "tailored"
+    monkeypatch.setattr(config, "TAILORED_DIR", out)
+    _with_resume(monkeypatch)
+    monkeypatch.setattr(resume, "assemble", lambda fmt, text, stem="": b"%PDF-1.4 built")
+    monkeypatch.setattr(server.resume_mod, "assemble",
+                        lambda fmt, text, stem="": b"%PDF-1.4 built")
+
+    h = _handler_for(db, config.CRITERIA_YAML)
+    server._BUILDS.clear()
+    try:
+        res = h._api_tailor_build({"company": "Acme", "ats_job_id": "1"})
+        assert res["state"] == "building"
+        for thread in threading.enumerate():
+            if thread.name.startswith("jobtracker-tailor-"):
+                thread.join(timeout=5)
+        assert (out / f"{resume.tailored_stem('Acme', '1')}.pdf").read_bytes() \
+            == b"%PDF-1.4 built"
+        assert ("Acme", "1") not in server._BUILDS
+        # And the next ask is `ready` off the file alone.
+        assert h._api_tailor_build({"company": "Acme", "ats_job_id": "1"}) \
+            == {"ok": True, "state": "ready"}
+    finally:
+        server._BUILDS.clear()
+
+
+def test_a_compile_failure_is_kept_for_the_page_to_read(tmp_path, monkeypatch):
+    """An exception on a daemon thread reaches the log and nowhere else. The build state
+    is the only channel back to the click that started it."""
+    db = _tailor_db(tmp_path)
+    out = tmp_path / "tailored"
+    monkeypatch.setattr(config, "TAILORED_DIR", out)
+    _with_resume(monkeypatch)
+
+    def _boom(fmt, text, stem=""):
+        raise resume.AssemblyFailed("the document did not compile: Undefined control")
+
+    monkeypatch.setattr(server.resume_mod, "assemble", _boom)
+
+    h = _handler_for(db, config.CRITERIA_YAML)
+    server._BUILDS.clear()
+    try:
+        h._api_tailor_build({"company": "Acme", "ats_job_id": "1"})
+        for thread in threading.enumerate():
+            if thread.name.startswith("jobtracker-tailor-"):
+                thread.join(timeout=5)
+        assert not (out / f"{resume.tailored_stem('Acme', '1')}.pdf").exists()
+        res = h._api_tailor_build({"company": "Acme", "ats_job_id": "1"})
+        assert res["state"] == "error"
+        assert "Undefined control" in res["error"]
+    finally:
+        server._BUILDS.clear()

@@ -1482,7 +1482,7 @@ def cmd_tailor(args: argparse.Namespace) -> int:
     `mail_proposals` follows. It comes back on its own when the resume changes, because
     that is a different question.
     """
-    from . import resume as resume_mod, resumes
+    from . import resume as resume_mod
 
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
@@ -1547,14 +1547,14 @@ def cmd_tailor(args: argparse.Namespace) -> int:
                 print(f"  {head}: {applied}/{len(edits)} edit(s) ready, not assembled")
                 continue
 
-            stem = resumes.stored_name(row["company"], row["ats_job_id"], "").rstrip(".")
+            stem = resume_mod.tailored_stem(row["company"], row["ats_job_id"])
             try:
-                blob = resume_mod.assemble(fmt, tailored, stem=stem or "resume")
+                blob = resume_mod.assemble(fmt, tailored, stem=stem)
             except resume_mod.AssemblyFailed as exc:
                 print(f"  {head}: {exc}", file=sys.stderr)
                 failed += 1
                 continue
-            out = config.TAILORED_DIR / f"{stem}.pdf"
+            out = resume_mod.tailored_path(row["company"], row["ats_job_id"])
             resume_mod.write_pdf(out, blob)
             built += 1
             print(f"  {head}: {applied} edit(s) -> {out}")
