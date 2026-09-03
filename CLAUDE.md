@@ -971,6 +971,20 @@ always kept scoring out of the queue: no model, must always run.
 in `docs/tailor.md`. Added 2026-09-01. **The fifth bounded model role (DESIGN.md §8) and the
 first that composes prose** — so the bound is not the shape of the answer.
 
+- **Settings has a field for it** (2026-09-03), beside the one that takes the PDF. Two
+  files, two questions — that one is what a recruiter opens, this one is what this repo
+  reads and rewrites — so it is its own card saying which is which, because "resume"
+  appearing twice on a page is the confusing part. `/api/resume-tex` needs **no answer
+  bank**, unlike `/api/resume`: nothing records this path (it is an env var), so there is
+  no key to write and no bootstrap to block behind. `validate_tex_upload` is a separate
+  validator rather than a branch, because text has no magic bytes: the content check is
+  that it decodes as **UTF-8** (`cli._load_resume` reads it that way and answers "no
+  resume source" on a decode error — accepted here and unreadable there would report
+  itself missing from a path you can see) and declares a **`\documentclass`** (it is
+  compiled standalone; without one `tailor` proposes happily and the failure surfaces much
+  later as a compile error). A **PDF or DOCX is named as such before either check**, since
+  the field above takes a PDF and a short ASCII-ish PDF decodes cleanly enough to reach
+  the second one — routing it through "no documentclass" sends you to read your LaTeX.
 - **Your resume's source is LaTeX** (`$JOBTRACKER_RESUME_TEX`), which dissolved the
   dependency question rather than answering it. `resumes.RESUME_TYPES` is `.pdf`/`.docx` and
   there is no text extractor here; a `.tex` file is already text. What matters more than the

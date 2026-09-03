@@ -70,7 +70,8 @@ MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
 # The body cap for routes that carry a file. It is a *set*, not one path: a second upload
 # route added without joining this set silently reads its body as `{}` and reports "no
 # file" — a correct-looking error for entirely the wrong reason.
-_UPLOAD_ROUTES = {"/api/resume", "/api/posting-resume", "/api/session/file"}
+_UPLOAD_ROUTES = {"/api/resume", "/api/resume-tex", "/api/posting-resume",
+                  "/api/session/file"}
 MAX_UPLOAD = resumes.MAX_UPLOAD
 
 # What the *body* carrying an upload may be, which is not what the file may be. Base64 is
@@ -313,6 +314,7 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
 
     p.extend(_identity_card(answers))
     p.extend(_resume_card(answers))
+    p.extend(_resume_source_card())
 
     # Offered to every "answer it with" box below. One list for the page; see the note
     # on the same element in `render_apply` for why it is a datalist and not a select.
@@ -1680,6 +1682,48 @@ def _resume_card(answers) -> list:
     return p
 
 
+def _resume_source_card() -> list:
+    r"""The LaTeX document `tailor` reads, and where to put one.
+
+    Its own card rather than a row in the Resume card above, because they are two
+    different files answering two different questions: that one is the PDF a recruiter
+    opens, this one is the document this repo reads and rewrites. The card says which
+    is which, since "resume" appearing twice on one page is otherwise the confusing part.
+
+    LaTeX and not PDF is settled elsewhere and is not a missing feature: there is no text
+    extractor in this repo, the model quotes lines back verbatim, and a PDF extractor's
+    idea of a line is a column-layout accident. A `.tex` file is already text.
+    """
+    p = ["<h2>Tailoring source</h2>", "<div class=card>"]
+    target = config.RESUME_TEX
+    p.append(
+        "<p class=note>The LaTeX document <code>tailor</code> reads to propose resume "
+        "edits, and rewrites into a tailored PDF. Not the file that gets attached to an "
+        "application — that is the one above.</p>"
+    )
+    if target.is_file():
+        size = target.stat().st_size
+        p.append(
+            f"<p>Source: <code>{html.escape(str(target))}</code> "
+            f"<span class=note>({size // 1024 or 1} KB)</span></p>"
+        )
+    else:
+        p.append(
+            f"<p class=note>Nothing at <code>{html.escape(str(target))}</code>. "
+            "Without it <code>tailor</code> proposes nothing, so no posting shows a "
+            "resume chip.</p>"
+        )
+    p.append(
+        "<div class=row><input type=file id=tex-file accept='.tex'>"
+        "<button class=upload-tex>Upload</button></div>"
+        "<p class=note>A <code>.tex</code> file containing the whole document — it is "
+        "what gets compiled. Replaces whatever is there now, and re-asks every posting, "
+        "because a proposal made against the old wording is not one about the new.</p>"
+    )
+    p.append("</div>")
+    return p
+
+
 def _load_answers_quietly(path: Path):
     """(Answers|None, error|None). A missing or broken file is a page, not a 500."""
     from .answers import load_answers
@@ -1875,6 +1919,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_identity(payload))
             elif path == "/api/resume":
                 self._send_json(self._api_resume(payload))
+            elif path == "/api/resume-tex":
+                self._send_json(self._api_resume_tex(payload))
             elif path == "/api/resume-name":
                 self._send_json(self._api_resume_name(payload))
             elif path == "/api/posting-resume":
@@ -2589,6 +2635,40 @@ class Handler(BaseHTTPRequestHandler):
 
         log.info("resume saved to %s (%d bytes)", target, len(blob))
         return {"ok": True, "filename": target.name, "bytes": len(blob)}
+
+    def _api_resume_tex(self, payload: dict) -> dict:
+        r"""Store the LaTeX source `tailor` reads, at `config.RESUME_TEX`.
+
+        A different file from the one above and a different job. `/api/resume` stores the
+        PDF that is *attached* to an application; this stores the document tailoring
+        *reads and rewrites*. Conflating them is the mistake `resume_name` already
+        records — what a recruiter opens and what this repo works on are two questions.
+
+        Unlike `/api/resume` it needs no answer bank, because the path is not recorded in
+        one: it is `$JOBTRACKER_RESUME_TEX` or the default beside the repo, so there is
+        nothing to write a key into and no bootstrap to be blocked behind. The file
+        landing *is* the whole of the change.
+
+        Uploading a new source re-asks every posting on its own, and that is the queue's
+        doing rather than anything here: `tailor`'s unit key is a hash of the resume text,
+        so a changed file re-keys every unit at once, and a `dismissed` proposal reopens
+        because a ruling about the old wording is not a ruling about the new.
+        """
+        try:
+            blob = resumes.validate_tex_upload(
+                payload.get("filename"), payload.get("content_b64")
+            )
+        except resumes.RefusedUpload as exc:
+            return {"ok": False, "error": str(exc)}
+
+        target = config.RESUME_TEX
+        try:
+            resumes.write_atomic(target, blob)
+        except OSError as exc:
+            return {"ok": False, "error": f"could not write {target}: {exc}"}
+
+        log.info("resume source saved to %s (%d bytes)", target, len(blob))
+        return {"ok": True, "path": str(target), "bytes": len(blob)}
 
     def _rebuild_plan(self, conn, company: str, ats_job_id: str) -> dict:
         """Re-plan one posting from what is already known. No model, no network.
@@ -4463,6 +4543,24 @@ document.addEventListener('click', async (e) => {
     });
     const res = await post('/api/resume', {filename: file.name, content_b64: b64});
     up.disabled = false;
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const tex = e.target.closest('button.upload-tex');
+  if (tex) {
+    const input = document.getElementById('tex-file');
+    const file = input && input.files[0];
+    if (!file) { alert('Choose a file first.'); return; }
+    tex.disabled = true;
+    const b64 = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result.split(',')[1]);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+    const res = await post('/api/resume-tex', {filename: file.name, content_b64: b64});
+    tex.disabled = false;
     if (!res.ok) { alert(res.error); return; }
     location.reload();
     return;

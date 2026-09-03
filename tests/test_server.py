@@ -1362,7 +1362,7 @@ def test_the_upload_cap_applies_to_every_route_that_carries_a_file():
     """A second upload route left out of the set reads its body as {} and reports "no
     file" — a correct-looking error for entirely the wrong reason."""
     assert server._UPLOAD_ROUTES == {
-        "/api/resume", "/api/posting-resume", "/api/session/file",
+        "/api/resume", "/api/resume-tex", "/api/posting-resume", "/api/session/file",
     }
 
 
@@ -1542,12 +1542,15 @@ def test_every_control_on_the_settings_page_has_a_handler_in_its_own_script(tmp_
     conn.close()
 
     script = page[page.rindex("<script>"):]
-    classes = set(re.findall(r"class=(save|attach|save-identity|save-resume-name)[ >]",
-                             page))
-    assert classes == {"save", "attach", "save-identity", "save-resume-name"}
+    classes = set(re.findall(
+        r"class=(save|attach|save-identity|save-resume-name|upload-resume|upload-tex)[ >]",
+        page))
+    assert classes == {"save", "attach", "save-identity", "save-resume-name",
+                       "upload-resume", "upload-tex"}
     for cls in classes:
         assert f"button.{cls}" in script, cls
-    for endpoint in ("/api/answer", "/api/attach", "/api/identity", "/api/resume"):
+    for endpoint in ("/api/answer", "/api/attach", "/api/identity", "/api/resume",
+                     "/api/resume-tex"):
         assert endpoint in script, endpoint
     # And the picker the attach box reads from, which is useless without its options.
     assert 'list="bankkeys"' in page
@@ -3759,3 +3762,106 @@ def test_a_compile_failure_is_kept_for_the_page_to_read(tmp_path, monkeypatch):
         assert "Undefined control" in res["error"]
     finally:
         server._BUILDS.clear()
+
+
+# -- the LaTeX resume source --------------------------------------------------------
+TEX = rb"""\documentclass{article}
+\begin{document}
+\item Built a distributed job queue
+\end{document}
+"""
+
+
+def test_uploading_the_tex_source_writes_it_where_tailor_reads_it(tmp_path, monkeypatch):
+    """The whole point: `cli._load_resume` reads `config.RESUME_TEX`, so the upload has
+    to land at exactly that path or the page says saved about a file nothing opens."""
+    from jobtracker import cli
+
+    target = tmp_path / "resume.tex"
+    monkeypatch.setattr(config, "RESUME_TEX", target)
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+    res = h._api_resume_tex({"filename": "my-resume.tex", "content_b64": _b64(TEX)})
+
+    assert res["ok"] is True
+    assert res["bytes"] == len(TEX)
+    assert target.read_bytes() == TEX
+    # And the reader agrees, rather than the two merely naming the same string.
+    text, fmt, digest = cli._load_resume(None)
+    assert fmt is not None and digest and "distributed job queue" in text
+
+
+def test_the_tex_upload_needs_no_answer_bank(tmp_path, monkeypatch):
+    """Unlike `/api/resume`, which must record a path in one. Nothing records this path —
+    it is an env var — so blocking the upload behind a bank would be a bootstrap that
+    exists for no reason."""
+    target = tmp_path / "resume.tex"
+    monkeypatch.setattr(config, "RESUME_TEX", target)
+    h = _handler_for(tmp_path / "x.db", tmp_path / "nope.yaml")
+    h.server.answers_path = tmp_path / "definitely-not-there.yaml"
+    assert h._api_resume_tex({"filename": "r.tex", "content_b64": _b64(TEX)})["ok"] is True
+
+
+def test_a_refused_tex_upload_writes_nothing(tmp_path, monkeypatch):
+    """Each refusal names its own cause, and none may leave a partial file for the next
+    run to find and read as a resume."""
+    target = tmp_path / "resume.tex"
+    monkeypatch.setattr(config, "RESUME_TEX", target)
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+
+    cases = [
+        ({"filename": "resume.pdf", "content_b64": _b64(TEX)}, "expected .tex"),
+        ({"filename": "resume.tex", "content_b64": _b64(b"\xff\xfe\x00\x01binary")},
+         "not UTF-8 text"),
+        ({"filename": "resume.tex", "content_b64": _b64(b"just some notes about me")},
+         "documentclass"),
+        ({"filename": "resume.tex", "content_b64": "not base64!!"}, "decode"),
+        ({"filename": "", "content_b64": _b64(TEX)}, "no file"),
+    ]
+    for payload, expected in cases:
+        res = h._api_resume_tex(payload)
+        assert res["ok"] is False, payload
+        assert expected in res["error"], (payload, res["error"])
+        assert not target.exists(), payload
+
+
+def test_a_renamed_pdf_is_refused_as_the_wrong_thing_not_as_a_bad_document(tmp_path,
+                                                                          monkeypatch):
+    """The likeliest mistake, since the field above this one takes a PDF. It must say
+    which problem it is — a PDF renamed to .tex decodes as neither text nor a document,
+    and "no documentclass" would send you looking at your LaTeX."""
+    monkeypatch.setattr(config, "RESUME_TEX", tmp_path / "resume.tex")
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+    res = h._api_resume_tex({"filename": "resume.tex", "content_b64": _b64(PDF)})
+    assert res["ok"] is False
+    assert "renamed" in res["error"]
+
+
+def test_the_tailoring_card_says_whether_there_is_a_source(tmp_path, monkeypatch):
+    target = tmp_path / "resume.tex"
+    monkeypatch.setattr(config, "RESUME_TEX", target)
+    conn = store.connect(":memory:")
+    try:
+        page = server.render_settings(conn, tmp_path / "answers.yaml")
+        assert "Tailoring source" in page
+        assert "Nothing at" in page
+        assert 'id=tex-file' in page and "class=upload-tex" in page
+
+        target.write_bytes(TEX)
+        page = server.render_settings(conn, tmp_path / "answers.yaml")
+        assert "Nothing at" not in page
+        assert html.escape(str(target)) in page
+    finally:
+        conn.close()
+
+
+def test_the_two_resume_fields_say_which_is_which(tmp_path, monkeypatch):
+    """"Resume" appears twice on this page and means two different files. The one that
+    goes to an employer, and the one this repo rewrites."""
+    monkeypatch.setattr(config, "RESUME_TEX", tmp_path / "resume.tex")
+    conn = store.connect(":memory:")
+    try:
+        page = server.render_settings(conn, tmp_path / "answers.yaml")
+    finally:
+        conn.close()
+    assert "Not the file that gets attached to an application" in page
+    assert page.index("<h2>Resume</h2>") < page.index("<h2>Tailoring source</h2>")

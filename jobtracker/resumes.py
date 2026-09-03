@@ -85,6 +85,66 @@ def validate_upload(filename: str, content_b64: str) -> tuple[bytes, str]:
     return blob, suffix
 
 
+def validate_tex_upload(filename: str, content_b64: str) -> bytes:
+    r"""Bytes for a LaTeX resume source that may be written, or raise RefusedUpload.
+
+    A separate validator from `validate_upload`, not a branch in it, because almost every
+    rule differs. A `.tex` file has no magic bytes — it is text — so the content check
+    that stands in for them is that it **decodes as UTF-8 and declares a document**:
+
+    * UTF-8 because `cli._load_resume` reads it with `encoding="utf-8"` and answers
+      `(None, None, "")` on a `UnicodeDecodeError`, which every caller renders as "no
+      resume source". A file accepted here and unreadable there would report itself
+      missing forever from a path you can see it sitting at.
+    * `\documentclass` because `assemble` compiles this file standalone. Without one the
+      upload succeeds, `tailor` proposes edits happily — it only quotes lines — and the
+      failure surfaces later as a compile error about a document that was never a
+      document. This is the `.docx that is really something else` check in the only form
+      a text format allows.
+
+    Nothing here touches the disk: a refusal must leave no partial file behind.
+    """
+    filename = str(filename or "").strip()
+    b64 = str(content_b64 or "")
+    if not filename or not b64:
+        raise RefusedUpload("no file")
+
+    suffix = Path(filename).suffix.lower()
+    if suffix != ".tex":
+        raise RefusedUpload(
+            f"{suffix or 'that'} is not a LaTeX source; expected .tex"
+        )
+    try:
+        blob = base64.b64decode(b64, validate=True)
+    except (ValueError, binascii.Error):
+        raise RefusedUpload("could not decode the upload") from None
+    if not blob:
+        raise RefusedUpload("the file is empty")
+    if len(blob) > MAX_UPLOAD:
+        raise RefusedUpload(
+            f"{len(blob) // 1024} KB is over the {MAX_UPLOAD // (1024 * 1024)} MB limit"
+        )
+    # Named before the generic checks, because it is the likeliest wrong file: the field
+    # directly above this one takes a PDF. Routing it through "not UTF-8" or "no
+    # documentclass" would send you to look at your LaTeX, and a short ASCII-looking PDF
+    # decodes cleanly enough to reach the second of those.
+    for magic, kind in ((b"%PDF", "a PDF"), (b"PK\x03\x04", "a DOCX")):
+        if blob.startswith(magic):
+            raise RefusedUpload(
+                f"that is {kind}, not a LaTeX source — it looks like it was renamed to "
+                ".tex. This field wants the document you write, not the one you send"
+            )
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RefusedUpload("that is not UTF-8 text — a .tex source has to be readable "
+                            "as text") from None
+    if "\\documentclass" not in text:
+        raise RefusedUpload("no \\documentclass in it — this has to be the whole "
+                            "document, since it is what gets compiled")
+    return blob
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_") or "x"
 

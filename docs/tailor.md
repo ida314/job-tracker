@@ -157,6 +157,24 @@ runs multiplies the nightly pull for nothing. CI asserts the capability on the p
 serve image, in the same shape it asserts Playwright, because a missing one otherwise looks
 exactly like a working deployment until someone tries to use it.
 
+## Getting a source in
+
+`tailor` reads `$JOBTRACKER_RESUME_TEX` (default `resume.tex` beside the repo). Put one
+there by hand, or use **Settings → Tailoring source**, which takes a `.tex` upload and
+writes it to exactly that path.
+
+That is a different field from **Resume** above it, and deliberately so: Resume holds the
+PDF attached to an application, this holds the document tailoring reads and rewrites.
+
+The upload is refused, with the reason named, if it is not `.tex`, is not UTF-8 text, or
+carries no `\documentclass` — it is compiled standalone, so a fragment would fail much
+later as a compile error. A PDF or DOCX renamed to `.tex` is called out as such, because
+it is the likeliest mistake and the generic messages would send you to read your LaTeX.
+
+Replacing the source re-asks every posting on its own: `tailor`'s unit key is a hash of
+the resume text, so a changed file re-keys every unit at once, and a `dismissed` proposal
+reopens because a ruling about the old wording is not a ruling about the new.
+
 ## Reading it
 
 `/apply` renders the diff for the posting whose window is open: each edit as was/now, plus
