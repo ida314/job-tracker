@@ -79,7 +79,9 @@ class Candidate:
     unavailable: Optional[str] = None
 
 
-def survey(conn: sqlite3.Connection, ctx: TaskContext) -> list[Candidate]:
+def survey(
+    conn: sqlite3.Connection, ctx: TaskContext, enabled: Optional[set] = None
+) -> list[Candidate]:
     """Every task's standing, in the order selection considers them.
 
     `pending` here counts units the task believes it could do, minus those out of
@@ -87,9 +89,22 @@ def survey(conn: sqlite3.Connection, ctx: TaskContext) -> list[Candidate]:
     survey and the run (a posting closes, an override lands), never appear. Over-reporting
     by a handful is the acceptable side of that, because under-reporting would let a task
     with work look idle.
+
+    `enabled` is the set of task names switched on in plugins.yaml; **None means "all of
+    them"**, which is what keeps every existing caller and every test working and what
+    makes a box with no plugins.yaml run its whole queue.
+
+    A task that is switched off is **absent from this list**, not present with a reason.
+    That distinction is the one `docs/tasks.md` already insists on for unavailability:
+    "switched off" is a decision you typed and there is nothing to go and fix, while a
+    reason printed beside it reads as a fault and sends you looking for one. This
+    function takes the set as an argument rather than reading the file because a task
+    module is pure and `tasks/` must never import `plugins/`.
     """
     out: list[Candidate] = []
     for task in all_tasks():
+        if enabled is not None and task.name not in enabled:
+            continue
         reason = task.unavailable_reason(ctx)
         if reason:
             out.append(Candidate(task=task, unavailable=reason))
@@ -234,13 +249,20 @@ async def run_next(
     task_name: Optional[str] = None,
     budget: Optional[int] = None,
     concurrency: int = DEFAULT_CONCURRENCY,
+    enabled: Optional[set] = None,
 ) -> Optional[TaskReport]:
     """Work the next available task. None when there is nothing to do.
 
     `task_name` pins the choice, which is what `resolve` and `rank` do — they are the
     same machinery aimed at one task rather than a different mechanism.
+
+    `enabled` is passed straight to `survey` — None means every task, so a caller that
+    does not know about switches keeps working. It has to be threaded through rather
+    than surveyed twice: `cmd_work` already holds the set, and a second survey here with
+    a different answer would let a switched-off task be selected by the run after the one
+    that reported it absent.
     """
-    candidates = survey(conn, ctx)
+    candidates = survey(conn, ctx, enabled=enabled)
     if task_name:
         task = get_task(task_name)
         if task is None:

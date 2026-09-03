@@ -28,7 +28,9 @@ marks manual companies as surfaced. Opening a view of your data should not mutat
 from __future__ import annotations
 
 import html
+import json
 import sqlite3
+import urllib.parse
 from collections import Counter
 from datetime import date
 from typing import Optional
@@ -298,6 +300,27 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .restlist .rn { color: var(--muted); font-size: 11.5px; min-width: 22px;
                 font-variant-numeric: tabular-nums; }
 .restlist .meta { color: var(--muted); font-size: 11.5px; }
+.restlist .act { margin-left: auto; }
+
+/* -- the actions cell ----------------------------------------------------------------
+   One row's controls anywhere that is not a pick: put it in the tracker, and get the
+   tailored resume `tailor` proposed for it. Minimal on purpose — these sit on every row
+   of a table thousands long, so they are a chip and two glyph-sized controls, and they
+   read as marks beside a row rather than as a toolbar under it. */
+td.act, .restlist .act { white-space: nowrap; }
+td.act { text-align: right; }
+.act .tchip, .act .tracked { display: inline-block; font-size: 11px; color: var(--muted);
+                             vertical-align: middle; }
+.act .tchip { font-variant-numeric: tabular-nums; margin-right: 5px; }
+.act .tchip.done { opacity: .55; }
+.act .tracked { color: var(--good); }
+.act button, .act a.tailor-dl { appearance: none; background: var(--page);
+    color: var(--ink-2); border: 1px solid var(--grid); border-radius: 5px;
+    font: inherit; font-size: 11px; line-height: 1.6; padding: 1px 7px; cursor: pointer;
+    text-decoration: none; vertical-align: middle; }
+.act button:hover, .act a.tailor-dl:hover { color: var(--ink); border-color: var(--ink-2); }
+.act button[disabled] { opacity: .5; cursor: default; }
+.act .tailor-build, .act a.tailor-dl { margin-right: 5px; }
 
 /* -- grouped tables ------------------------------------------------------------------
    Rows render visible and JS collapses them on load — the `.tabs` rule applied to
@@ -685,6 +708,106 @@ _JS = """
   if (locSel) locSel.addEventListener('change', apply);
   apply();
 })();
+
+// The actions cell: put a posting in the tracker, and get its tailored resume. Present
+// only under `serve`, like every other control on this page — the static file renders no
+// actions column at all, so these two handlers find nothing and do nothing there.
+//
+// Delegated rather than one listener per button, unlike the pick handlers above: the
+// postings tables carry thousands of rows, and this is also what keeps working when a
+// button is swapped for the chip or the link that replaces it.
+(function () {
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); });
+  }
+
+  // "+ tracker" -> the same endpoint the picks' "I applied" uses. No `data-act` on it:
+  // that attribute is how the disposition handler selects exactly the three cards.
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('button.track') : null;
+    if (!b) return;
+    b.disabled = true;
+    var was = b.textContent;
+    b.textContent = 'adding…';
+    post('/api/disposition', {
+      company: b.dataset.company, ats_job_id: b.dataset.job, action: 'applied'
+    }).then(function (res) {
+      if (!res.ok) {
+        b.disabled = false;
+        b.textContent = was;
+        alert(res.error || 'could not add it');
+        return;
+      }
+      // Swapped in place rather than `location.reload()` as a pick does. A reload of the
+      // All postings tab discards the filter you typed and where you had scrolled to,
+      // and nothing else on the page has to move: this row is not a queue slot.
+      var mark = document.createElement('span');
+      mark.className = 'tracked';
+      mark.title = 'Already in the tracker';
+      mark.textContent = 'tracked';
+      b.replaceWith(mark);
+    }).catch(function () {
+      b.disabled = false;
+      b.textContent = was;
+      alert('could not reach the server');
+    });
+  });
+
+  // The tailored resume. The build is a subprocess on a daemon thread, so the endpoint
+  // is idempotent and doubles as the poll: it answers building / ready / error, and only
+  // ever starts one. `ready` swaps the button for the download link the server would
+  // have rendered had the file existed when the page was built.
+  var POLL_MS = 2000;
+  var GIVE_UP_MS = 120000;
+
+  function done(b) {
+    var a = document.createElement('a');
+    a.className = 'tailor-dl';
+    a.href = '/api/tailored?company=' + encodeURIComponent(b.dataset.company)
+           + '&job=' + encodeURIComponent(b.dataset.job);
+    a.title = 'Download the tailored resume';
+    a.setAttribute('download', '');
+    a.innerHTML = '&darr;';
+    b.replaceWith(a);
+  }
+
+  function ask(b, started) {
+    post('/api/tailor-build', {company: b.dataset.company, ats_job_id: b.dataset.job})
+      .then(function (res) {
+        if (res.ok && res.state === 'ready') { done(b); return; }
+        if (res.ok && res.state === 'building') {
+          if (Date.now() - started > GIVE_UP_MS) {
+            b.disabled = false;
+            b.innerHTML = '&darr;';
+            alert('still compiling after two minutes — check the serve log');
+            return;
+          }
+          setTimeout(function () { ask(b, started); }, POLL_MS);
+          return;
+        }
+        b.disabled = false;
+        b.innerHTML = '&darr;';
+        alert(res.error || 'could not build it');
+      }).catch(function () {
+        b.disabled = false;
+        b.innerHTML = '&darr;';
+        alert('could not reach the server');
+      });
+  }
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('button.tailor-build') : null;
+    if (!b || b.disabled) return;
+    b.disabled = true;
+    b.textContent = '…';
+    ask(b, Date.now());
+  });
+})();
+
 """
 
 
@@ -701,7 +824,8 @@ def build_dashboard(
     the US, then unknown, then abroad) and the location filter appears. Location never
     removes a row from the page — it only decides reading order.
 
-    `interactive` adds the applied/skip/snooze buttons to Today's picks. It is only
+    `interactive` adds the applied/skip/snooze buttons to Today's picks, and the actions
+    column — track it, get its tailored resume — to every other posting row. It is only
     ever True when rendered by `serve`, because those buttons POST — the file written
     by `jobtracker dashboard` must stay a self-contained, offline, read-only artifact,
     and dead buttons in it would be worse than no buttons.
@@ -723,6 +847,8 @@ def build_dashboard(
     unranked = sum(1 for r in ranked if r["score"] is None)
     plans = store.plans_by_posting(conn)
     overrides = store.posting_resumes(conn)
+    suggestions = store.suggestions_by_posting(conn)
+    built = _built_resumes()
     pending_mail = store.pending_mail_count(conn)
 
     # Read straight off `applications` rather than joining through `postings`, which is
@@ -730,6 +856,11 @@ def build_dashboard(
     # at all. Two queries, not N+1: the events arrive keyed by application.
     apps = store.all_applications(conn)
     events_by = store.events_by_application(conn)
+    # What is already in the tracker, so a row that is there offers a state rather than a
+    # button. Re-tracking is harmless (`record_application` upserts) but it would append a
+    # second `applied` event, and a control that looks live on a job you already applied
+    # to is the page disagreeing with itself.
+    tracked = {(a["company"], a["ats_job_id"]) for a in apps}
 
     parts: list[str] = []
     parts.append("<!doctype html>")
@@ -746,7 +877,7 @@ def build_dashboard(
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
-           rest, overrides)
+           rest, overrides, suggestions, tracked, built)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -764,8 +895,10 @@ def build_dashboard(
     _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria)
     _tier_chart(parts, matches, by_name)
     _filters(parts, matches + uncertain, by_name, criteria)
-    _table(parts, "Open matches", matches, by_name, "matches", False, criteria)
-    _table(parts, "Uncertain — needs a human", uncertain, by_name, "uncertain", True, criteria)
+    _table(parts, "Open matches", matches, by_name, "matches", False, criteria,
+           interactive, tracked, suggestions, built)
+    _table(parts, "Uncertain — needs a human", uncertain, by_name, "uncertain", True,
+           criteria, interactive, tracked, suggestions, built)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="boards" hidden>')
@@ -808,7 +941,8 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy) -> None:
 
 
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
-           plans=None, rest=(), overrides=None) -> None:
+           plans=None, rest=(), overrides=None, suggestions=None, tracked=None,
+           built=None) -> None:
     """The three to apply to today.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -825,7 +959,7 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         parts.append('<div class="picks">')
         for i, row in enumerate(picks, 1):
             _pick(parts, i, row, by_name, today, interactive, criteria, plans,
-                  overrides)
+                  overrides, suggestions)
         parts.append("</div>")
 
     if unranked:
@@ -837,10 +971,13 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
             "the model has not read them yet. Run <code>jobtracker rank</code>.</p>"
         )
 
-    _rest_of_ranking(parts, rest, by_name, today, criteria, plans)
+    _rest_of_ranking(parts, rest, by_name, today, criteria, plans, interactive,
+                     tracked, suggestions, built)
 
 
-def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None) -> None:
+def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
+                     interactive: bool = False, tracked=None, suggestions=None,
+                     built=None) -> None:
     """Everything the ranker scored below today's three, grouped by company.
 
     `<details>` rather than a JS drawer: it is native disclosure, it opens with no script
@@ -848,9 +985,13 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None) -> 
     panel must never be. Grouped in encounter order over the score-sorted list, so the
     company with the best role comes first and nothing is re-sorted.
 
-    No buttons, in either mode. A rest row is a link and its numbers; the disposition and
-    prefill controls stay on the three cards above, which is what keeps
-    `.pick [data-act]` meaning exactly "one of today's picks".
+    No `data-act`, in either mode, and no controls at all in the static file. The rule
+    used to be "no buttons here" and its reason was the selector: `dashboard._JS` reads
+    `.pick [data-act]`, which has to keep meaning exactly "one of today's picks". That
+    reason is now carried by the attribute rather than by the absence of buttons, so a
+    rest row under `serve` can offer the two things that do not belong to a pick — put it
+    in the tracker, and fetch its tailored resume. The disposition trio (skip, snooze,
+    "I applied" as a queue decision) still lives only on a card.
     """
     if not rest:
         return
@@ -869,8 +1010,8 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None) -> 
         f"at {len(groups)} {firms}</summary>"
     )
     parts.append(
-        '<p class="note">Scored below today\'s three. A list, not a queue — the buttons '
-        "live on a pick.</p>"
+        '<p class="note">Scored below today\'s three. A list, not a queue — skip and '
+        "snooze live on a pick.</p>"
     )
     for company, rows in groups.items():
         tier = _tier_of(company, by_name)
@@ -891,18 +1032,22 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None) -> 
             plan = (plans or {}).get((row["company"], row["ats_job_id"]))
             if plan is not None and plan["fields"]:
                 bits.append(f'prefill {plan["fields"] - plan["gaps"]}/{plan["fields"]} fields')
+            act = (
+                f'<span class="act">{_track_cell(row, tracked, suggestions, built)}</span>'
+                if interactive else ""
+            )
             parts.append(
                 f'<li><span class="rn">{n}</span>'
                 f'<a href="{_safe_url(row["url"])}" target="_blank" rel="noopener">'
                 f'{html.escape(row["title"])}</a>'
-                f'<span class="meta">{" · ".join(bits)}</span></li>'
+                f'<span class="meta">{" · ".join(bits)}</span>{act}</li>'
             )
         parts.append("</ul></div>")
     parts.append("</details>")
 
 
 def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
-          overrides=None) -> None:
+          overrides=None, suggestions=None) -> None:
     tier = _tier_of(row["company"], by_name)
     var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
@@ -934,6 +1079,7 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
     )
 
     _prefill_line(parts, row, plans)
+    _tailor_line(parts, row, suggestions)
     _resume_line(parts, row, interactive, overrides)
 
     parts.append('<div class="act">')
@@ -999,6 +1145,137 @@ def _prefill_line(parts, row, plans) -> None:
     parts.append(
         f'<div class="{cls}"><span class="counts">prefill {filled}/{plan["fields"]}'
         f" fields</span>{tail}</div>"
+    )
+
+
+def _built_resumes() -> set[str]:
+    """Every tailored resume already on disk, by stem, listed once per page.
+
+    A `stat` per row would be thousands of them on these tables. Missing directory is the
+    ordinary state on a machine that has never run `tailor build`, and reads as "nothing
+    is built" rather than as an error, which is exactly what it means.
+    """
+    from . import config
+
+    try:
+        return {path.stem for path in config.TAILORED_DIR.glob("*.pdf")}
+    except OSError:
+        return set()
+
+
+def _track_cell(row, tracked=None, suggestions=None, built=None) -> str:
+    """The controls that belong to one posting anywhere but a pick: track it, and get its
+    tailored resume.
+
+    Rendered **only under `serve`** — every caller gates on `interactive`, because these
+    POST and the static file must stay a self-contained, offline artifact where a dead
+    button would be worse than no button.
+
+    Two rules this cell exists inside, neither of which it breaks:
+
+    * **No `data-act`.** `dashboard._JS` selects `.pick [data-act]` for the disposition
+      buttons and that selector has to keep meaning exactly the three cards, so this
+      button is `button.track` and carries its identity in `data-company`/`data-job`
+      like every other control on this page.
+    * **Nothing here accepts a resume edit.** The download hands you a PDF to read; what
+      it may never become is a click that puts a model-authored document on an
+      application with the diff unread. Attaching one is still `tailor build --attach`,
+      after reading the diff at `/apply`. Building and downloading send nothing to an
+      employer, which is the whole of why they are allowed here.
+    """
+    key = (row["company"], row["ats_job_id"])
+    c = html.escape(row["company"], quote=True)
+    j = html.escape(row["ats_job_id"], quote=True)
+    bits: list[str] = []
+
+    row_suggestions = (suggestions or {}).get(key)
+    count = 0
+    state = "pending"
+    if row_suggestions is not None:
+        try:
+            count = len(json.loads(row_suggestions["edits"] or "[]"))
+        except (TypeError, ValueError):
+            count = 0
+        state = row_suggestions["resolution"]
+    if count:
+        # Absent when nothing was proposed, the same rule `_tailor_line` follows: `tailor`
+        # ships switched off, and a permanent "0" on every row is noise about a feature
+        # you have not enabled.
+        cls = "tchip" if state == "pending" else "tchip done"
+        word = "edit" if count == 1 else "edits"
+        note = f"{count} suggested resume {word}"
+        if state != "pending":
+            note += f" ({state})"
+        bits.append(f'<span class="{cls}" title="{html.escape(note, quote=True)}">'
+                    f"&#9998;{count}</span>")
+        if state != "dismissed":
+            if _track_cell_built(row, built):
+                bits.append(
+                    f'<a class="tailor-dl" href="/api/tailored?company={_q(row["company"])}'
+                    f'&amp;job={_q(row["ats_job_id"])}" '
+                    'title="Download the tailored resume" download>&darr;</a>'
+                )
+            else:
+                bits.append(
+                    f'<button class="tailor-build" data-company="{c}" data-job="{j}" '
+                    'title="Build the tailored resume">&darr;</button>'
+                )
+
+    if key in (tracked or set()):
+        bits.append('<span class="tracked" title="Already in the tracker">tracked</span>')
+    else:
+        bits.append(
+            f'<button class="track" data-company="{c}" data-job="{j}" '
+            'title="Record that you applied to this">+ tracker</button>'
+        )
+    return "".join(bits)
+
+
+def _track_cell_built(row, built) -> bool:
+    """Whether that posting's tailored PDF is already on disk.
+
+    Against a set of stems listed once by `build_dashboard`, not a `stat` per row: these
+    tables carry thousands of postings.
+    """
+    from . import resume as resume_mod
+
+    if not built:
+        return False
+    return resume_mod.tailored_stem(row["company"], row["ats_job_id"]) in built
+
+
+def _q(value: str) -> str:
+    """One query-string value, escaped for both the URL and the HTML it is written into."""
+    return html.escape(urllib.parse.quote(str(value), safe=""), quote=True)
+
+
+def _tailor_line(parts, row, suggestions=None) -> None:
+    """What `tailor` proposes changing in your resume for this posting.
+
+    A count and nothing else, in both modes. **No control, in either mode** — reading the
+    edits is what `/apply` is for, and a card that could accept them would put a
+    model-authored document one click from an application without the diff ever being
+    read. That is the §8.1 rule, and it is also why `.pick [data-act]` has to keep meaning
+    exactly the three disposition buttons.
+
+    Absent when nothing has been proposed: `tailor` ships switched off, and a permanent
+    "0 suggestions" on every card would be noise about a feature you have not enabled.
+    """
+    row_suggestions = (suggestions or {}).get((row["company"], row["ats_job_id"]))
+    if row_suggestions is None:
+        return
+    try:
+        count = len(json.loads(row_suggestions["edits"] or "[]"))
+    except (TypeError, ValueError):
+        return
+    if not count:
+        return
+    state = row_suggestions["resolution"]
+    tail = "" if state == "pending" else f" · {html.escape(state)}"
+    parts.append(
+        f'<div class="tailor"><span class="counts">resume: {count} '
+        f'suggested edit{"s" if count != 1 else ""}</span>'
+        f'<span class="tail">{tail}</span></div>'
     )
 
 
@@ -1240,7 +1517,8 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
     parts.append(f'<p class="note">{note}</p>')
 
 
-def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None) -> None:
+def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
+           interactive: bool = False, tracked=None, suggestions=None, built=None) -> None:
     parts.append(
         f'<h2>{html.escape(heading)} '
         f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
@@ -1253,11 +1531,13 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None) ->
         f'data-empty-target="{ident}-empty">'
     )
     # Tier and company moved into the group head, which spans the row. `colspan` and the
-    # header come out of the same `reason` flag, in one place, so they cannot disagree.
-    cols = 4 if reason else 3
+    # header come out of the same two flags, in one place, so they cannot disagree.
+    cols = (4 if reason else 3) + (1 if interactive else 0)
     parts.append("<thead><tr><th>Role</th>"
                  "<th>Location</th>" + ("<th>Why uncertain</th>" if reason else "")
-                 + "<th>First seen</th></tr></thead>")
+                 + "<th>First seen</th>"
+                 + ('<th class="act">Actions</th>' if interactive else "")
+                 + "</tr></thead>")
 
     # Grouped by iterating the already location-sorted rows, so dict insertion order puts
     # each company where its best-placed role already was. NYC-first survives grouping
@@ -1308,6 +1588,10 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None) ->
             parts.append(
                 f'<td class="seen">{html.escape((r["first_seen"] or "")[:10])}</td>'
             )
+            if interactive:
+                parts.append(
+                    f'<td class="act">{_track_cell(r, tracked, suggestions, built)}</td>'
+                )
             parts.append("</tr>")
         parts.append("</tbody>")
     parts.append("</table>")

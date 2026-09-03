@@ -62,6 +62,20 @@ BROWSER_VIEW_URL = os.environ.get("JOBTRACKER_BROWSER_VIEW_URL", "")
 # stored under a name this repo minted. Gitignored with the rest of ./data.
 RESUMES_DIR = Path(os.environ.get("JOBTRACKER_RESUMES", ROOT / "data" / "resumes"))
 
+# Your resume's *source*, as LaTeX. Curated and personal, so it sits beside answers.yaml
+# rather than under ./data — this is a file you wrote and the pipeline only ever reads.
+#
+# LaTeX rather than the PDF because `tailor` has to read the resume as text, and there is
+# no text extractor in this repo. A .tex file is already text: no PDF parser, no dependency
+# decision, and — the part that matters more — the model quotes lines back and a PDF
+# extractor's idea of a line is a column-mangling accident. It also makes the tailored
+# output a diff you can read. Absent is a normal state: `tailor` reports itself unavailable.
+RESUME_TEX = Path(os.environ.get("JOBTRACKER_RESUME_TEX", ROOT / "resume.tex"))
+
+# Where a tailored resume is assembled. Generated state, so it goes under ./data with the
+# uploads — nothing here is authored by hand and deleting it costs a rebuild, not a file.
+TAILORED_DIR = Path(os.environ.get("JOBTRACKER_TAILORED", ROOT / "data" / "tailored"))
+
 # Your job-search mailbox, read only. Empty means not configured, which is a normal
 # state: `mail` says so and the `inbox` task reports itself unavailable rather than idle.
 # Never written, never marked read, never moved — your mail client owns that directory.

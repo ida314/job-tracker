@@ -87,6 +87,18 @@ class TaskContext:
     # itself unavailable when this is absent and never opens it: reading the maildir is
     # `jobtracker mail`'s job, and the task is a pure read of what that recorded.
     maildir: Any = None
+    # The resume, as source text, plus the format that owns it and a hash of the text.
+    # Loaded here by the caller for the same reason `criteria` and `profile` are, and for
+    # one more: a task never opens a file. `inbox` gets its mail from `mail_candidates`
+    # rather than a maildir, and this is the same rule — the text arrives already read,
+    # so nothing in the queue depends on a file being present at unit time.
+    #
+    # The hash is over the TEXT, not the filename. `Answers.hash` covers only a resume's
+    # basename, so a document edited in place would not move it — and moving when the
+    # content moves is the entire point of it being `tailor`'s unit_key.
+    resume_text: Any = None
+    resume_format: Any = None
+    resume_hash: str = ""
 
 
 class Task:
