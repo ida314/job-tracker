@@ -72,6 +72,15 @@ RESUMES_DIR = Path(os.environ.get("JOBTRACKER_RESUMES", ROOT / "data" / "resumes
 # output a diff you can read. Absent is a normal state: `tailor` reports itself unavailable.
 RESUME_TEX = Path(os.environ.get("JOBTRACKER_RESUME_TEX", ROOT / "resume.tex"))
 
+# Which technologies `tailor` is allowed to write onto your resume. Curated like the
+# three above, and written by the Settings page on a click you made — the same standing
+# as companies.yaml, which /companies appends to.
+#
+# Absent is a normal state and means *unrestricted*, not "nothing allowed". This is a
+# file you grow by ruling on terms the model surfaces, so a fresh checkout has none, and
+# reading that absence as a decision would silently switch tailoring off on install.
+KEYWORDS_YAML = Path(os.environ.get("JOBTRACKER_KEYWORDS", ROOT / "keywords.yaml"))
+
 # Where a tailored resume is assembled. Generated state, so it goes under ./data with the
 # uploads — nothing here is authored by hand and deleting it costs a rebuild, not a file.
 TAILORED_DIR = Path(os.environ.get("JOBTRACKER_TAILORED", ROOT / "data" / "tailored"))

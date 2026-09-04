@@ -50,6 +50,7 @@ from . import (
     config,
     curation,
     dashboard as dashboard_mod,
+    keywords as kw_mod,
     live,
     rank as rank_mod,
     resume as resume_mod,
@@ -73,6 +74,13 @@ MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
 _UPLOAD_ROUTES = {"/api/resume", "/api/resume-tex", "/api/posting-resume",
                   "/api/session/file"}
 MAX_UPLOAD = resumes.MAX_UPLOAD
+
+# How many tailored resumes one press of Finish may rebuild. Each is a TeX subprocess on
+# its own daemon thread, so this is a bound on how many compilers a single click starts.
+# Twelve is generous against a queue that only holds postings whose proposal mentioned a
+# technology you had to rule on, and small enough that a machine does not fall over. What
+# is over the bound is reported, and a second press takes the next batch.
+FINISH_MAX = 12
 
 # What the *body* carrying an upload may be, which is not what the file may be. Base64 is
 # ~4/3 of the bytes it encodes, so a body capped at `MAX_UPLOAD` rejects every file over
@@ -283,7 +291,8 @@ def render_tuning(conn: sqlite3.Connection, criteria) -> str:
     return "\n".join(p)
 
 
-def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
+def render_settings(conn: sqlite3.Connection, answers_path: Path,
+                    keywords_path: Optional[Path] = None) -> str:
     """The answer bank and everything still unanswered. Pure read — never writes.
 
     The gap list is the machine's half of the conversation: every question an
@@ -294,6 +303,7 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
     """
     gaps = store.open_gaps(conn)
     answers, error = _load_answers_quietly(answers_path)
+    keywords, kw_error = _load_keywords_quietly(keywords_path)
 
     p = [
         "<!doctype html><meta charset=utf-8><title>Settings</title>",
@@ -314,7 +324,7 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path) -> str:
 
     p.extend(_identity_card(answers))
     p.extend(_resume_card(answers))
-    p.extend(_resume_source_card())
+    p.extend(_tailor_section(conn, keywords, kw_error))
 
     # Offered to every "answer it with" box below. One list for the page; see the note
     # on the same element in `render_apply` for why it is a datalist and not a select.
@@ -863,6 +873,12 @@ def _tailor_block(conn, snap) -> list:
     Each edit renders as a diff plus the phrase from the job description it answers. That
     phrase is the point: it is a verbatim quote, so the page can show *why* an edit was
     proposed rather than asking you to take it on trust.
+
+    An edit leaning on a technology you have not ruled on is **marked, not hidden**. It is
+    the most interesting thing on the block — the model saying this posting wants
+    something your keyword list does not carry — and hiding it would make the page
+    disagree with the count in its own heading. The ruling itself is made on Settings,
+    where the term is one question rather than one per posting.
     """
     if not snap.get("ats_job_id"):
         return []
@@ -876,15 +892,46 @@ def _tailor_block(conn, snap) -> list:
     if not edits:
         return []
 
+    keywords, _kw_error = _load_keywords_quietly(None)
+    flagged = store.flags_of(row)
+
     out = ['<div class="pane tailor">']
     out.append(
         f'<h2>Resume suggestions <span class="note">'
         f'{len(edits)} for this posting · {html.escape(row["resolution"])}</span></h2>'
     )
+    # The flagged terms, read-only, where the diff is read. This page carries **no
+    # control of any kind** — that is what keeps `.pick [data-act]` and `.lf` selecting
+    # exactly what the parity tests assume — so it names the decision and points at the
+    # page that makes it, rather than growing an Include button beside a live form.
+    undecided = [f for f in flagged
+                 if not keywords.known(str(f.get("term") or ""))]
+    # Deliberately over `undecided` and not over what is blocked: an edit held back by a
+    # term you already excluded is not something you are being asked about, and a banner
+    # saying so would never go away.
+    if undecided:
+        names = ", ".join(html.escape(str(f["term"])) for f in undecided)
+        out.append(
+            f'<p class="banner flagbanner">Waiting on you: <strong>{names}</strong>. '
+            'Any edit below that uses one is marked and is left out of the compiled PDF '
+            'until you rule on it under <a href="/settings#tailor">Settings &rarr; '
+            'Resume tailor</a>.</p>'
+        )
     for edit in edits:
         if not isinstance(edit, dict):
             continue
-        out.append('<div class="sg">')
+        waiting = kw_mod.blocking_terms(
+            str(edit.get("suggestion") or ""), flagged, keywords
+        )
+        out.append(f'<div class="sg{" held" if waiting else ""}">')
+        if waiting:
+            # A question and a decision look identical as a list of strings and mean
+            # opposite things here. "Waiting on you" about a term you excluded last week
+            # sends you to Settings to look for a question that is not there.
+            undecided_here, denied_here = kw_mod.describe_blocked(waiting, keywords)
+            label = ("held — needs " + ", ".join(undecided_here)) if undecided_here \
+                else ("excluded — you ruled out " + ", ".join(denied_here))
+            out.append(f'<div class="sg-held">{html.escape(label)}</div>')
         out.append(
             f'<div class="sg-sec">{html.escape(str(edit.get("section") or ""))}</div>'
         )
@@ -902,7 +949,9 @@ def _tailor_block(conn, snap) -> list:
     out.append(
         '<p class=note>Nothing here has been applied. '
         "<code>jobtracker tailor build</code> assembles a PDF from these; "
-        "<code>--attach</code> makes it this posting's resume.</p>"
+        "<code>--attach</code> makes it this posting's resume."
+        + " Anything marked <em>held</em> or <em>excluded</em> is left out of that PDF."
+        + "</p>"
     )
     out.append("</div>")
     return out
@@ -1682,6 +1731,229 @@ def _resume_card(answers) -> list:
     return p
 
 
+def _tailor_section(conn: sqlite3.Connection, keywords, kw_error) -> list:
+    """Everything about tailoring: the source document, the vocabulary, and the questions.
+
+    One section rather than three, because they are one loop and reading them apart is
+    what makes any of them look arbitrary. The document is what gets rewritten, the
+    keyword lists are what it may be rewritten *with*, and the flagged terms are the model
+    saying the second is too small for this posting. A person who has only ever seen the
+    keyword box has no idea where a term would come from.
+
+    Order is deliberate and is not the order the loop runs in. Open questions go first,
+    because they are the only part of this page that is *waiting on you*; the lists and
+    the upload sit below, where you go when you want them. That is the Today tab's rule —
+    the thing to act on is the landing screen, and the corpus is underneath it.
+    """
+    p = ["<h2 id=tailor>Resume tailor</h2>"]
+    p.append(
+        "<p class=note>What <code>tailor</code> may write onto your resume. It proposes "
+        "edits grounded in a posting's own words; these lists decide which technology "
+        "names it is allowed to use while doing it.</p>"
+    )
+    if kw_error:
+        # Loud, and above everything: a file that will not parse is read as empty lists
+        # everywhere else, which is indistinguishable from a list you never wrote.
+        p.append(
+            f"<p class='banner bad'>keywords.yaml did not parse, so nothing is "
+            f"restricting the tailor right now — {html.escape(kw_error)}</p>"
+        )
+    p.extend(_flagged_card(conn, keywords))
+    p.extend(_keyword_lists_card(keywords))
+    p.extend(_resume_source_card())
+    return p
+
+
+def _flagged_terms(conn: sqlite3.Connection, keywords) -> list:
+    """Undecided technologies, one entry per term, with the postings that wanted it.
+
+    Grouped by term rather than by posting, which is `split_gaps`' argument: the decision
+    is about the technology, and you make it once. A term four postings want is one
+    question with four reasons attached, not four questions.
+
+    `keywords.known` is applied here rather than at write time, so a ruling takes effect
+    on every stored proposal at once — including ones made before you made it. That is
+    the same live reading `blocking_terms` does, and it is why nothing has to be rewritten
+    when you press a button.
+    """
+    by_term: dict = {}
+    for row in store.pending_suggestions(conn):
+        for flag in store.flags_of(row):
+            term = kw_mod.normalize(str(flag.get("term") or ""))
+            if not term or keywords.known(term):
+                continue
+            entry = by_term.setdefault(
+                term.casefold(), {"term": term, "why": "", "asks": []}
+            )
+            entry["asks"].append({
+                "company": row["company"],
+                "title": row["title"] or "",
+                "evidence": str(flag.get("evidence") or ""),
+            })
+            if not entry["why"]:
+                entry["why"] = str(flag.get("why") or "")
+    return sorted(by_term.values(), key=lambda e: (-len(e["asks"]), e["term"].casefold()))
+
+
+# How many postings are named beside a flagged term before the rest are counted. The
+# `_NAME_AT_MOST` rule from the gap cards: thirty company names is the reason you cannot
+# see the next question.
+_FLAG_NAMES = 3
+
+
+def _flagged_card(conn: sqlite3.Connection, keywords) -> list:
+    """The loud part. Technologies the tailor wanted and your list does not carry.
+
+    Loud on purpose, and this is the one place on these pages that shouts. Everything
+    else here is a list you go and read; this is a claim that a posting asks for something
+    you have not said you can do, and the failure mode it guards against — a technology
+    you do not know, printed on a resume you send under your own name, defended badly in
+    an interview six weeks later — is the most expensive thing this repo can cause.
+
+    Every term carries the phrase from the job description that asked for it, because
+    that quote is what makes Include a decision rather than a guess. It is verbatim, and
+    grounded in `parse_edits` before it was ever stored.
+
+    Two buttons and no third. There is no "decide later" — that is what leaving it alone
+    already is, and a control for it would imply the other two were urgent in a way they
+    are not.
+    """
+    terms = _flagged_terms(conn, keywords)
+    if not terms:
+        # Said rather than left blank. An empty section reads as a feature that is not
+        # working, and "nothing outstanding" is a real answer worth giving.
+        return ["<div class=card><p class=note>No technology is waiting on a decision. "
+                "<code>tailor</code> flags one when a posting asks for something your "
+                "list below does not carry, rather than writing it onto your resume."
+                "</p></div>"]
+
+    p = [f'<div class="banner flagbanner">{len(terms)} technolog'
+         f'{"y is" if len(terms) == 1 else "ies are"} waiting on you. Until you rule on '
+         f'{"it" if len(terms) == 1 else "them"}, every edit that leans on '
+         f'{"it" if len(terms) == 1 else "one"} is held out of the compiled PDF.</div>']
+    for entry in terms:
+        term = html.escape(entry["term"])
+        safe = html.escape(entry["term"], quote=True)
+        p.append('<div class=flag>')
+        p.append(f'<div class=term>{term}</div>')
+        asks = entry["asks"]
+        # " · " rather than ", ": a job title carries commas of its own ("Backend
+        # Engineer, New Grad"), so a comma-joined list of them reads as twice as many
+        # postings as there are.
+        named = " · ".join(
+            html.escape(f"{a['company']} — {a['title'][:44]}" if a["title"]
+                        else a["company"])
+            for a in asks[:_FLAG_NAMES]
+        )
+        if len(asks) > _FLAG_NAMES:
+            named += f" and {len(asks) - _FLAG_NAMES} more"
+        p.append(f'<div class=note>wanted for {named}</div>')
+        if entry["why"]:
+            p.append(f'<div class=why>{html.escape(entry["why"])}</div>')
+        # The quote is the evidence, and it is why this is not a guess. Third-party text
+        # off an ATS, escaped like every other string on these pages.
+        quote = asks[0]["evidence"]
+        if quote:
+            p.append(f'<div class=quote>the posting says <q>{html.escape(quote)}</q>'
+                     '</div>')
+        p.append(
+            '<div class=row>'
+            f'<button class=kw-allow data-term="{safe}">Include — I know this</button>'
+            f'<button class=kw-deny data-term="{safe}">Exclude — I do not</button>'
+            '</div>'
+        )
+        p.append("</div>")
+
+    p.append(
+        '<div class=card>'
+        '<p class=note>Including a term adds it to the allowed list and re-asks every '
+        'posting, so the next <code>work</code> run can actually use it. Excluding it is '
+        'a permanent refusal: no suggestion carrying that word is ever compiled again, '
+        'whatever the posting says.</p>'
+        '<div class=row><button class=tailor-finish>Finish — rebuild the tailored PDFs'
+        '</button></div>'
+        '<p class=note>Rebuilds only the resumes whose proposal mentioned one of these '
+        'terms; nothing else changed. Anything still undecided stays held back, and is '
+        'named in the result.</p>'
+        '<div id=finishout class=coresult hidden></div>'
+        '</div>'
+    )
+    return p
+
+
+def _keyword_lists_card(keywords) -> list:
+    """The two lists, as chips you can read, plus one box to add to either.
+
+    Rendered as chips rather than a textarea for `/tuning`'s reason: the section is a
+    *reading* first. An add box over an invisible list is how you come to type a term
+    that is already there, or add to `allowed` something you excluded last week and have
+    forgotten — which the writer refuses, but only after you have pressed the button.
+
+    Unlike `/tuning`'s rule lists there **is** a remove control here, and the asymmetry is
+    real rather than an inconsistency. Removing a criteria token silently re-admits every
+    posting it was rejecting, across the whole corpus, with no replay — which is why that
+    path is an edit plus `jobtracker eval`. Removing a keyword changes what one model pass
+    may write next time; it is re-asked on the next run, and nothing is reclassified.
+    """
+    p = ["<h3>Technologies tailor may use</h3>", "<div class=card>"]
+    if not keywords.restricted:
+        # The one semantic in this feature somebody can get wrong by looking at it, so it
+        # is stated rather than implied by an empty box. Absent means unrestricted, and
+        # reading an absence as a decision is the mistake this repo keeps naming.
+        p.append(
+            "<p class='banner'>The list is empty, which means <strong>unrestricted"
+            "</strong> — not <em>nothing allowed</em>. Until you add a term, "
+            "<code>tailor</code> works from whatever is already in your resume and "
+            "flags nothing.</p>"
+        )
+    else:
+        p.append(f"<div class=chips>{_chips(keywords.allowed, 'ok')}</div>")
+        p.append(f"<p class=note>{len(keywords.allowed)} term(s), sent to the model "
+                 "verbatim. A technology name outside this list and outside your resume "
+                 "may not appear in a suggestion.</p>")
+    p.append(
+        '<div class=row><input class=kwbox id=kw-new type=text '
+        "placeholder='PostgreSQL'> "
+        '<button class=kw-add>Add</button></div>'
+        "<p class=note>Adding or removing a term re-asks every posting: the lists are "
+        "hashed into <code>tailor</code>'s unit key, so a proposal made under the old "
+        "list is not one made under the new.</p>"
+    )
+    p.append("</div>")
+
+    p.append("<h3>Ruled out</h3>")
+    p.append("<div class=card>")
+    if keywords.denied:
+        p.append(f"<div class=chips>{_chips(keywords.denied, 'no')}</div>")
+        p.append("<p class=note>A suggestion containing one of these is dropped before "
+                 "it is ever stored, at every posting. Remove one to make it a question "
+                 "again.</p>")
+    else:
+        p.append("<p class=note>Nothing ruled out. Excluding a flagged technology puts "
+                 "it here, permanently, until you take it back.</p>")
+    p.append("</div>")
+    return p
+
+
+def _chips(terms, kind: str) -> str:
+    """One term per chip, each with the control that takes the ruling back.
+
+    `kw-forget` rather than a pair of remove buttons: the term goes out of *both* lists,
+    so "I did not mean that" is one action rather than a question about which list it
+    landed in. It becomes an open question again on the next run, since removing it moves
+    the keywords hash.
+    """
+    out = []
+    for term in terms:
+        safe = html.escape(term, quote=True)
+        out.append(
+            f'<span class="chip {kind}">{html.escape(term)}'
+            f'<button class=kw-forget data-term="{safe}" '
+            f'title="Take this ruling back">&times;</button></span>'
+        )
+    return "".join(out)
+
+
 def _resume_source_card() -> list:
     r"""The LaTeX document `tailor` reads, and where to put one.
 
@@ -1694,7 +1966,7 @@ def _resume_source_card() -> list:
     extractor in this repo, the model quotes lines back verbatim, and a PDF extractor's
     idea of a line is a column-layout accident. A `.tex` file is already text.
     """
-    p = ["<h2>Tailoring source</h2>", "<div class=card>"]
+    p = ["<h3>Source document</h3>", "<div class=card>"]
     target = config.RESUME_TEX
     p.append(
         "<p class=note>The LaTeX document <code>tailor</code> reads to propose resume "
@@ -1724,6 +1996,19 @@ def _resume_source_card() -> list:
     return p
 
 
+def _load_keywords_quietly(path: Optional[Path]):
+    """(Keywords, error|None). A broken file is a banner, not a 500.
+
+    The renderer's half of `Handler._keywords`. Both refuse to swallow a parse error into
+    empty lists, because on this page an unread file and an unwritten one look identical
+    and mean opposite things.
+    """
+    try:
+        return kw_mod.load_keywords(path or config.KEYWORDS_YAML), None
+    except ValueError as exc:
+        return kw_mod.Keywords(), str(exc)
+
+
 def _load_answers_quietly(path: Path):
     """(Answers|None, error|None). A missing or broken file is a page, not a 500."""
     from .answers import load_answers
@@ -1742,12 +2027,14 @@ class TuningServer(HTTPServer):
 
     def __init__(self, addr, handler, db_path: Path, criteria_path: Path,
                  companies_path: Optional[Path],
-                 answers_path: Optional[Path] = None) -> None:
+                 answers_path: Optional[Path] = None,
+                 keywords_path: Optional[Path] = None) -> None:
         super().__init__(addr, handler)
         self.db_path = db_path
         self.criteria_path = criteria_path
         self.companies_path = companies_path
         self.answers_path = answers_path or config.ANSWERS_YAML
+        self.keywords_path = keywords_path or config.KEYWORDS_YAML
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1832,7 +2119,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/settings":
                 conn = self._conn()
                 try:
-                    page = render_settings(conn, Path(self.server.answers_path))
+                    page = render_settings(
+                        conn, Path(self.server.answers_path),
+                        Path(getattr(self.server, "keywords_path",
+                                     config.KEYWORDS_YAML)),
+                    )
                 finally:
                     conn.close()
                 self._send(page)
@@ -1929,6 +2220,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_posting_resume_clear(payload))
             elif path == "/api/tailor-build":
                 self._send_json(self._api_tailor_build(payload))
+            elif path == "/api/keyword":
+                self._send_json(self._api_keyword(payload))
+            elif path == "/api/tailor-finish":
+                self._send_json(self._api_tailor_finish(payload))
             elif path == "/api/prefill":
                 self._send_json(self._api_prefill(payload))
             elif path == "/api/apply-to":
@@ -2358,6 +2653,111 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         return {"ok": True, "detail": "dismissed"}
+
+    def _keywords(self) -> tuple:
+        """`(Keywords, error)` — the lists, and why they could not be read.
+
+        A tuple rather than a raise, and the error is **not** swallowed into empty lists
+        the way `cli._load_keywords` swallows it. The two callers want opposite things
+        from a malformed file: a nightly run has four other tasks to get through, so it
+        degrades and logs; a page whose whole job is showing you these lists must say
+        that it cannot read them, or an unrestricted tailor looks exactly like one you
+        configured that way.
+        """
+        path = Path(getattr(self.server, "keywords_path", config.KEYWORDS_YAML))
+        try:
+            return kw_mod.load_keywords(path), None
+        except ValueError as exc:
+            return kw_mod.Keywords(), str(exc)
+
+    def _api_keyword(self, payload: dict) -> dict:
+        """Rule on one technology: include it, exclude it, or take the ruling back.
+
+        The write is the same candidate-parse-backup-swap every curated file here gets,
+        and the same standing as `/api/company` appending to companies.yaml: a scheduled
+        run never touches this file, and this one is a click somebody made on a page they
+        opened. DESIGN.md §2.3 is intact.
+
+        Three actions, because two would leave no way out of a mistake. `forget` deletes
+        the term from **both** lists rather than moving it, so the term goes back to being
+        a question — and `tailor` asks it again on the next run, since removing it moves
+        `keywords_hash`.
+
+        It writes no PDF. Rebuilding is Finish, deliberately separate: a compile per click
+        would spawn a subprocess for each of four terms you were part-way through ruling
+        on, and three of those documents would be wrong by the time you finished.
+        """
+        term = str(payload.get("term") or "")
+        action = str(payload.get("action") or "")
+        lists = {"allow": "allowed", "deny": "denied"}
+        if action not in lists and action != "forget":
+            return {"ok": False, "error": f"unknown action {action!r}"}
+        try:
+            term = kw_mod.validate_term(term)
+        except kw_mod.RefusedTerm as exc:
+            return {"ok": False, "error": str(exc)}
+
+        path = Path(getattr(self.server, "keywords_path", config.KEYWORDS_YAML))
+        existing = path.read_text() if path.exists() else ""
+        try:
+            body = kw_mod.edit(
+                existing, lists.get(action, "allowed"), term,
+                remove=(action == "forget"),
+            )
+        except kw_mod.RefusedTerm as exc:
+            return {"ok": False, "error": str(exc)}
+
+        try:
+            safewrite.write_text(path, body, kw_mod.load_keywords)
+        except safewrite.RefusedWrite as exc:
+            return {"ok": False, "error": f"refused invalid keywords.yaml: {exc}"}
+        log.info("keyword %r -> %s", term, action)
+        return {"ok": True, "term": term, "action": action}
+
+    def _api_tailor_finish(self, payload: dict) -> dict:
+        """Rebuild the tailored PDFs your keyword rulings just changed.
+
+        Scoped to proposals that carried a flagged term, because those are exactly the
+        documents a ruling can have altered — every other posting's PDF is the same file
+        it was, and recompiling the whole corpus to prove that is minutes of TeX for no
+        change. `force` on each build, since the point is to replace a file that already
+        exists and would otherwise answer `ready`.
+
+        Bounded at `FINISH_MAX`. Each build is a subprocess on its own daemon thread, and
+        an unbounded fan-out here is a page that starts forty compilers on one click. What
+        is over the bound is *named* rather than silently dropped — the button is honest
+        about having done part of the job, and pressing it again picks up the rest, since
+        a finished build stops being over the bound.
+
+        Every refusal is per-posting and reported, not aggregated into a count: "3 of 7
+        failed" sends you to look at seven jobs to find three reasons.
+        """
+        conn = self._conn()
+        try:
+            rows = [r for r in store.pending_suggestions(conn) if store.flags_of(r)]
+        finally:
+            conn.close()
+        if not rows:
+            return {"ok": True, "started": 0, "results": [],
+                    "note": "nothing to rebuild — no open proposal mentions a flagged "
+                            "technology"}
+
+        results = []
+        started = 0
+        for row in rows[:FINISH_MAX]:
+            out = self._api_tailor_build(
+                {"company": row["company"], "ats_job_id": row["ats_job_id"],
+                 "force": True}
+            )
+            started += 1 if out.get("state") == "building" else 0
+            results.append({
+                "company": row["company"], "ats_job_id": row["ats_job_id"],
+                "title": row["title"] or "",
+                "state": out.get("state") or "refused",
+                "detail": out.get("detail") or out.get("error") or "",
+            })
+        over = max(0, len(rows) - FINISH_MAX)
+        return {"ok": True, "started": started, "results": results, "over": over}
 
     def _api_rule(self, payload: dict) -> dict:
         phrase = str(payload.get("phrase") or "").strip()
@@ -3183,14 +3583,22 @@ class Handler(BaseHTTPRequestHandler):
         What it does **not** do is accept anything. A built PDF is a document to read; it
         reaches an application only through `tailor build --attach`, after the diff has
         been read at `/apply`. That is the §8.1 rule and this endpoint sits inside it.
+
+        `force` is Finish's entry, and it is why the "the file exists, so we are ready"
+        shortcut takes a parameter rather than being unconditional. Ruling on a keyword
+        changes which edits may be compiled, so a PDF built before the ruling is not the
+        document the page now describes — and answering `ready` about it would be the one
+        way this endpoint could hand somebody a resume that disagrees with the diff they
+        just read. Nothing else passes it: a plain `↓` click still never rebuilds.
         """
         company = str(payload.get("company") or "")
         job_id = str(payload.get("ats_job_id") or "")
+        force = bool(payload.get("force"))
         if not company or not job_id:
             return {"ok": False, "error": "company and ats_job_id are required"}
 
         out = resume_mod.tailored_path(company, job_id)
-        if out.is_file():
+        if out.is_file() and not force:
             return {"ok": True, "state": "ready"}
 
         key = (company, job_id)
@@ -3228,6 +3636,23 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError) as exc:
             return {"ok": False, "error": f"the stored suggestions did not parse: {exc}"}
 
+        # Edits leaning on a technology you have not ruled on are held out of the
+        # compile. `split_edits` is the shared derivation — the CLI runs the same one, so
+        # the button and the terminal cannot mean different documents.
+        keywords, kw_error = self._keywords()
+        if kw_error:
+            return {"ok": False, "error": kw_error}
+        edits, waiting = kw_mod.split_edits(edits, store.flags_of(row), keywords)
+        terms = sorted({t for _e, ts in waiting for t in ts})
+        if not edits:
+            if waiting:
+                # Named, because "no edits apply" would send you to re-run the model over
+                # a proposal that is fine and waiting on you.
+                return {"ok": False,
+                        "error": f"every edit here is waiting on a keyword decision "
+                                 f"({', '.join(terms)}) — rule on them under Settings"}
+            return {"ok": False, "error": "there are no edits to compile"}
+
         tailored, applied = fmt.apply_edits(text, edits)
         if not applied:
             # The resume moved under a proposal made against an older version of it.
@@ -3242,6 +3667,11 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": blocked}
 
         stem = resume_mod.tailored_stem(company, job_id)
+        if force:
+            # Removed on the request thread, before the thread that replaces it exists.
+            # A stale file left in place would answer a poll `ready` while the rebuild was
+            # still running, and hand over the document the rebuild exists to replace.
+            out.unlink(missing_ok=True)
 
         def _run() -> None:
             # The only thing on this thread is the subprocess and the write. Every input
@@ -3269,8 +3699,10 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(
             target=_run, name=f"jobtracker-tailor-{stem}", daemon=True
         ).start()
+        held = (f", holding {len(waiting)} on {', '.join(terms)}" if waiting else "")
         return {"ok": True, "state": "building",
-                "detail": f"compiling {applied} edit(s) into {out.name}"}
+                "detail": f"compiling {applied} edit(s) into {out.name}{held}",
+                "held": len(waiting), "held_terms": terms}
 
     # -- the live form -------------------------------------------------------------
     #
@@ -3590,6 +4022,30 @@ border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 .field input{flex:1;padding:.3rem .5rem;border-radius:5px;
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 .req{color:#d97706;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
+
+.flag{padding:.75rem .9rem;margin:.5rem 0;border:1px solid rgba(220,38,38,.4);
+border-left:4px solid #dc2626;border-radius:6px;background:rgba(220,38,38,.05)}
+.flag .term{font-weight:700;font-size:1.05rem;letter-spacing:.01em}
+.flag .why{margin-top:.35rem;font-size:.9rem}
+.flag .quote{margin-top:.35rem;font-size:.88rem;opacity:.85}
+.flag .row{display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap}
+.flag button{padding:.35rem .7rem;border-radius:5px;border:1px solid currentColor;
+background:transparent;color:inherit;font:inherit;font-size:.85rem;cursor:pointer}
+.flag button.kw-allow{border-color:#16a34a;color:#16a34a}
+.flag button.kw-deny{border-color:#dc2626;color:#dc2626}
+
+/* The two lists, read before they are edited. A chip carries its own undo, because the
+   term is the thing being ruled on and the ruling is what you are taking back. */
+.chips{display:flex;flex-wrap:wrap;gap:.35rem;margin:.2rem 0 .6rem}
+.chip{display:inline-flex;align-items:center;gap:.3rem;padding:.15rem .2rem .15rem .5rem;
+border-radius:999px;border:1px solid rgba(127,127,127,.5);font-size:.85rem}
+.chip.ok{border-color:rgba(22,163,74,.55)}
+.chip.no{border-color:rgba(220,38,38,.55);opacity:.85}
+.chip button{appearance:none;background:transparent;border:0;color:inherit;font:inherit;
+cursor:pointer;opacity:.5;padding:0 .35rem;line-height:1}
+.chip button:hover{opacity:1}
+.kwbox{flex:1;padding:.3rem .5rem;border-radius:5px;
+border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 """
 
 # Only the editable half. Everything that decides how an application *looks* — the
@@ -3709,6 +4165,13 @@ a.btn:hover{opacity:.7}
 
 /* Resume suggestions. A full-width block below the two panes, not a third column: at
    820px the split already collapses, and a diff needs the line length. */
+/* An edit waiting on a keyword decision. Marked, never hidden — it is the most
+   interesting line on the block, and hiding it would make the page disagree with the
+   count in its own heading. No control: ruling on the term happens on Settings, where it
+   is one question rather than one per posting. */
+.pane.tailor .sg.held{border-left:3px solid #dc2626;padding-left:.6rem;opacity:.85}
+.pane.tailor .sg-held{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;
+color:#dc2626;font-weight:700;margin-bottom:.2rem}
 .pane.tailor{margin-top:1.4rem;border-top:1px solid rgba(127,127,127,.25);
 padding-top:1rem}
 .pane.tailor h2{font-size:1rem;margin:0 0 .6rem}
@@ -3726,7 +4189,17 @@ border-radius:4px;margin-top:.25rem}
 
 """
 
+# `.flagbanner` is here rather than in _SETTINGS_CSS because two pages say it: Settings
+# asks you to rule on a technology, and /apply tells you an edit is being held until you
+# do. A rule defined on one page and used on two is the CSP `img-src` failure in a
+# different key — it does not error, the banner simply stops looking like a warning.
 _EXTRA_CSS = """
+/* The flagged technologies. The one place on these pages that shouts, and the weight is
+   proportional to the cost of getting it wrong: a word you do not know, on a resume that
+   goes out under your name. Red rather than the gap cards' amber, and a solid left rule
+   rather than a tint, so the two are distinguishable at a glance on the same page. */
+.flagbanner{border-left:4px solid #dc2626;background:rgba(220,38,38,.1);font-weight:600}
+
 .nav{margin:0 0 1rem;font-size:.9rem}
 .banner{padding:.6rem .8rem;border-radius:6px;font-weight:600}
 .banner.ok{background:#0f5132;color:#d1e7dd}
@@ -4575,6 +5048,60 @@ document.addEventListener('click', async (e) => {
     location.reload();
     return;
   }
+  // -- the resume tailor's keyword lists --------------------------------------------
+  // Include, exclude, and take it back. All three are one endpoint with an action,
+  // because they are one decision with three answers, and a page that reloads after
+  // each is a page whose lists cannot drift from the file that owns them.
+  const kw = e.target.closest('button.kw-allow, button.kw-deny, button.kw-forget');
+  if (kw) {
+    const action = kw.classList.contains('kw-allow') ? 'allow'
+                 : kw.classList.contains('kw-deny') ? 'deny' : 'forget';
+    kw.disabled = true;
+    const res = await post('/api/keyword', {term: kw.dataset.term, action: action});
+    kw.disabled = false;
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const kwadd = e.target.closest('button.kw-add');
+  if (kwadd) {
+    const box = document.getElementById('kw-new');
+    const term = box ? box.value.trim() : '';
+    if (!term) { alert('Type a technology first.'); return; }
+    const res = await post('/api/keyword', {term: term, action: 'allow'});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  // Finish reports into the page rather than an alert, and deliberately does NOT reload.
+  // Each result is a compile that has only just started on its own thread, so the list
+  // is the only place the outcome of this click is legible — a reload would replace it
+  // with a page that cannot yet know anything.
+  const fin = e.target.closest('button.tailor-finish');
+  if (fin) {
+    const out = document.getElementById('finishout');
+    fin.disabled = true;
+    out.hidden = false;
+    out.className = 'coresult';
+    out.textContent = 'Rebuilding…';
+    let res;
+    try { res = await post('/api/tailor-finish', {}); }
+    finally { fin.disabled = false; }
+    if (!res.ok) { out.className = 'coresult bad'; out.textContent = res.error; return; }
+    // textContent throughout: every line carries a company name and a job title that
+    // came off a third-party ATS.
+    const lines = (res.results || []).map(
+      r => r.state + '  ' + r.company + ' — ' + (r.title || r.ats_job_id) +
+           (r.detail ? '\\n        ' + r.detail : ''));
+    out.textContent =
+      (res.note ? res.note : res.started + ' rebuild(s) started of ' +
+                             (res.results || []).length + ' proposal(s).') +
+      (res.over ? '\\n' + res.over + ' more were over the per-press limit — press ' +
+                  'Finish again once these land.' : '') +
+      (lines.length ? '\\n\\n' + lines.join('\\n') : '');
+    return;
+  }
+
   // -- applications ----------------------------------------------------------------
   // These three branches belong here because render_applications, in this file, is what
   // emits the buttons. Same rule the apply-to note below records.
@@ -4656,9 +5183,10 @@ document.addEventListener('click', async (e) => {
 
 def serve(db_path: Path, criteria_path: Path, companies_path: Optional[Path],
           host: str = "127.0.0.1", port: int = 8765,
-          answers_path: Optional[Path] = None) -> int:
+          answers_path: Optional[Path] = None,
+          keywords_path: Optional[Path] = None) -> int:
     httpd = TuningServer((host, port), Handler, db_path, criteria_path, companies_path,
-                         answers_path)
+                         answers_path, keywords_path)
     log.info(
         "serving on http://%s:%d  (dashboard: /  tuning: /tuning  settings: /settings  "
         "health: /healthz /readyz)",

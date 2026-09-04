@@ -506,6 +506,19 @@ _ADDED_COLUMNS = [
     # The row this one duplicates, as a clickable URL rather than a (company, ats_job_id)
     # pair: the question being answered is "why did this vanish?", and a link answers it.
     ("postings", "duplicate_of_url", "TEXT"),
+    # Technologies `tailor` wanted to write for this posting that your keyword list does
+    # not carry, as a JSON array of {term, evidence, why}. Its own column rather than a
+    # key inside `edits` because the two are read by different things: `edits` is what
+    # would be compiled, this is what you are being asked about, and a posting can carry
+    # one with none of the other. NULL is a row proposed before this existed.
+    ("resume_suggestions", "flagged", "TEXT"),
+    # Which keyword lists the proposal was made under — see keywords.Keywords.hash. A
+    # second column beside `resume_hash` rather than folded into it, for `prefill_plans.
+    # resume_key`'s reason: they answer two questions, and the schema comment on
+    # `resume_hash` says it is over the resume TEXT. Both are compared by
+    # `matches_needing_tailoring`, so changing either list re-asks every posting.
+    # '' is a row proposed before there were keyword lists at all.
+    ("resume_suggestions", "keywords_hash", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -2390,7 +2403,8 @@ def set_posting_resume(
 
 # -- resume suggestions ---------------------------------------------------------------
 def matches_needing_tailoring(
-    conn: sqlite3.Connection, resume_hash: str, limit: Optional[int] = None
+    conn: sqlite3.Connection, resume_hash: str, keywords_hash: str = "",
+    limit: Optional[int] = None,
 ) -> list[sqlite3.Row]:
     """Scored, open matches whose suggestions were not made against this resume.
 
@@ -2406,6 +2420,13 @@ def matches_needing_tailoring(
     subtracting, so a task whose queue does not shrink after `apply` reports a backlog
     forever. Same mechanism `judge` gets from `prose_hash`, and it has the same second
     effect: rewrite your resume and every posting is asked again.
+
+    `keywords_hash` is the second half of the same mechanism and is compared the same
+    way. Editing either keyword list changes what the model was asked — `allowed` is in
+    its prompt and `denied` is a refusal applied to its answer — so a proposal made under
+    the old lists is not one made under the new, exactly as a rewritten resume re-asks
+    everything. `COALESCE` so rows written before the column existed re-ask once and then
+    settle, rather than being invisible forever.
 
     Postings you have already applied to or skipped are excluded — a suggestion for a job
     that is behind you is work nobody will read.
@@ -2424,17 +2445,18 @@ def matches_needing_tailoring(
           AND p.description IS NOT NULL AND p.description != ''
           AND a.company IS NULL
           AND d.company IS NULL
-          AND (s.resume_hash IS NULL OR s.resume_hash != ?)
+          AND (s.resume_hash IS NULL OR s.resume_hash != ?
+               OR COALESCE(s.keywords_hash, '') != ?)
         ORDER BY r.score DESC, p.company
     """
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
-    return list(conn.execute(sql, (resume_hash,)))
+    return list(conn.execute(sql, (resume_hash, keywords_hash)))
 
 
 def record_suggestions(
     conn: sqlite3.Connection, company: str, ats_job_id: str, edits: str,
-    resume_hash: str, now: str,
+    resume_hash: str, now: str, flagged: str = "[]", keywords_hash: str = "",
 ) -> None:
     """Store what `tailor` proposes for one posting. The caller commits.
 
@@ -2445,13 +2467,15 @@ def record_suggestions(
     conn.execute(
         """
         INSERT INTO resume_suggestions (company, ats_job_id, edits, resume_hash,
-                                        resolution, proposed_at, resolved_at)
-        VALUES (?, ?, ?, ?, 'pending', ?, NULL)
+                                        resolution, proposed_at, resolved_at,
+                                        flagged, keywords_hash)
+        VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, ?)
         ON CONFLICT(company, ats_job_id) DO UPDATE SET
             edits=excluded.edits, resume_hash=excluded.resume_hash,
-            resolution='pending', proposed_at=excluded.proposed_at, resolved_at=NULL
+            resolution='pending', proposed_at=excluded.proposed_at, resolved_at=NULL,
+            flagged=excluded.flagged, keywords_hash=excluded.keywords_hash
         """,
-        (company, ats_job_id, edits, resume_hash, now),
+        (company, ats_job_id, edits, resume_hash, now, flagged, keywords_hash),
     )
 
 
@@ -2471,6 +2495,57 @@ def suggestions_by_posting(conn: sqlite3.Connection) -> dict:
         (r["company"], r["ats_job_id"]): r
         for r in conn.execute("SELECT * FROM resume_suggestions")
     }
+
+
+def flags_of(row) -> list:
+    """The terms `tailor` flagged on one proposal row, as `{term, evidence, why}` dicts.
+
+    The single reader of `resume_suggestions.flagged`, and it lives here rather than in
+    any of its three callers for the reason `resume.tailored_stem` is one function: a
+    second copy of this expression is how a page and a compiler come to disagree about
+    which edits were held back.
+
+    Every failure is an empty list. A row written before the column existed holds NULL,
+    and a blob that does not parse can only have come from a database somebody edited by
+    hand — neither is worth raising out of a render for.
+    """
+    if row is None:
+        return []
+    try:
+        raw = row["flagged"]
+    except (IndexError, KeyError):
+        return []
+    try:
+        parsed = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [f for f in parsed if isinstance(f, dict) and f.get("term")]
+
+
+def pending_suggestions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every proposal still awaiting a ruling, newest first, with its job title.
+
+    The Settings page's one read. Scoped to `pending` because a dismissed proposal is a
+    decision you already made, and re-surfacing the terms inside it would ask you a
+    question you have answered — `mail_proposals`' rule that dismissed is a resolution
+    and not a delete, read from the other side.
+
+    LEFT JOIN, not JOIN: a proposal outlives the posting row when the req closes, and the
+    terms in it are still terms you are being asked to rule on. Losing the row here would
+    make a flagged term vanish from the page the night its job was filled.
+    """
+    return list(conn.execute(
+        """
+        SELECT s.*, p.title, p.url
+        FROM resume_suggestions s
+        LEFT JOIN postings p
+               ON s.company=p.company AND s.ats_job_id=p.ats_job_id
+        WHERE s.resolution='pending'
+        ORDER BY s.proposed_at DESC, s.company
+        """
+    ))
 
 
 def resolve_suggestions(

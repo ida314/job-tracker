@@ -99,6 +99,11 @@ class TaskContext:
     resume_text: Any = None
     resume_format: Any = None
     resume_hash: str = ""
+    # Which technologies `tailor` may write, as a `keywords.Keywords`. Loaded by the
+    # caller for the reason everything else here is: a task never opens a file. Empty is
+    # a valid and common value and means *unrestricted*, never "nothing allowed" — so
+    # unlike `resume_text` its absence is not an `unavailable_reason`.
+    keywords: Any = None
 
 
 class Task:

@@ -309,11 +309,17 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
    read as marks beside a row rather than as a toolbar under it. */
 td.act, .restlist .act { white-space: nowrap; }
 td.act { text-align: right; }
-.act .tchip, .act .tracked { display: inline-block; font-size: 11px; color: var(--muted);
+.act .tchip, .act .tracked, .act .theld { display: inline-block; font-size: 11px;
+    color: var(--muted);
                              vertical-align: middle; }
 .act .tchip { font-variant-numeric: tabular-nums; margin-right: 5px; }
 .act .tchip.done { opacity: .55; }
 .act .tracked { color: var(--good); }
+/* Every edit on this proposal is waiting on a keyword decision, so there is nothing to
+   compile. A state rather than a button, the rule `.tracked` follows — a live-looking
+   control over something that would refuse on click is the page disagreeing with
+   itself. Warned rather than muted: it is a question addressed to you. */
+.act .theld { color: var(--warning); border-bottom: 1px dotted currentColor; cursor: help; }
 .act button, .act a.tailor-dl { appearance: none; background: var(--page);
     color: var(--ink-2); border: 1px solid var(--grid); border-radius: 5px;
     font: inherit; font-size: 11px; line-height: 1.6; padding: 1px 7px; cursor: pointer;
@@ -849,6 +855,7 @@ def build_dashboard(
     overrides = store.posting_resumes(conn)
     suggestions = store.suggestions_by_posting(conn)
     built = _built_resumes()
+    held = _held_by_posting(suggestions)
     pending_mail = store.pending_mail_count(conn)
 
     # Read straight off `applications` rather than joining through `postings`, which is
@@ -877,7 +884,7 @@ def build_dashboard(
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
-           rest, overrides, suggestions, tracked, built)
+           rest, overrides, suggestions, tracked, built, held)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -896,9 +903,9 @@ def build_dashboard(
     _tier_chart(parts, matches, by_name)
     _filters(parts, matches + uncertain, by_name, criteria)
     _table(parts, "Open matches", matches, by_name, "matches", False, criteria,
-           interactive, tracked, suggestions, built)
+           interactive, tracked, suggestions, built, held)
     _table(parts, "Uncertain — needs a human", uncertain, by_name, "uncertain", True,
-           criteria, interactive, tracked, suggestions, built)
+           criteria, interactive, tracked, suggestions, built, held)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="boards" hidden>')
@@ -942,7 +949,7 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy) -> None:
 
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
            plans=None, rest=(), overrides=None, suggestions=None, tracked=None,
-           built=None) -> None:
+           built=None, held=None) -> None:
     """The three to apply to today.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -959,7 +966,7 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         parts.append('<div class="picks">')
         for i, row in enumerate(picks, 1):
             _pick(parts, i, row, by_name, today, interactive, criteria, plans,
-                  overrides, suggestions)
+                  overrides, suggestions, held)
         parts.append("</div>")
 
     if unranked:
@@ -972,12 +979,12 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         )
 
     _rest_of_ranking(parts, rest, by_name, today, criteria, plans, interactive,
-                     tracked, suggestions, built)
+                     tracked, suggestions, built, held)
 
 
 def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
                      interactive: bool = False, tracked=None, suggestions=None,
-                     built=None) -> None:
+                     built=None, held=None) -> None:
     """Everything the ranker scored below today's three, grouped by company.
 
     `<details>` rather than a JS drawer: it is native disclosure, it opens with no script
@@ -1033,7 +1040,7 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
             if plan is not None and plan["fields"]:
                 bits.append(f'prefill {plan["fields"] - plan["gaps"]}/{plan["fields"]} fields')
             act = (
-                f'<span class="act">{_track_cell(row, tracked, suggestions, built)}</span>'
+                f'<span class="act">{_track_cell(row, tracked, suggestions, built, held)}</span>'
                 if interactive else ""
             )
             parts.append(
@@ -1047,7 +1054,7 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
 
 
 def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
-          overrides=None, suggestions=None) -> None:
+          overrides=None, suggestions=None, held=None) -> None:
     tier = _tier_of(row["company"], by_name)
     var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
@@ -1079,7 +1086,7 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
     )
 
     _prefill_line(parts, row, plans)
-    _tailor_line(parts, row, suggestions)
+    _tailor_line(parts, row, suggestions, held)
     _resume_line(parts, row, interactive, overrides)
 
     parts.append('<div class="act">')
@@ -1148,6 +1155,61 @@ def _prefill_line(parts, row, plans) -> None:
     )
 
 
+def _held_by_posting(suggestions) -> dict:
+    """`{(company, job_id): {"terms": [...], "all": bool}}` — what each proposal waits on.
+
+    Computed once for the page rather than per row, which is `_built_resumes`' reason:
+    these tables carry thousands of postings and this reads a config file. Both modes,
+    not just `interactive` — the static file has no build button, but "this posting's
+    suggestions are incomplete until you decide something" is a fact worth carrying into
+    a mailed copy, and it is exactly the fact that explains a short diff.
+
+    A keywords file that will not parse is read as empty lists here, which holds nothing
+    back. The alternative — refusing to render — would make one bad line in a config file
+    take out the whole dashboard, and `serve`'s Settings page is where a parse error is
+    reported.
+    """
+    from . import config
+    from . import keywords as kw_mod
+
+    if not suggestions:
+        return {}
+    try:
+        keywords = kw_mod.load_keywords(config.KEYWORDS_YAML)
+    except ValueError:
+        return {}
+    out: dict = {}
+    for key, row in suggestions.items():
+        flagged = store.flags_of(row)
+        if not flagged:
+            continue
+        try:
+            edits = [e for e in json.loads(row["edits"] or "[]") if isinstance(e, dict)]
+        except (TypeError, ValueError):
+            continue
+        if not edits:
+            continue
+        terms: list = []
+        blocked = 0
+        for edit in edits:
+            waiting = kw_mod.blocking_terms(
+                str(edit.get("suggestion") or ""), flagged, keywords
+            )
+            blocked += 1 if waiting else 0
+            for term in waiting:
+                if term not in terms:
+                    terms.append(term)
+        if terms:
+            # "all of them" and "which are still questions" are computed here, in the one
+            # pass that already has the answers, rather than re-derived per row — which
+            # would mean re-reading a config file once per posting across a table
+            # thousands long. Same rule `_built_resumes` follows about a `stat` per row.
+            undecided, _denied = kw_mod.describe_blocked(terms, keywords)
+            out[key] = {"terms": terms, "undecided": undecided,
+                        "all": blocked == len(edits)}
+    return out
+
+
 def _built_resumes() -> set[str]:
     """Every tailored resume already on disk, by stem, listed once per page.
 
@@ -1163,7 +1225,7 @@ def _built_resumes() -> set[str]:
         return set()
 
 
-def _track_cell(row, tracked=None, suggestions=None, built=None) -> str:
+def _track_cell(row, tracked=None, suggestions=None, built=None, held=None) -> str:
     """The controls that belong to one posting anywhere but a pick: track it, and get its
     tailored resume.
 
@@ -1208,7 +1270,24 @@ def _track_cell(row, tracked=None, suggestions=None, built=None) -> str:
             note += f" ({state})"
         bits.append(f'<span class="{cls}" title="{html.escape(note, quote=True)}">'
                     f"&#9998;{count}</span>")
-        if state != "dismissed":
+        waiting = (held or {}).get(key) or {}
+        if waiting.get("all"):
+            # A state, not a control — the rule the `tracked` chip follows. The button
+            # would refuse on click, and a live-looking control over something that
+            # cannot proceed is the page disagreeing with itself. Only when *every* edit
+            # is held: some held is a shorter PDF, which is still worth building.
+            # "held" only while something is actually being asked. Once every blocking
+            # term is one you excluded, this is a decision you made and saying you are
+            # waiting on it would never stop being wrong.
+            asking = waiting.get("undecided") or []
+            word = "held" if asking else "excluded"
+            note = (("every suggested edit here is waiting on a keyword decision: "
+                     + ", ".join(asking)) if asking else
+                    ("every suggested edit here uses a technology you ruled out: "
+                     + ", ".join(waiting["terms"])))
+            bits.append(f'<span class="theld" title="{html.escape(note, quote=True)}">'
+                        f"{word}</span>")
+        elif state != "dismissed":
             if _track_cell_built(row, built):
                 bits.append(
                     f'<a class="tailor-dl" href="/api/tailored?company={_q(row["company"])}'
@@ -1249,7 +1328,7 @@ def _q(value: str) -> str:
     return html.escape(urllib.parse.quote(str(value), safe=""), quote=True)
 
 
-def _tailor_line(parts, row, suggestions=None) -> None:
+def _tailor_line(parts, row, suggestions=None, held=None) -> None:
     """What `tailor` proposes changing in your resume for this posting.
 
     A count and nothing else, in both modes. **No control, in either mode** — reading the
@@ -1272,6 +1351,14 @@ def _tailor_line(parts, row, suggestions=None) -> None:
         return
     state = row_suggestions["resolution"]
     tail = "" if state == "pending" else f" · {html.escape(state)}"
+    # Named, because a diff that is shorter than the count says otherwise reads as the
+    # model having done less rather than as a question nobody has answered.
+    waiting = (held or {}).get((row["company"], row["ats_job_id"])) or {}
+    if waiting.get("undecided"):
+        tail += (" · held on " + html.escape(", ".join(waiting["undecided"]))
+                 + " — rule on it under Settings")
+    elif waiting.get("terms"):
+        tail += " · some left out — " + html.escape(", ".join(waiting["terms"]))
     parts.append(
         f'<div class="tailor"><span class="counts">resume: {count} '
         f'suggested edit{"s" if count != 1 else ""}</span>'
@@ -1518,7 +1605,8 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
 
 
 def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
-           interactive: bool = False, tracked=None, suggestions=None, built=None) -> None:
+           interactive: bool = False, tracked=None, suggestions=None, built=None,
+           held=None) -> None:
     parts.append(
         f'<h2>{html.escape(heading)} '
         f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
@@ -1590,7 +1678,7 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
             )
             if interactive:
                 parts.append(
-                    f'<td class="act">{_track_cell(r, tracked, suggestions, built)}</td>'
+                    f'<td class="act">{_track_cell(r, tracked, suggestions, built, held)}</td>'
                 )
             parts.append("</tr>")
         parts.append("</tbody>")

@@ -1103,6 +1103,25 @@ def _load_resume(path=None) -> tuple:
     return text, fmt, digest
 
 
+def _load_keywords(path=None):
+    """The keyword lists, or empty ones. Read here for `_load_resume`'s reason.
+
+    Tolerant in exactly one direction. A **missing** file is empty lists, which means
+    unrestricted and is the normal state of a fresh checkout. A **malformed** one is
+    logged and also read as empty — because this runs inside a command with four other
+    tasks to do — and that is the one place this module knowingly degrades toward the
+    permissive reading, so it is logged at WARNING rather than DEBUG. `serve` shows the
+    parse error on the Settings card, which is where a broken file gets noticed.
+    """
+    from .keywords import Keywords, load_keywords
+
+    try:
+        return load_keywords(path or config.KEYWORDS_YAML)
+    except ValueError as exc:
+        log.warning("keywords.yaml did not load, so nothing is restricted: %s", exc)
+        return Keywords()
+
+
 def _build_context(args: argparse.Namespace, today: str, fetcher=None):
     """Everything every task might need, loaded once.
 
@@ -1137,6 +1156,7 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
         resume_text=resume_text,
         resume_format=resume_format,
         resume_hash=resume_hash,
+        keywords=_load_keywords(getattr(args, "keywords", None)),
         tiers=rank_mod.tier_lookup(companies),
         companies={c.name: c for c in companies},
         fetcher=fetcher,
@@ -1482,6 +1502,7 @@ def cmd_tailor(args: argparse.Namespace) -> int:
     `mail_proposals` follows. It comes back on its own when the resume changes, because
     that is a different question.
     """
+    from . import keywords as kw_mod
     from . import resume as resume_mod
 
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
@@ -1532,13 +1553,30 @@ def cmd_tailor(args: argparse.Namespace) -> int:
         # Reported once, up front, rather than as N identical failures. A missing engine
         # is one fact about this machine, not one fact per posting.
         blocked = fmt.unavailable_reason()
-        built = failed = 0
+        keywords = _load_keywords(getattr(args, "keywords", None))
+        built = failed = held = 0
         for row in rows:
             edits = [
                 resume_mod.Edit(**e) for e in json.loads(row["edits"] or "[]")
             ]
-            tailored, applied = fmt.apply_edits(text, edits)
             head = f"{row['company']} — {row['ats_job_id']}"
+            # An edit whose suggestion leans on a technology you have not ruled on is
+            # held back, not dropped: the question is open, and compiling it would put
+            # the word on a document before you answered. `split_edits` is the one
+            # derivation of this, shared with the build endpoint — two copies is how the
+            # button and the terminal come to mean different PDFs.
+            edits, waiting = kw_mod.split_edits(edits, store.flags_of(row), keywords)
+            if waiting:
+                held += len(waiting)
+                terms = sorted({t for _e, ts in waiting for t in ts})
+                print(f"  {head}: holding {len(waiting)} edit(s) on {', '.join(terms)}"
+                      f" — rule on them under Settings -> Resume tailor")
+            if not edits:
+                if waiting:
+                    continue
+                print(f"  {head}: no edits to apply")
+                continue
+            tailored, applied = fmt.apply_edits(text, edits)
             if not applied:
                 # The resume moved under a proposal made against an older version of it.
                 print(f"  {head}: none of {len(edits)} edit(s) still apply — re-run work")
@@ -1572,6 +1610,11 @@ def cmd_tailor(args: argparse.Namespace) -> int:
             print(f"\nNothing was assembled — {blocked}")
             return EXIT_OK
         print(f"\n{built} assembled, {failed} failed")
+        if held:
+            # Not a failure and not an exit code: a term waiting on a decision is the
+            # system working. Said out loud because a PDF quietly missing an edit reads
+            # as a worse proposal rather than as a question nobody answered.
+            print(f"{held} edit(s) held back pending a keyword decision.")
         return EXIT_DEGRADED if failed else EXIT_OK
     finally:
         conn.close()
@@ -2264,6 +2307,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         host=args.host,
         port=args.port,
         answers_path=Path(args.answers) if args.answers else config.ANSWERS_YAML,
+        keywords_path=(Path(args.keywords) if getattr(args, "keywords", None)
+                       else config.KEYWORDS_YAML),
     )
 
 
@@ -2505,6 +2550,8 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--profile", default=str(config.PROFILE_YAML))
     w.add_argument("--answers", default=None,
                    help=f"answer bank (default: {config.ANSWERS_YAML})")
+    w.add_argument("--keywords", default=None,
+                    help=f"technologies tailor may use (default: {config.KEYWORDS_YAML})")
     w.add_argument("--db", default=None)
     w.add_argument("--since", default=None)
     w.add_argument("--plugins", default=None,
@@ -2557,6 +2604,8 @@ def build_parser() -> argparse.ArgumentParser:
     tl.add_argument("--limit", type=int, default=None, help="assemble at most N")
     tl.add_argument("--resume-source", default=None, dest="resume_source",
                     help=f"resume source (default: {config.RESUME_TEX})")
+    tl.add_argument("--keywords", default=None,
+                     help=f"technologies tailor may use (default: {config.KEYWORDS_YAML})")
     tl.add_argument("--attach", action="store_true",
                     help="also use each result as that posting's resume")
     tl.add_argument("--db", default=None)
@@ -2713,6 +2762,8 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--answers", default=None)
     sv.add_argument("--db", default=None)
     sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--keywords", default=None,
+                     help=f"technologies tailor may use (default: {config.KEYWORDS_YAML})")
     sv.add_argument("--host", default="127.0.0.1",
                     help="default 127.0.0.1 — it has no auth and can edit criteria.yaml")
     sv.set_defaults(func=cmd_serve)

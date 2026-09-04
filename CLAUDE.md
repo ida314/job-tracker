@@ -449,8 +449,9 @@ already committed to outranks the raw corpus.
   `/settings` emit — so every click silently did nothing (fixed 2026-08-15). `server._JS` and
   `dashboard._JS` are two scripts on three pages. Tests assert the button exists *and* that
   the page's script listens for it.
-- **`serve` has a third page, `/settings`** — who you are, your resume, the answer bank, and
-  every question prefill could not answer. `render_settings` is connection-in/string-out like
+- **`serve` has a third page, `/settings`** — who you are, your resume, the **Resume
+  tailor** section (the keyword lists, the technologies waiting on a ruling, and the `.tex`
+  upload), the answer bank, and every question prefill could not answer. `render_settings` is connection-in/string-out like
   `render_tuning`; `POST /api/answer`, `/api/attach`, `/api/identity` and `/api/resume` write
   through `safewrite`. `POST /api/apply-to` starts the browser **on a daemon thread**:
   `server.py` is `HTTPServer`, not `ThreadingHTTPServer`, so driving it inline would freeze the
@@ -1006,6 +1007,63 @@ first that composes prose** — so the bound is not the shape of the answer.
   no fuzzy match, no insertion — which puts the preamble out of reach by construction and is
   why a document that compiled before compiles after. The cost is real: it cannot add a bullet
   or reorder a section, because insertion has no anchor.
+- **Two keyword lists gate what may be written, and they pull in opposite directions**
+  (`keywords.yaml`, 2026-09-04). `allowed` goes into the prompt verbatim — the vocabulary
+  the model works in. `denied` is a refusal applied in `parse_edits`, at every posting,
+  forever. The asymmetry is `overrides`' over `criteria.yaml`: the list that *widens* what
+  may be written is prose a model reads, and the list that *narrows* it is code it cannot
+  argue with. A prompt is a request, not a bound, which is the whole reason there are two.
+  - **Empty `allowed` means unrestricted, never "nothing allowed."** Reading an absence as
+    a decision is the `manual` mistake, and here it would silently switch tailoring off on
+    install. The Settings card says which state you are in rather than leaving you to infer
+    it from an empty box, and there is a test named after it.
+  - **Both lists are in the unit key** beside `resume_hash`, as `keywords_hash` — a second
+    column on `resume_suggestions` rather than folded in, `prefill_plans.resume_key`'s
+    rule, because the schema comment on `resume_hash` says it is over the resume *text*.
+    Ruling on a term re-asks every posting, exactly as a rewritten resume does.
+  - **An undecided term holds an edit rather than dropping it.** Holding is what makes
+    Include cost zero model calls — the work already exists and the ruling releases it.
+    `keywords.split_edits` is the single derivation, shared by `cmd_tailor` and
+    `_api_tailor_build`; a second copy is how the button and the terminal come to mean
+    different documents. Render paths call `blocking_terms`, which marks rows and decides
+    nothing.
+  - **`blocking_terms` asks `allows`, not `known`, and that closes a real hole.** Rule 7
+    covers every proposal made *after* a ruling; it cannot cover the ones already stored,
+    and the edit sitting in the table when you press Exclude is by construction the one
+    that made you press it. `known` would call that term settled and let the edit compile
+    — "never write this again, except here". Found by running the loop, not by a test, and
+    it has one now.
+  - **Held and excluded are labelled differently on every surface** (`describe_blocked`).
+    They are one list of strings and two opposite meanings: one is a question, the other a
+    decision you made. Saying "waiting on you" about a term you excluded sends somebody to
+    Settings to look for a question that is not there, and it would never stop being wrong.
+  - **A drop for a denied term is still written down.** `parse_edits` returns an empty
+    `Suggestions` rather than None, because a denied drop is *settled* — you ruled it out,
+    the model proposed it anyway, and nothing about tomorrow changes either fact. None
+    there would leave the unit pending and re-ask the same question at one model call a
+    night, forever. A genuinely empty answer still returns None and stays in the queue.
+  - **`flagged` is grounded at both ends** like an edit: `term` and `evidence` must both
+    occur in the description, verbatim, so an invented requirement cannot become a
+    question about your resume. Never flagged: a term already in the resume, or already
+    ruled on either way — re-surfacing a `denied` term would make excluding one feel like
+    it did nothing. `MAX_FLAGGED` is 4.
+  - **The denied list is in the prompt too, and that is not redundant.** It is enforced in
+    Python whatever the prompt says; telling the model as well is what stops it proposing
+    the same rejected word every night, each one a call spent on an answer thrown away.
+  - **Settings groups by term, not by posting** — `split_gaps`' argument. The ruling is
+    about the technology and you make it once. `/apply` marks held edits and carries **no
+    control**, which is what keeps `.pick [data-act]` and `.lf` selecting what they did; a
+    row whose every edit is held renders **held** instead of a build button, the
+    render-a-state rule the `tracked` chip already follows.
+  - **Finish is scoped to proposals that mentioned a flagged term** and bounded at
+    `FINISH_MAX` = 12 compilers per press, naming what it left. Those are the only
+    documents a ruling can have changed; the rest are byte-identical and recompiling them
+    to prove it is minutes of TeX. It is the only caller passing `force` to
+    `_api_tailor_build`, which is why "the file exists, so we are ready" takes a parameter:
+    a PDF built before the ruling is not the document the page now describes.
+  - **The guard is not a hallucination detector, and the docs say so.** `denied` is exact;
+    `allowed` is a prompt, and nothing here knows which strings are technologies. What the
+    pair gives you is a growing *decided* set. Do not claim more for it.
 - **`resume_suggestions` has exactly one reader**, the page that shows it to you. Nothing
   joins it into prefill, ranking or matching. This is §8.1's finding, not an accident: the
   role removed there was *more* tightly bounded (an enum of keys, no free text) and was still
@@ -1038,6 +1096,12 @@ first that composes prose** — so the bound is not the shape of the answer.
   does not fix its number; it is behind `inbox` because its unit key is a hash of the resume
   **text**, so one edit re-keys every posting at once. (`Answers.hash` covers only a resume's
   basename and cannot be reused for this.)
+- **`keywords.yaml` is curated, and has two writers: `POST /api/keyword` and your editor.**
+  Both are something you did on purpose, and no *scheduled* run touches it — the same
+  standing companies.yaml has, and DESIGN.md §2.3 is intact. The writer is line-oriented
+  text surgery, not a YAML round trip: the file is mostly the comments explaining what the two lists mean —
+  including empty-means-unrestricted — and `yaml.safe_dump` deletes all of them. Same rule
+  as `answers.insert_answer` and `curation`'s.
 - **Nothing anywhere accepts an edit on a click.** That was written as "neither surface has
   a button, in either mode", and the ban it states is on *accepting*: a control that attached
   a model-authored PDF to an application with the diff unread. Attaching is still

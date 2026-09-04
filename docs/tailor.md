@@ -49,14 +49,17 @@ unavailable and the rest of the queue runs.
 ## What the model may say
 
 ```json
-{"edits": [{"section": "experience|projects|skills|summary",
-            "current_line": "a line copied verbatim from your resume",
-            "suggestion":   "what to replace it with",
-            "evidence":     "a phrase copied verbatim from the job description"}]}
+{"edits":   [{"section": "experience|projects|skills|summary",
+              "current_line": "a line copied verbatim from your resume",
+              "suggestion":   "what to replace it with",
+              "evidence":     "a phrase copied verbatim from the job description"}],
+ "flagged": [{"term":     "a technology named in the job description",
+              "evidence": "a phrase copied verbatim from the job description",
+              "why":      "one sentence on what it would add"}]}
 ```
 
-Six refusals, applied per edit. An edit that fails any of them is dropped; if none survive,
-nothing is written and the posting stays in the queue.
+Seven refusals, applied per edit. An edit that fails any of them is dropped; if none
+survive, nothing is written and the posting stays in the queue.
 
 1. not JSON, not an object, or `edits` is not a list
 2. a `section` outside the enum
@@ -64,6 +67,7 @@ nothing is written and the posting stays in the queue.
 4. **`current_line` does not appear in the resume, verbatim**
 5. a `suggestion` the format refuses to compile (see below)
 6. a `suggestion` identical to the line it replaces
+7. a `suggestion` carrying a technology you have **denied** (see below)
 
 Rules 3 and 4 are the ones doing the work. They are `inbox`'s quote rule — which is
 `repair`'s rule that a proposed slug must appear on the page it was read from — applied at
@@ -75,9 +79,89 @@ must pass both. One that passed the loose check and failed the exact one would r
 the page and then quietly do nothing when applied — a proposal you cannot accept, which is
 worse than one that was never made.
 
+`flagged` is the other half, and it has four refusals of its own: a term that is not a
+term, a `term` or `evidence` that does not occur in the job description, a term already in
+your resume or already ruled on, and a duplicate. `MAX_FLAGGED` is 4 — a page carrying
+twelve new questions per job is one nobody answers.
+
 **`MAX_EDITS` is 6**, and it is not a quality bound. A resume that moves twenty lines per
 posting is not a tailored resume, it is a different resume each time — and every one of
 those lines is a claim you have to stand behind in an interview.
+
+## Keywords: what it may write, and what it may not
+
+`tailor`'s grounding rules keep the *requirement* and the *resume line* honest and say
+nothing at all about the technology names inside a suggestion. A description that says
+"we use Kafka" is exactly the input that talks a model into writing Kafka onto your
+resume, and the person defending that in an interview is you.
+
+`keywords.yaml` is the answer, and it has two lists that work in opposite directions.
+
+```yaml
+allowed:            # goes into the prompt verbatim — the vocabulary it works in
+  - PostgreSQL
+  - Redis
+denied:             # a refusal applied in Python, at every posting, forever
+  - Kubernetes
+```
+
+**The asymmetry is the point**, and it is the one `overrides` has over `criteria.yaml`:
+the list that *widens* what may be written is prose the model reads, and the list that
+*narrows* it is code the model cannot argue with. A prompt is a request, not a bound.
+
+**An empty `allowed` means unrestricted, not "nothing allowed."** Reading an absence as a
+decision is the mistake this repo keeps naming, and here it would mean that installing the
+feature silently switched tailoring off. The Settings card says which state you are in
+rather than leaving you to infer it from an empty box.
+
+Both lists are hashed into `tailor`'s `unit_key` alongside the resume hash, so ruling on a
+term re-asks every posting — a proposal made under the old lists is not one made under the
+new. Editing the file by hand works and so does the page; there is no separate reload.
+
+### When it wants something you have not got
+
+The model may not write a technology outside the list, so the honest answer to "we need
+Kafka" is an empty edit and a question. That is `flagged`, and it is grounded exactly as an
+edit is: the term and a phrase asking for it must both appear in the job description,
+verbatim. An invented requirement cannot become a question about your resume.
+
+Settings → **Resume tailor** shows every undecided term, grouped by term rather than by
+posting — the decision is about the technology and you make it once, which is `split_gaps`'
+argument about a question nine employers ask. Each carries the quote that asked for it,
+because that quote is what makes Include a decision rather than a guess.
+
+```
+Include — I know this     the term joins `allowed`; every stored edit that was leaning
+                          on it becomes compilable, with no model call
+Exclude — I do not        the term joins `denied`; no suggestion carrying that word is
+                          ever compiled again, whatever a posting says
+×  (on a chip)            take the ruling back — the term becomes a question again
+Finish                    rebuild the tailored PDFs your rulings just changed
+```
+
+**An undecided term holds an edit rather than dropping it.** The work already exists;
+ruling on the term releases it, which is why Include costs nothing.
+
+**Exclude blocks in two places, and both are needed.** Rule 7 drops a denied term out of
+every *future* proposal. `split_edits` keeps it out of the ones already stored — and the
+edit sitting in the table when you press Exclude is, by construction, the one that made
+you press it. Without the second, "never write this again" would mean "never write this
+again, except here". A held edit and an excluded one are labelled differently everywhere
+they render, because one is a question and the other is a decision you already made.
+
+A future proposal dropped by rule 7 is still written down as an empty one, because
+otherwise the posting would be re-asked every night forever for the same answer.
+
+**Finish is scoped to proposals that mentioned a flagged term**, because those are the only
+documents a ruling can have changed; recompiling the corpus to prove the rest are identical
+is minutes of TeX for nothing. It bounds itself at `FINISH_MAX` = 12 compilers per press and
+names what it left, since a second press picks up the rest. Anything still undecided stays
+held back and is named in the result.
+
+Held edits are marked wherever they are visible: `/apply` renders them beside the diff with
+no control (that page carries none, by design — the ruling is made on Settings), a posting
+row whose every edit is held renders **held** instead of a build button, and `tailor build`
+in the terminal says which terms it is waiting on.
 
 ## The LaTeX guard
 
@@ -160,8 +244,8 @@ exactly like a working deployment until someone tries to use it.
 ## Getting a source in
 
 `tailor` reads `$JOBTRACKER_RESUME_TEX` (default `resume.tex` beside the repo). Put one
-there by hand, or use **Settings → Tailoring source**, which takes a `.tex` upload and
-writes it to exactly that path.
+there by hand, or use **Settings → Resume tailor → Source document**, which takes a `.tex`
+upload and writes it to exactly that path.
 
 That is a different field from **Resume** above it, and deliberately so: Resume holds the
 PDF attached to an application, this holds the document tailoring reads and rewrites.
@@ -235,6 +319,12 @@ Ahead of the mailbox, a single save would push it behind several hundred units.
 - **It cannot check that a suggestion is true.** The prompt says to keep your own facts and
   the grounding rules keep the *requirement* honest, but nothing here can verify that you
   did what a rewritten bullet says you did. Read the diff.
+- **The keyword guard is not a hallucination detector.** `denied` is exact and reliable —
+  a word on that list cannot reach a document. `allowed` is a prompt, so a model can still
+  write a technology name that is on neither list; nothing here knows which strings are
+  technologies, and a list of every one of them is not a thing this repo has. What the two
+  lists give you is a growing, *decided* set: every term you have ever been shown becomes
+  permanent, and the ones you rule out cannot come back. Read the diff.
 - **A resume that is one line per paragraph** gives it little to work with; one that wraps
   a bullet across source lines gives it less, because `current_line` has to match text that
   exists. Both are formatting choices in your `.tex`, and neither is detected.

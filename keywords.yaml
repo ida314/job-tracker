@@ -1,0 +1,16 @@
+# Technologies `tailor` may write onto your resume. See docs/tailor.md.
+#
+# Curation: human-authored, and written by the Settings page on a click you made.
+#
+#   allowed  goes into the model's prompt verbatim — the vocabulary it works in.
+#            EMPTY MEANS UNRESTRICTED, not "nothing". There is no list yet.
+#   denied   is a refusal applied in Python. A suggestion containing one of these is
+#            dropped at every posting, forever, whatever the prompt says.
+#
+# Changing either list re-asks every posting: the two are hashed into `tailor`'s unit
+# key, so a proposal made under the old list is not one made under the new.
+
+allowed: []
+
+denied: []
+

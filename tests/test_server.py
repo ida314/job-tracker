@@ -144,9 +144,14 @@ def test_regressions_are_surfaced(criteria):
 # _readiness is the meaningful health logic (liveness is a constant), and like
 # render_tuning it needs no socket: a Handler carries only the paths off .server.
 class _FakeServer:
-    def __init__(self, db_path, criteria_path, answers_path=None, companies_path=None):
+    def __init__(self, db_path, criteria_path, answers_path=None, companies_path=None,
+                 keywords_path=None):
         self.db_path = db_path
         self.criteria_path = criteria_path
+        # Like `answers_path`: `serve` only sets it when --keywords was passed, and the
+        # handler falls back to config.KEYWORDS_YAML. The keyword endpoint writes, so its
+        # tests pass a concrete one.
+        self.keywords_path = keywords_path or config.KEYWORDS_YAML
         # None is the real default — `serve` only sets it when --companies was passed —
         # so reads fall back to config.COMPANIES_YAML. The add-a-company endpoint writes,
         # which needs a concrete path, so its tests pass one.
@@ -154,9 +159,11 @@ class _FakeServer:
         self.answers_path = answers_path or config.ANSWERS_YAML
 
 
-def _handler_for(db_path, criteria_path, answers_path=None, companies_path=None):
+def _handler_for(db_path, criteria_path, answers_path=None, companies_path=None,
+                 keywords_path=None):
     h = server.Handler.__new__(server.Handler)
-    h.server = _FakeServer(db_path, criteria_path, answers_path, companies_path)
+    h.server = _FakeServer(db_path, criteria_path, answers_path, companies_path,
+                           keywords_path)
     return h
 
 
@@ -1522,6 +1529,239 @@ def test_attaching_an_identity_key_is_recorded_where_something_reads_it(tmp_path
     conn.close()
 
 
+# -- the resume tailor's keyword lists ----------------------------------------------
+def _kwfile(tmp_path, allowed=(), denied=()):
+    from jobtracker import keywords as kw_mod
+
+    path = tmp_path / "keywords.yaml"
+    path.write_text(kw_mod.render(kw_mod.Keywords(allowed=tuple(allowed),
+                                                  denied=tuple(denied))))
+    return path
+
+
+def _flagged_db(tmp_path, terms=("Kafka",), edits="[]"):
+    """A database holding one pending proposal that flags `terms`."""
+    db = tmp_path / "state.db"
+    conn = store.connect(db)
+    conn.execute(
+        "INSERT INTO postings (company,ats_job_id,title,url,first_seen,last_seen) "
+        "VALUES ('Ramp','7','Backend Engineer','https://x/7','2026-09-01','2026-09-04')"
+    )
+    store.record_suggestions(
+        conn, "Ramp", "7", edits, "rh", "2026-09-04",
+        flagged=json.dumps([{"term": t, "evidence": f"we use {t}", "why": "why"}
+                            for t in terms]),
+        keywords_hash="kh",
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_ruling_on_a_keyword_writes_the_file_and_keeps_its_comments(tmp_path):
+    """The same curated-file contract `/api/rule` and `/api/company` have.
+
+    A scheduled run never writes keywords.yaml; this is a click somebody made on a page
+    they opened, through `safewrite`, and the comments explaining what the lists mean
+    survive it — the whole reason the writer is text surgery.
+    """
+    path = _kwfile(tmp_path)
+    before = [ln for ln in path.read_text().splitlines() if ln.startswith("#")]
+    h = _handler_for(tmp_path / "state.db", config.CRITERIA_YAML, keywords_path=path)
+
+    assert h._api_keyword({"term": "PostgreSQL", "action": "allow"})["ok"] is True
+    assert h._api_keyword({"term": "Kubernetes", "action": "deny"})["ok"] is True
+
+    from jobtracker import keywords as kw_mod
+
+    loaded = kw_mod.load_keywords(path)
+    assert loaded.allowed == ("PostgreSQL",) and loaded.denied == ("Kubernetes",)
+    assert [ln for ln in path.read_text().splitlines() if ln.startswith("#")] == before
+    # And a backup was kept, as every safewrite leaves.
+    assert path.with_suffix(".yaml.bak").exists()
+
+    # Forget takes the ruling back, from whichever list held it.
+    assert h._api_keyword({"term": "Kubernetes", "action": "forget"})["ok"] is True
+    assert kw_mod.load_keywords(path).denied == ()
+
+
+def test_a_refused_keyword_writes_nothing(tmp_path):
+    """A refused write writes nothing — the `/api/application` rule.
+
+    Each of these is a state that would otherwise look like success: an unknown action, a
+    term that is not a term, and one already ruled the other way.
+    """
+    path = _kwfile(tmp_path, denied=["Kubernetes"])
+    original = path.read_text()
+    h = _handler_for(tmp_path / "state.db", config.CRITERIA_YAML, keywords_path=path)
+
+    for payload in ({"term": "Redis", "action": "maybe"},
+                    {"term": "   ", "action": "allow"},
+                    {"term": "x" * 500, "action": "allow"},
+                    {"term": "kubernetes", "action": "allow"}):
+        assert h._api_keyword(payload)["ok"] is False, payload
+    assert path.read_text() == original
+
+
+def test_the_settings_page_says_an_empty_list_means_unrestricted(tmp_path):
+    """The one semantic somebody can get wrong by looking at it.
+
+    An empty box beside a heading called "technologies tailor may use" reads as "none
+    are allowed", which is the opposite of what it means and would make the feature look
+    broken on the day it is installed.
+    """
+    conn = store.connect(":memory:")
+    try:
+        page = server.render_settings(conn, tmp_path / "answers.yaml",
+                                      _kwfile(tmp_path))
+        assert "unrestricted" in page
+        page = server.render_settings(conn, tmp_path / "answers.yaml",
+                                      _kwfile(tmp_path, allowed=["Postgres"]))
+        assert "unrestricted" not in page and "Postgres" in page
+    finally:
+        conn.close()
+
+
+def test_a_flagged_technology_is_surfaced_with_its_quote_and_both_rulings(tmp_path):
+    """The loud part, and the quote is what makes Include a decision rather than a guess.
+
+    Grouped by term rather than by posting: the decision is about the technology and you
+    make it once, which is `split_gaps`' argument about a question nine employers ask.
+    """
+    db = _flagged_db(tmp_path)
+    conn = store.connect(db)
+    conn.execute(
+        "INSERT INTO postings (company,ats_job_id,title,url,first_seen,last_seen) "
+        "VALUES ('Stripe','9','Infra','https://x/9','2026-09-01','2026-09-04')"
+    )
+    store.record_suggestions(
+        conn, "Stripe", "9", "[]", "rh", "2026-09-04",
+        flagged=json.dumps([{"term": "Kafka", "evidence": "Kafka at scale", "why": ""}]),
+        keywords_hash="kh",
+    )
+    conn.commit()
+    try:
+        page = server.render_settings(conn, tmp_path / "answers.yaml", _kwfile(tmp_path))
+        assert "waiting on you" in page
+        assert page.count(">Kafka</div>") == 1        # one question, not two
+        assert "Ramp" in page and "Stripe" in page    # both reasons named
+        assert "we use Kafka" in page                 # the verbatim quote
+        assert 'class=kw-allow data-term="Kafka"' in page
+        assert 'class=kw-deny data-term="Kafka"' in page
+
+        # Ruled on, either way, it stops being a question — on every stored proposal at
+        # once, with nothing rewritten.
+        for keywords in (_kwfile(tmp_path, allowed=["Kafka"]),
+                         _kwfile(tmp_path, denied=["Kafka"])):
+            ruled = server.render_settings(conn, tmp_path / "answers.yaml", keywords)
+            assert "waiting on you" not in ruled
+    finally:
+        conn.close()
+
+
+def test_a_broken_keywords_file_is_said_out_loud_on_the_page(tmp_path):
+    """Everywhere else a malformed file degrades to empty lists, which means unrestricted.
+
+    On this page that is indistinguishable from a list you never wrote, and it means the
+    opposite of what an empty box implies — so the parse error is a banner, not a log line.
+    """
+    path = tmp_path / "keywords.yaml"
+    path.write_text("allowed:\n  - Redis\ndenied:\n  - redis\n")
+    conn = store.connect(":memory:")
+    try:
+        page = server.render_settings(conn, tmp_path / "answers.yaml", path)
+        assert "did not parse" in page and "banner bad" in page
+    finally:
+        conn.close()
+
+
+def test_a_build_whose_every_edit_is_held_refuses_and_names_the_terms(tmp_path,
+                                                                      monkeypatch):
+    """"No edits apply" would send you to re-run a model over a proposal that is fine.
+
+    The refusal has to name the decision it is waiting on, because the build runs where
+    nothing can report back to the click — the rule every other refusal on this endpoint
+    already follows.
+    """
+    monkeypatch.setattr(config, "RESUME_TEX", tmp_path / "resume.tex")
+    (tmp_path / "resume.tex").write_text(
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\item old line\n\\end{document}\n"
+    )
+    db = _flagged_db(tmp_path, edits=json.dumps([{
+        "section": "experience", "current_line": "\\item old line",
+        "suggestion": "\\item Kafka pipelines", "evidence": "we use Kafka"}]))
+    h = _handler_for(db, config.CRITERIA_YAML, keywords_path=_kwfile(tmp_path))
+    out = h._api_tailor_build({"company": "Ramp", "ats_job_id": "7"})
+    assert out["ok"] is False
+    assert "Kafka" in out["error"] and "Settings" in out["error"]
+
+
+def test_finish_rebuilds_only_the_proposals_that_mentioned_a_flagged_term(tmp_path,
+                                                                          monkeypatch):
+    """Scoped, because those are the only documents a ruling can have changed.
+
+    Recompiling the whole corpus to prove the rest are identical is minutes of TeX for no
+    change. A proposal with no flags is not in the list at all.
+    """
+    monkeypatch.setattr(config, "RESUME_TEX", tmp_path / "nothing.tex")
+    db = _flagged_db(tmp_path)
+    conn = store.connect(db)
+    conn.execute(
+        "INSERT INTO postings (company,ats_job_id,title,url,first_seen,last_seen) "
+        "VALUES ('Stripe','9','Infra','https://x/9','2026-09-01','2026-09-04')"
+    )
+    # No flags on this one, so Finish must not touch it.
+    store.record_suggestions(conn, "Stripe", "9", "[]", "rh", "2026-09-04",
+                             keywords_hash="kh")
+    conn.commit()
+    conn.close()
+
+    h = _handler_for(db, config.CRITERIA_YAML, keywords_path=_kwfile(tmp_path))
+    out = h._api_tailor_finish({})
+    assert out["ok"] is True
+    assert [r["company"] for r in out["results"]] == ["Ramp"]
+    # No resume source on this box, so nothing compiles — and the reason is per-posting
+    # and reported rather than aggregated into a count.
+    assert out["started"] == 0
+    assert "no resume source" in out["results"][0]["detail"]
+
+
+def test_finish_with_nothing_flagged_says_so_rather_than_reporting_zero(tmp_path):
+    """"0 rebuilt" reads as a failure. "Nothing mentions a flagged technology" is an
+    answer."""
+    db = tmp_path / "state.db"
+    store.connect(db).close()
+    h = _handler_for(db, config.CRITERIA_YAML, keywords_path=_kwfile(tmp_path))
+    out = h._api_tailor_finish({})
+    assert out["ok"] is True and out["started"] == 0
+    assert "nothing to rebuild" in out["note"]
+
+
+def test_the_apply_page_marks_a_held_edit_and_offers_no_control_for_it(tmp_path,
+                                                                       monkeypatch):
+    """`/apply` carries no control of any kind, and that is load-bearing.
+
+    `dashboard._JS` selects `.pick [data-act]` and `.lf`; a ruling button here would put
+    a keyword decision inside a form's own page. So the edit is marked and the page points
+    at Settings, where the term is one question rather than one per posting.
+    """
+    monkeypatch.setattr(config, "KEYWORDS_YAML", _kwfile(tmp_path))
+    db = _flagged_db(tmp_path, edits=json.dumps([{
+        "section": "experience", "current_line": "old",
+        "suggestion": "Kafka pipelines", "evidence": "we use Kafka"}]))
+    conn = store.connect(db)
+    try:
+        block = "\n".join(
+            server._tailor_block(conn, {"company": "Ramp", "ats_job_id": "7"})
+        )
+    finally:
+        conn.close()
+    assert "sg held" in block and "held &mdash; needs" in block.replace("—", "&mdash;")
+    assert '/settings#tailor' in block
+    assert "<button" not in block and "data-act" not in block
+
+
 def test_every_control_on_the_settings_page_has_a_handler_in_its_own_script(tmp_path):
     """The button-and-handler-in-the-same-file rule, which /settings never had one for.
 
@@ -1538,19 +1778,29 @@ def test_every_control_on_the_settings_page_has_a_handler_in_its_own_script(tmp_
     conn = store.connect(":memory:")
     _gaps_at(conn, "how_did_you_hear", "How did you hear about us?", ["Stripe"])
     conn.commit()
-    page = server.render_settings(conn, path)
+    store.record_suggestions(
+        conn, "Ramp", "7", "[]", "rh", "2026-09-04",
+        flagged=json.dumps([{"term": "Kafka", "evidence": "we run Kafka",
+                             "why": "streaming"}]),
+        keywords_hash="kh",
+    )
+    conn.commit()
+    page = server.render_settings(conn, path, tmp_path / "keywords.yaml")
     conn.close()
 
     script = page[page.rindex("<script>"):]
-    classes = set(re.findall(
-        r"class=(save|attach|save-identity|save-resume-name|upload-resume|upload-tex)[ >]",
-        page))
+    known = ("save|attach|save-identity|save-resume-name|upload-resume|upload-tex"
+             "|kw-allow|kw-deny|kw-forget|kw-add|tailor-finish")
+    classes = set(re.findall(rf"class=({known})[ >]", page))
     assert classes == {"save", "attach", "save-identity", "save-resume-name",
-                       "upload-resume", "upload-tex"}
+                       "upload-resume", "upload-tex",
+                       # The keyword controls. `kw-forget` only renders once a term has
+                       # been ruled on, so the fixture below rules on one.
+                       "kw-allow", "kw-deny", "kw-add", "tailor-finish"}
     for cls in classes:
         assert f"button.{cls}" in script, cls
     for endpoint in ("/api/answer", "/api/attach", "/api/identity", "/api/resume",
-                     "/api/resume-tex"):
+                     "/api/resume-tex", "/api/keyword", "/api/tailor-finish"):
         assert endpoint in script, endpoint
     # And the picker the attach box reads from, which is useless without its options.
     assert 'list="bankkeys"' in page
@@ -3842,7 +4092,7 @@ def test_the_tailoring_card_says_whether_there_is_a_source(tmp_path, monkeypatch
     conn = store.connect(":memory:")
     try:
         page = server.render_settings(conn, tmp_path / "answers.yaml")
-        assert "Tailoring source" in page
+        assert "<h3>Source document</h3>" in page
         assert "Nothing at" in page
         assert 'id=tex-file' in page and "class=upload-tex" in page
 
@@ -3864,4 +4114,8 @@ def test_the_two_resume_fields_say_which_is_which(tmp_path, monkeypatch):
     finally:
         conn.close()
     assert "Not the file that gets attached to an application" in page
-    assert page.index("<h2>Resume</h2>") < page.index("<h2>Tailoring source</h2>")
+    # The source document is a subsection of Resume tailor now, and both sit below the
+    # PDF: the file an employer opens comes first, the file this repo rewrites second.
+    assert (page.index("<h2>Resume</h2>")
+            < page.index("<h2 id=tailor>Resume tailor</h2>")
+            < page.index("<h3>Source document</h3>"))
