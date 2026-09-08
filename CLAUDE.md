@@ -250,11 +250,57 @@ The **aggregator** feed adds ~318 postings on the next `check` (151 rules-matche
 employers, some not otherwise tracked). Validated on a scratch copy 2026-07-25; not in the
 live DB because it enters via `check`.
 
-**Still leaking, as of 2026-07-23.** The engineering gate can be satisfied by a
-non-engineering role: Stripe's *"Seller Systems Operations Associate (Night Shift)"* matches
-on `level:associate+role:systems`, because `systems` in `role_type_include` fires on an
-operations title — the `Finance Associate` bug through a different door. Fix with the tuning
-loop and a regression check, not a bare YAML edit.
+**The engineering gate can be satisfied by a non-engineering role**, and that was open from
+2026-07-23 to **2026-09-08**. Stripe's *"Seller Systems Operations Associate (Night Shift)"*
+matched on `level:associate+role:systems`, because `systems` in `role_type_include` fires on
+an operations title — the `Finance Associate` bug through a different door. `product
+operations` is in `role_type_exclude` now, which is the fix for the *door* rather than for
+`systems`: that token is load-bearing for real distributed-systems titles and narrowing it
+would cost more than the leak. Measured after the fix: **6 of 375** open matches carry no
+engineering word at all, and the rest are research-scientist titles in genuinely infra
+domains — a career-track judgement for the user, not a rule.
+
+**Hardware and chip design leaked far harder, and were plugged the same day (2026-09-08).**
+50 of 422 open matches were ASIC / physical-design / verification reqs. They satisfy the gate
+*honestly* — NVIDIA and the Simplify feed publish hundreds of new-grad silicon roles titled
+"<hardware thing> Engineer", so `level:2027 + eng:generic` matches every one; nothing was
+broken, the gate simply has no opinion about hardware. Fifteen tokens went into
+`role_type_exclude` (`asic`, `soc`, `rtl`, `vlsi`, `fpga`, `physical design`, …) and the
+count fell to **4**, all deliberately left: two are software roles in a hardware domain, one
+is ambiguous ("Engineer - Hardware Observability"), one is an employer name.
+
+**The admission test for a criteria token is not "does it catch the bad thing".** It is
+"what else does it catch", and in this repo that has a specific shape: **aggregator titles
+are `"Employer — Role"`, so every token also reads the company name.** `cadence` was measured
+and dropped because it rejects four legitimate *"Cadence Design Systems — Software Engineer
+New Grad"* reqs; `analog` and `semiconductor` were dropped unused for the same latent reason
+(Analog Devices, NXP Semiconductors). That is `ashby/cedar` inside criteria.yaml — a string
+that names a role for one employer names an employer for another. Bare `verification` and
+bare `hardware` were refused too: formal verification is real backend work, and
+*"Software Engineer — Hardware Tools"* is a software job.
+
+**`_compile` anchors on alphanumeric boundaries, so a plural can walk straight through an
+exclusion.** `internship` is in `exclude_titles` and does **not** fire on *"NVIDIA 2027
+Internships: Software Engineering"* — the trailing `s` fails the lookahead, the same
+mechanism that stops `ii` firing inside `iii`. Six NVIDIA reqs, two of them Ph.D., were
+matching on `level:2027` with the exclusion sitting right there. `internships` is listed
+explicitly now. A sweep of every alphabetic `exclude_titles` token found no other plural
+escaping, and that sweep is the thing to repeat before trusting this list.
+
+**A rules change does not move a posting an override pins.** Overrides outrank rules, so 11
+`decided_by='llm'` overrides went on asserting `match` for ASIC reqs the new tokens reject.
+They were cleared through `store.clear_override` — **only where a model guess contradicted
+the new rules**, and there were zero human overrides in the database to endanger. Going
+forward the rule prevents the pin from being minted at all: a posting the rules reject never
+enters `level`'s queue, so no model verdict is ever taken on it.
+
+**`jobtracker eval` could not guard any of this, and said so.** `decisions` is empty — the
+"seed tuning corpus" item is still open — so the mandated regression replay exits 0 with
+*"No decisions recorded yet"*. Honest, and useless as a gate. What was used instead: replay
+`match()` over all **21,995** stored postings under the old and new criteria and diff every
+verdict. 132 changed, **all** of them toward `reject`, **zero** toward `match`. Do that
+whenever `eval` has no corpus; a criteria edit with no regression evidence is the thing this
+loop exists to prevent.
 
 **The model passes became tasks (2026-08-13).** `resolve` and `rank`'s judging phase are now
 `level` and `judge` behind `jobtracker work`, joined by `inbox` (2026-08-16). Both old

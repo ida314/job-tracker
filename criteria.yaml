@@ -47,6 +47,12 @@ exclude_titles:
   - vp
   - intern
   - internship
+  # Plural, because _compile() anchors on alphanumeric boundaries: the token
+  # `internship` does NOT fire inside "Internships" (the trailing 's' fails the
+  # lookahead), which is the same mechanism that stops `ii` firing inside `iii`.
+  # Six NVIDIA reqs — two of them Ph.D. — were MATCHing on `level:2027` with the
+  # exclusion sitting right there and never firing. Measured 2026-09-08.
+  - internships
   - ii
   - iii
   - "2026 grad"
@@ -119,6 +125,50 @@ role_type_exclude:
   - customer experience
   - account executive
   - account manager
+  # An operations title that satisfies the engineering gate through
+  # role_type_include rather than engineering_terms — "Product Operations | AI
+  # Revenue Systems" matched on `systems`. This is the "Finance Associate"
+  # bug through a different door, which CLAUDE.md has recorded as open since
+  # 2026-07-23. Listed here rather than narrowing `systems`, because that token
+  # is load-bearing for real distributed-systems titles.
+  - product operations
+
+  # Hardware / chip design. This tracker is backend — distributed systems,
+  # infrastructure, platform, data engineering, SRE — and an ASIC or physical-design
+  # req is off-target in the same way a frontend one is, not merely lower-ranked.
+  # These leak in volume because they satisfy the engineering gate honestly: NVIDIA
+  # and the Simplify feed publish hundreds of new-grad silicon roles whose titles read
+  # "<hardware thing> Engineer", so `level:2027 + eng:generic` MATCHes every one.
+  # 50 of 422 open matches were hardware when this was written (2026-09-08).
+  #
+  # Every token below was checked against the live corpus before being added, and the
+  # test that matters here is NOT "does it catch hardware" but "does it catch anything
+  # else". Aggregator titles are "Employer — Role", so a token also reads the *company
+  # name*: `cadence` was dropped because it rejects four legitimate "Cadence Design
+  # Systems — Software Engineer New Grad" reqs, and `analog` and `semiconductor` were
+  # dropped unused for the same latent reason (Analog Devices, NXP Semiconductors).
+  # That is the ashby/cedar rule applied to criteria: a string that identifies a role
+  # for one employer identifies an employer for another.
+  #
+  # Deliberately NOT here: bare `verification` (formal verification is real backend
+  # work), bare `hardware` (it would take "Software Engineer — Hardware Tools" and
+  # "Engineer - Hardware Observability", which are software roles), and `timing` /
+  # `synthesis`, which are generic words whose only hits `asic` already covers.
+  - asic
+  - soc
+  - rtl
+  - vlsi
+  - fpga
+  - verilog
+  - physical design
+  - circuit design
+  - floorplan
+  - chip design
+  - pcb
+  - dft
+  - silicon engineering
+  - hardware engineer
+  - hardware engineering
 
 # ---------------------------------------------------------------------------------
 # Location: RANKS, never gates (2026-07-22, at the user's direction — no location is
