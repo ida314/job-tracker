@@ -418,9 +418,17 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
 def cmd_plugins(args: argparse.Namespace) -> int:
     """Switch an import feed on or off, point it at a source, or remove what it added.
 
-    The switch is a command rather than a page because turning a feed on is curation —
-    the same class of act as adding a company — and this repo's invariant is that curated
-    files are only ever written by something you did in the foreground (DESIGN.md 2.3).
+    Turning a feed on is curation — the same class of act as adding a company — and this
+    repo's invariant is that curated files are only ever written by something you did in
+    the foreground (DESIGN.md 2.3). This said "so the switch is a command rather than a
+    page" until 2026-09-08, which read the invariant one step too strictly: it forbids a
+    *scheduled* run writing curation, and `/tuning` has always edited criteria.yaml and
+    `/companies` appended to companies.yaml on exactly the same footing. `serve` is a
+    process you started and a click is something you did.
+
+    So the switch is on `/settings` too. This command keeps everything that is not the
+    switch: `set`, which the page deliberately does not offer, and `purge`, which the page
+    deliberately does not go near.
     """
     from . import plugins as plugins_mod
     from .plugins import settings as plugin_settings
@@ -2309,6 +2317,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
         answers_path=Path(args.answers) if args.answers else config.ANSWERS_YAML,
         keywords_path=(Path(args.keywords) if getattr(args, "keywords", None)
                        else config.KEYWORDS_YAML),
+        # The same file `jobtracker plugins` writes. Passed through rather than left to
+        # the server's default so that `--plugins` means one thing across both doors —
+        # a page switching a plugin in a file the nightly does not read is the shape of
+        # bug this repo keeps finding in its own deployment.
+        plugins_path=(Path(args.plugins) if getattr(args, "plugins", None)
+                      else config.PLUGINS_YAML),
     )
 
 
@@ -2764,6 +2778,8 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=int, default=8765)
     sv.add_argument("--keywords", default=None,
                      help=f"technologies tailor may use (default: {config.KEYWORDS_YAML})")
+    sv.add_argument("--plugins", default=None,
+                    help=f"which plugins are on (default: {config.PLUGINS_YAML})")
     sv.add_argument("--host", default="127.0.0.1",
                     help="default 127.0.0.1 — it has no auth and can edit criteria.yaml")
     sv.set_defaults(func=cmd_serve)

@@ -89,6 +89,39 @@ jobtracker plugins purge discord --write   # actually remove it
 There is no separate command, because a feed is a source of postings and belongs in the
 pass that collects postings.
 
+## The switchboard on /settings
+
+`serve` renders a card per registered plugin under **Plugins**, with one button. It writes
+`plugins.yaml` through `settings.set_enabled` — the same and only writer this command uses,
+so the page and the terminal cannot disagree about a file they both own.
+
+This used to be CLI-only, and `cmd_plugins` said a page could never do it because turning a
+feed on is curation. That read DESIGN.md §2.3 one step too strictly: the invariant forbids a
+*scheduled* run writing a curated file, which is why `/tuning` edits criteria.yaml and
+`/companies` appends to companies.yaml on the same footing. `serve` is a process you started
+and a click is something you did.
+
+What the page deliberately does not carry:
+
+- **`set`.** A feed's options are typed once, when you wire it up. The question you open this
+  tab with is whether something is on.
+- **`purge`.** Disabling is one click back; purge deletes imported postings. A destructive
+  control beside a toggle is one somebody presses while meaning the toggle.
+- **The token.** `$JOBTRACKER_DISCORD_TOKEN` is env-only so it stays out of config files and
+  out of screenshots. `plugins list` will not echo it and neither will this.
+
+Every plugin gets a card whether it is on or off — a list of only the enabled ones cannot
+answer "why did nothing happen last night", and `tailor` ships off, so it would have offered
+no way to switch on the one plugin that needs it. An enabled plugin that cannot run says so;
+a disabled one does not, because switched off is a decision you typed and a reason beside it
+reads as a fault.
+
+If `plugins.yaml` will not parse, the page degrades to a banner rather than an exception —
+it is the page you would open in order to fix it — and the switches are **refused** while it
+stays broken. That is not a limitation to route around: `set_options` reads the file before
+it merges, so replacing one it could not parse would silently discard every other setting in
+it. Fix it in an editor; the banner names the key.
+
 ## Setting up Discord
 
 The bot only needs to read one channel, and every step below has a failure mode that

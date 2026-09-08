@@ -1790,22 +1790,181 @@ def test_every_control_on_the_settings_page_has_a_handler_in_its_own_script(tmp_
 
     script = page[page.rindex("<script>"):]
     known = ("save|attach|save-identity|save-resume-name|upload-resume|upload-tex"
-             "|kw-allow|kw-deny|kw-forget|kw-add|tailor-finish")
-    classes = set(re.findall(rf"class=({known})[ >]", page))
+             "|kw-allow|kw-deny|kw-forget|kw-add|tailor-finish|plugin-toggle")
+    classes = set(re.findall(rf'class="?({known})"?[ >]', page))
     assert classes == {"save", "attach", "save-identity", "save-resume-name",
                        "upload-resume", "upload-tex",
                        # The keyword controls. `kw-forget` only renders once a term has
                        # been ruled on, so the fixture below rules on one.
-                       "kw-allow", "kw-deny", "kw-add", "tailor-finish"}
+                       "kw-allow", "kw-deny", "kw-add", "tailor-finish",
+                       # The plugin switchboard. Always rendered: every registered plugin
+                       # gets a card whether it is on or off, which is the point of it.
+                       "plugin-toggle"}
     for cls in classes:
         assert f"button.{cls}" in script, cls
     for endpoint in ("/api/answer", "/api/attach", "/api/identity", "/api/resume",
-                     "/api/resume-tex", "/api/keyword", "/api/tailor-finish"):
+                     "/api/resume-tex", "/api/keyword", "/api/tailor-finish",
+                     "/api/plugin"):
         assert endpoint in script, endpoint
     # And the picker the attach box reads from, which is useless without its options.
     assert 'list="bankkeys"' in page
     assert '<datalist id="bankkeys">' in page
     assert '<option value="work_authorization">' in page
+
+
+# -- the plugin switchboard -----------------------------------------------------------
+def _settings(tmp_path, plugins_yaml=None):
+    """The settings page, with a plugins.yaml of your choosing (or none at all)."""
+    answers = tmp_path / "answers.yaml"
+    answers.write_text("identity:\n  first_name: D\n  email: e@x.edu\n")
+    path = tmp_path / "plugins.yaml"
+    if plugins_yaml is not None:
+        path.write_text(plugins_yaml)
+    conn = store.connect(":memory:")
+    try:
+        return server.render_settings(conn, answers, tmp_path / "keywords.yaml", path)
+    finally:
+        conn.close()
+
+
+def _plugins_section(page: str) -> str:
+    """Just the switchboard. Scoped, because the rest of the page echoes file paths and
+    a bare substring test over the whole document reads whatever the tmpdir is called."""
+    body = page.split("<h2 id=plugins>", 1)[1]
+    return body.split("<h2", 1)[0]
+
+
+def test_every_registered_plugin_gets_a_card_whether_it_is_on_or_off(tmp_path):
+    """The page is a *reading* first — `/tuning`'s rule for the keyword lists.
+
+    A switchboard that showed only what is switched on could not answer the question you
+    come to it with, which is why nothing happened last night. `tailor` ships off, so a
+    page listing the enabled set would be a page with no way to turn it on.
+    """
+    from jobtracker import plugins as plugins_mod
+
+    page = _settings(tmp_path)
+    for plugin in plugins_mod.all_plugins():
+        assert f"<strong>{plugin.name}</strong>" in page, plugin.name
+        assert f'data-name="{plugin.name}"' in page, plugin.name
+
+
+def test_the_switch_reflects_the_file_and_asks_for_the_opposite(tmp_path):
+    """`data-on` is the state being *requested*, not the state that is.
+
+    The endpoint takes the value it wants rather than "toggle", so a double click cannot
+    land as two flips — the second sends what the first did and the file ends where the
+    button said.
+    """
+    page = _settings(tmp_path, "tailor:\n  enabled: true\n")
+    card = page.split('data-name="tailor"')[0].rsplit("<div class='card plugin", 1)[1]
+    assert card.startswith(" enabled")
+    assert 'data-name="tailor" data-on="0"' in page
+    assert "Switch off" in page
+
+
+def test_a_disabled_plugin_is_never_asked_why_it_cannot_run(tmp_path):
+    """The queue's rule, carried onto the page.
+
+    Switched off is a decision you typed; a reason printed beside it reads as a fault.
+    Discord has no token here, so an unconditional call would put "cannot run" under a
+    feed nobody has configured and never meant to.
+    """
+    page = _settings(tmp_path, "discord:\n  enabled: false\n")
+    assert "Switched off. Nothing asks it for work." in page
+    assert "JOBTRACKER_DISCORD_TOKEN is not set" not in page
+
+
+def test_an_enabled_plugin_that_cannot_run_says_so(tmp_path, monkeypatch):
+    """The one combination that looks like it is working and is not."""
+    monkeypatch.delenv("JOBTRACKER_DISCORD_TOKEN", raising=False)
+    page = _settings(tmp_path, "discord:\n  enabled: true\n  channel_id: '1'\n")
+    assert "Cannot run yet" in page
+
+
+def test_the_page_never_renders_the_discord_token(tmp_path, monkeypatch):
+    """This repo's first credential, and it is env-only for exactly this reason.
+
+    `plugins list` will not echo it; a page that did would put it in every screenshot of
+    this tab.
+    """
+    monkeypatch.setenv("JOBTRACKER_DISCORD_TOKEN", "s3cret-token-value")
+    page = _settings(tmp_path, "discord:\n  enabled: true\n  channel_id: '1'\n")
+    assert "s3cret-token-value" not in page
+
+
+def test_a_plugins_file_that_will_not_parse_is_a_banner_not_an_exception(tmp_path):
+    """Everywhere else a malformed plugins.yaml stops the feed, deliberately.
+
+    That is right for a run and wrong for the page you would open in order to fix it: a
+    traceback here leaves no route back. The switches keep working because a write is a
+    whole new file rather than a patch to the broken one.
+    """
+    page = _settings(tmp_path, "tailor:\n  enabled: yes please\n")
+    assert "did not parse" in page
+    assert 'class="plugin-toggle"' in page
+    # And it says what will actually happen, which is that the switch is refused. The
+    # writer reads the file before writing it — replacing one it could not parse would
+    # discard every other setting in it — so the way out is the editor. A banner
+    # promising a one-click fix would be a refusal naming an action you cannot take.
+    assert "refused until it parses" in page
+
+
+def test_a_switch_is_refused_while_the_file_will_not_parse(tmp_path):
+    """The banner's claim, asserted against the writer rather than the prose.
+
+    `set_options` loads before it merges, so a broken file cannot be silently replaced by
+    a click — which is right, and is why the banner may not offer one.
+    """
+    from jobtracker.plugins import settings as plugin_settings
+
+    path = tmp_path / "plugins.yaml"
+    path.write_text("tailor:\n  enabled: yes please\n")
+    with pytest.raises(plugin_settings.InvalidSettings):
+        plugin_settings.set_enabled(path, "tailor", True)
+    assert path.read_text() == "tailor:\n  enabled: yes please\n"
+
+
+def test_purge_is_not_reachable_from_the_page(tmp_path):
+    """Disabling is one click back; purge deletes imported postings.
+
+    A destructive action beside a toggle is one somebody presses while meaning the
+    toggle. The CLI refuses it for a model role and performs it for a feed; neither
+    belongs next to a switch.
+    """
+    import re
+
+    section = _plugins_section(_settings(tmp_path))
+    # Asserted on the controls rather than on the word, which the rendered path can
+    # legitimately contain — the tmpdir this test runs in is named after itself.
+    assert set(re.findall(r'<button class="([a-z-]+)"', section)) == {"plugin-toggle"}
+    assert "/api/" not in section
+
+
+def test_switching_a_plugin_writes_through_the_one_writer(tmp_path):
+    """The endpoint calls `set_enabled`, so validation and the atomic swap come with it.
+
+    A second YAML writer is how the button and the terminal come to disagree about a file
+    they both own — the rule `curation.py` exists to enforce for companies.yaml.
+    """
+    from jobtracker.plugins import settings as plugin_settings
+
+    path = tmp_path / "plugins.yaml"
+    plugin_settings.set_enabled(path, "tailor", True)
+    assert plugin_settings.load_settings(path)["tailor"]["enabled"] is True
+    plugin_settings.set_enabled(path, "tailor", False)
+    assert plugin_settings.load_settings(path)["tailor"]["enabled"] is False
+
+
+def test_an_unknown_plugin_is_refused_rather_than_created(tmp_path):
+    """`load_settings` rejects a plugin nobody registered.
+
+    So writing one would produce a file that then refuses to load — a page breaking the
+    nightly over a typo it invented itself.
+    """
+    from jobtracker import plugins as plugins_mod
+
+    assert plugins_mod.get_plugin("not-a-plugin") is None
 
 
 def test_a_gap_carries_the_question_verbatim_for_the_alias(tmp_path):

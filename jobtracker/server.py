@@ -292,7 +292,8 @@ def render_tuning(conn: sqlite3.Connection, criteria) -> str:
 
 
 def render_settings(conn: sqlite3.Connection, answers_path: Path,
-                    keywords_path: Optional[Path] = None) -> str:
+                    keywords_path: Optional[Path] = None,
+                    plugins_path: Optional[Path] = None) -> str:
     """The answer bank and everything still unanswered. Pure read — never writes.
 
     The gap list is the machine's half of the conversation: every question an
@@ -325,6 +326,11 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path,
     p.extend(_identity_card(answers))
     p.extend(_resume_card(answers))
     p.extend(_tailor_section(conn, keywords, kw_error))
+    # Below the tailor, above the gap lists. It is configuration rather than something
+    # waiting on you — the page's own ordering rule — but it belongs on the same page,
+    # because "why did nothing happen last night" is answered here more often than
+    # anywhere else: a role that is switched off looks exactly like a role with no work.
+    p.extend(_plugins_card(plugins_path))
 
     # Offered to every "answer it with" box below. One list for the page; see the note
     # on the same element in `render_apply` for why it is a datalist and not a select.
@@ -1764,6 +1770,139 @@ def _tailor_section(conn: sqlite3.Connection, keywords, kw_error) -> list:
     return p
 
 
+def _load_plugins_quietly(path: Optional[Path]):
+    """`(settings, error)` — never raises, for the same reason the other two do not.
+
+    A malformed plugins.yaml **stops the feed** everywhere else, deliberately: reading a
+    typo as "no plugins" would turn it into an import that silently stopped. That is the
+    right call for a run and the wrong one for the page you would go to in order to fix
+    it, so here it degrades to a banner and the switches keep working — a write is a whole
+    new file, not a patch to the broken one.
+    """
+    from .plugins import settings as plugin_settings
+
+    try:
+        return plugin_settings.load_settings(path), None
+    except plugin_settings.InvalidSettings as exc:
+        return {}, str(exc)
+    except OSError as exc:
+        return {}, f"could not read plugins.yaml: {exc}"
+
+
+def _plugins_card(plugins_path: Optional[Path]) -> list:
+    """Every registered plugin, what it is, and the one switch that decides if it runs.
+
+    The switch used to be a command only, and `cmd_plugins` said so in as many words —
+    "a page would write a curated file". That reasoning was already spent: DESIGN.md §2.3
+    forbids a *scheduled* run writing curation, and `/tuning` edits criteria.yaml and
+    `/companies` appends to companies.yaml on exactly this footing. `serve` is a process
+    you started and this is a click you made. What the invariant rules out is the nightly
+    reaching for the file, and nothing here does.
+
+    Two things are deliberately absent:
+
+      * **`purge` is not on this page.** Disabling a feed is reversible in one more click;
+        purge deletes imported postings. A destructive action next to a toggle is one
+        somebody presses while meaning the toggle, and the CLI's refusal is right there.
+      * **No settings beyond the switch, and no token, ever.** `$JOBTRACKER_DISCORD_TOKEN`
+        is env-only for the reasons in `config.py`, and a page that rendered it would put
+        a credential in a screenshot. `plugins set` stays the way to configure a feed;
+        this answers "is it on", which is the question you come here with.
+    """
+    from . import plugins as plugins_mod
+
+    settings, error = _load_plugins_quietly(plugins_path)
+    p = ["<h2 id=plugins>Plugins</h2>"]
+    p.append(
+        "<p class=note>Feeds that import postings, and the model roles "
+        "<code>jobtracker work</code> runs. A switch here is the same file "
+        "<code>jobtracker plugins</code> writes: "
+        f"<code>{html.escape(str(plugins_path or config.PLUGINS_YAML))}</code>.</p>"
+    )
+    if error:
+        # Same shape as the keywords banner, and for the same reason: everywhere else a
+        # file that will not parse stops the feed, which from here is indistinguishable
+        # from a feed you never switched on.
+        #
+        # It says the switches are refused, because they are, and the first draft of this
+        # said the opposite — "switching one writes a fresh file" — which is a refusal
+        # naming an action you cannot take, the thing this page most needs not to do.
+        # `set_options` reads the file before it writes it, deliberately: a click that
+        # replaced a file it could not parse would discard every other setting in it,
+        # a channel id included. So the way out is the editor, not this page.
+        p.append(
+            f"<p class='banner bad'>plugins.yaml did not parse, so every plugin below is "
+            f"showing its built-in default rather than your file — {html.escape(error)}. "
+            f"The switches are refused until it parses: a write here would have to read "
+            f"it first, and replacing it wholesale would throw away the settings it "
+            f"could not read. Fix it by hand.</p>"
+        )
+
+    for plugin in sorted(plugins_mod.all_plugins(), key=lambda x: (x.kind, x.name)):
+        entry = settings.get(plugin.name, {})
+        schema = plugin.defaults()
+        on = bool(entry.get("enabled", schema.get("enabled", False)))
+        name = html.escape(plugin.name, quote=True)
+        state = "enabled" if on else "disabled"
+        want = "0" if on else "1"
+        label = "Switch off" if on else "Switch on"
+        p.append(f"<div class='card plugin {state}'>")
+        p.append(
+            f"<div class=row><strong>{html.escape(plugin.name)}</strong>"
+            f"<span class='pill {'ok' if on else 'off'}'>{state}</span>"
+            f"<span class=kindchip>{html.escape(_plugin_kind(plugin))}</span></div>"
+        )
+        p.append(f"<p class=note>{html.escape(plugin.summary or '')}</p>")
+        p.extend(_plugin_state(plugin, {**schema, **entry}, on))
+        p.append(
+            f'<button class="plugin-toggle" data-name="{name}" '
+            f'data-on="{want}">{label}</button>'
+        )
+        p.append("</div>")
+    return p
+
+
+def _plugin_kind(plugin) -> str:
+    """What kind of thing this is, in the words the page uses rather than the enum's."""
+    from . import plugins as plugins_mod
+
+    if plugin.kind == plugins_mod.KIND_TASK:
+        return "model role"
+    return "import feed"
+
+
+def _plugin_state(plugin, settings: dict, on: bool) -> list:
+    """The line under a plugin: what it will do next, or why it cannot.
+
+    `unavailable_reason` is asked **only when the plugin is on**, which is the queue's own
+    rule carried onto the page. Switched off is a decision you typed; a reason printed
+    beside it reads as a fault, and "cannot run: no token" under a feed you deliberately
+    never configured is a page inventing a problem for you.
+    """
+    from . import plugins as plugins_mod
+
+    if not on:
+        return ["<p class=note>Switched off. Nothing asks it for work.</p>"]
+    why = plugin.unavailable_reason(settings)
+    if why:
+        # Enabled and unable to run is the one state worth a warning here: it is the only
+        # combination that looks like it is working and is not.
+        return [f"<p class='banner bad'>Cannot run yet — {html.escape(why)}</p>"]
+    if plugin.kind == plugins_mod.KIND_TASK:
+        # The priority is the *task's*, not the switch's — `TaskPlugin` deliberately
+        # carries no queue. A switch whose task is not registered controls nothing, and
+        # says so rather than rendering a half-line about a role that is not there.
+        from .tasks import get_task
+
+        task = get_task(plugin.task_name)
+        if task is None:
+            return ["<p class='banner bad'>Not registered — this switch controls "
+                    "nothing.</p>"]
+        return [f"<p class=note>Priority {task.priority}, run by "
+                f"<code>jobtracker work</code>.</p>"]
+    return ["<p class=note>Read on the next <code>jobtracker check</code>.</p>"]
+
+
 def _flagged_terms(conn: sqlite3.Connection, keywords) -> list:
     """Undecided technologies, one entry per term, with the postings that wanted it.
 
@@ -2028,13 +2167,15 @@ class TuningServer(HTTPServer):
     def __init__(self, addr, handler, db_path: Path, criteria_path: Path,
                  companies_path: Optional[Path],
                  answers_path: Optional[Path] = None,
-                 keywords_path: Optional[Path] = None) -> None:
+                 keywords_path: Optional[Path] = None,
+                 plugins_path: Optional[Path] = None) -> None:
         super().__init__(addr, handler)
         self.db_path = db_path
         self.criteria_path = criteria_path
         self.companies_path = companies_path
         self.answers_path = answers_path or config.ANSWERS_YAML
         self.keywords_path = keywords_path or config.KEYWORDS_YAML
+        self.plugins_path = plugins_path or config.PLUGINS_YAML
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2123,6 +2264,8 @@ class Handler(BaseHTTPRequestHandler):
                         conn, Path(self.server.answers_path),
                         Path(getattr(self.server, "keywords_path",
                                      config.KEYWORDS_YAML)),
+                        Path(getattr(self.server, "plugins_path",
+                                     config.PLUGINS_YAML)),
                     )
                 finally:
                     conn.close()
@@ -2222,6 +2365,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_tailor_build(payload))
             elif path == "/api/keyword":
                 self._send_json(self._api_keyword(payload))
+            elif path == "/api/plugin":
+                self._send_json(self._api_plugin(payload))
             elif path == "/api/tailor-finish":
                 self._send_json(self._api_tailor_finish(payload))
             elif path == "/api/prefill":
@@ -2713,6 +2858,45 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": f"refused invalid keywords.yaml: {exc}"}
         log.info("keyword %r -> %s", term, action)
         return {"ok": True, "term": term, "action": action}
+
+    def _api_plugin(self, payload: dict) -> dict:
+        """Switch one plugin on or off. The only write this page makes to plugins.yaml.
+
+        It calls `plugin_settings.set_enabled` rather than composing YAML, because that
+        function is already the one writer of this file and a second one is how the button
+        and the terminal come to disagree about a file they both own — the rule
+        `curation.py` exists to enforce for companies.yaml. Validation, the atomic swap
+        and the `.bak` all come with it.
+
+        An unknown name is refused rather than created. `load_settings` rejects a plugin
+        nobody registered, so writing one would produce a file that then refuses to load
+        — a page that breaks the nightly on a typo it invented itself.
+
+        There is no `purge` here and no way to set an option; see `_plugins_card`.
+        """
+        name = str(payload.get("name") or "")
+        if "enabled" not in payload:
+            return {"ok": False, "error": "no state given"}
+        on = bool(payload.get("enabled"))
+
+        from . import plugins as plugins_mod
+        from .plugins import settings as plugin_settings
+
+        if plugins_mod.get_plugin(name) is None:
+            known = ", ".join(plugins_mod.plugin_names())
+            return {"ok": False, "error": f"unknown plugin {name!r} — known: {known}"}
+
+        path = Path(getattr(self.server, "plugins_path", config.PLUGINS_YAML))
+        try:
+            settings = plugin_settings.set_enabled(path, name, on)
+        except plugin_settings.InvalidSettings as exc:
+            return {"ok": False, "error": str(exc)}
+        except safewrite.RefusedWrite as exc:
+            return {"ok": False, "error": f"refused invalid plugins.yaml: {exc}"}
+
+        log.info("plugin %s -> %s", name, "enabled" if on else "disabled")
+        return {"ok": True, "name": name,
+                "enabled": bool(settings.get("enabled"))}
 
     def _api_tailor_finish(self, payload: dict) -> dict:
         """Rebuild the tailored PDFs your keyword rulings just changed.
@@ -4034,6 +4218,22 @@ background:transparent;color:inherit;font:inherit;font-size:.85rem;cursor:pointe
 .flag button.kw-allow{border-color:#16a34a;color:#16a34a}
 .flag button.kw-deny{border-color:#dc2626;color:#dc2626}
 
+/* The plugin switchboard. The card's own border carries the state, so the page can be
+   read at a glance without parsing every pill — an enabled feed and a disabled one
+   should not need the same amount of attention. */
+.card.plugin{display:flex;flex-direction:column;gap:.15rem}
+.card.plugin.enabled{border-left:4px solid #16a34a}
+.card.plugin.disabled{border-left:4px solid rgba(127,127,127,.5);opacity:.85}
+.card.plugin .row{margin-top:0;flex-wrap:wrap}
+.card.plugin button{align-self:flex-start;margin-top:.5rem;padding:.3rem .7rem;
+border-radius:5px;border:1px solid currentColor;background:transparent;color:inherit;
+font:inherit;font-size:.85rem;cursor:pointer}
+.pill{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
+padding:.1rem .45rem;border-radius:999px;border:1px solid currentColor}
+.pill.ok{color:#16a34a}
+.pill.off{opacity:.7}
+.kindchip{font-size:.75rem;opacity:.7}
+
 /* The two lists, read before they are edited. A chip carries its own undo, because the
    term is the thing being ruled on and the ruling is what you are taking back. */
 .chips{display:flex;flex-wrap:wrap;gap:.35rem;margin:.2rem 0 .6rem}
@@ -5063,6 +5263,22 @@ document.addEventListener('click', async (e) => {
     location.reload();
     return;
   }
+  // -- the plugin switchboard --------------------------------------------------------
+  // One endpoint carrying the state we want rather than "toggle", so a double click
+  // cannot land as two flips: the second sends the same value as the first and the file
+  // ends where the button said it would. It reloads because the card's state, the
+  // "cannot run yet" line and the priority are all server-rendered from the file that
+  // was just written — repainting them here would be a second opinion about it.
+  const pg = e.target.closest('button.plugin-toggle');
+  if (pg) {
+    pg.disabled = true;
+    const res = await post('/api/plugin',
+                           {name: pg.dataset.name, enabled: pg.dataset.on === '1'});
+    pg.disabled = false;
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
   const kwadd = e.target.closest('button.kw-add');
   if (kwadd) {
     const box = document.getElementById('kw-new');
@@ -5184,9 +5400,10 @@ document.addEventListener('click', async (e) => {
 def serve(db_path: Path, criteria_path: Path, companies_path: Optional[Path],
           host: str = "127.0.0.1", port: int = 8765,
           answers_path: Optional[Path] = None,
-          keywords_path: Optional[Path] = None) -> int:
+          keywords_path: Optional[Path] = None,
+          plugins_path: Optional[Path] = None) -> int:
     httpd = TuningServer((host, port), Handler, db_path, criteria_path, companies_path,
-                         answers_path, keywords_path)
+                         answers_path, keywords_path, plugins_path)
     log.info(
         "serving on http://%s:%d  (dashboard: /  tuning: /tuning  settings: /settings  "
         "health: /healthz /readyz)",

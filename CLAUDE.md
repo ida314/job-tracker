@@ -679,10 +679,36 @@ user to touch the outer loop, which is why it may only propose.
 
 ## Import plugins
 
-`jobtracker plugins`, `jobtracker/plugins/`, and one extra loop in `cmd_check`. Full guide in
-`docs/plugins.md`. Added 2026-08-31. Discord is the first, and the third registry in this
-package after `sources/` and `tasks/` — one module plus one import line, module pure,
-`runner.py` owns the socket.
+`jobtracker plugins`, `jobtracker/plugins/`, a card on `/settings`, and one extra loop in
+`cmd_check`. Full guide in `docs/plugins.md`. Added 2026-08-31. Discord is the first, and the
+third registry in this package after `sources/` and `tasks/` — one module plus one import
+line, module pure, `runner.py` owns the socket.
+
+- **The switch is on `/settings` as well as the CLI** (2026-09-08), and `cmd_plugins` used to
+  say it never could be: "a page would write a curated file". That read DESIGN.md §2.3 one
+  step too strictly — it forbids a *scheduled* run writing curation, which is why `/tuning`
+  edits criteria.yaml and `/companies` appends to companies.yaml. `serve` is a process you
+  started; a click is something you did. `POST /api/plugin` calls `settings.set_enabled`, the
+  same and only writer the CLI uses, so the button and the terminal cannot come to disagree
+  about a file they both own.
+- **The page carries the switch and nothing else.** No `set`, because a feed's options are
+  typed once and the page's question is "is it on"; no **`purge`**, because disabling is one
+  click back while purge deletes imported postings, and a destructive control beside a toggle
+  is one somebody presses meaning the toggle; and **never the token**, which is env-only
+  precisely so it stays out of a screenshot. A test asserts the card's only button class.
+- **Every registered plugin gets a card, on or off.** A switchboard listing only what is
+  enabled cannot answer the question you open it with — why nothing happened last night — and
+  `tailor` ships off, so it would have had no way to turn on the one plugin that needs it.
+- **`unavailable_reason` is asked only of an enabled plugin**, which is the queue's own rule
+  carried onto the page: switched off is a decision you typed, and a reason printed beside it
+  reads as a fault.
+- **The request carries the state it wants, not "toggle".** A double click then lands as one
+  flip, because the second sends what the first did.
+- **A malformed plugins.yaml is a banner, and the switches are honestly refused.** Everywhere
+  else it stops the feed; here it degrades so the page you would open to fix it still renders.
+  It may not offer a one-click fix: `set_options` reads before it merges, so replacing a file
+  it could not parse would discard the settings it could not read — the first draft of that
+  banner promised exactly that, which is a refusal naming an action you cannot take.
 
 **A plugin has a `kind` since 2026-09-01, and there are two.** `import` is everything below —
 a feed of postings. `task` is the switch for a bounded model role in `tasks/`; it implements
