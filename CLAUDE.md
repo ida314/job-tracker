@@ -1003,6 +1003,27 @@ first that composes prose** — so the bound is not the shape of the answer.
   **allowlist** of control sequences, because a blocklist is a guess and `\csname` composes
   command names out of characters. It runs inside parsing, not at assembly — an edit that
   renders and is refused later is one you accept and watch do nothing.
+- **The line being replaced is the second half of that allowlist** (2026-09-07), and without
+  it there was no first half. A real resume writes `\resumeItem{...}`, `\resumeSubheading`
+  and `\href` — macros its own preamble defines and no global list knows — so the fixed list
+  refused *every* bullet rewrite. Measured the night `tailor` was first switched on: **93
+  proposals carried 0 edits**, and in an instrumented sample **16 of 17 otherwise-grounded
+  edits died at `sanitize`**, each one ordinary prose inside the same `\resumeItem{}` the
+  line already used. A guard that cannot pass the only line shape its input has is not
+  strict, it is off — and it fails as silent absence, which is why it read as "the model has
+  nothing to say" for a whole corpus. `sanitize(suggestion, context)` widens the list with
+  the commands **that line already runs**, never with the document's.
+- **The skeleton must come back unchanged, and that is where "do not restyle my resume"
+  is enforced.** The commands that lay a line out must return in the same order, the same
+  number, with the same number of argument groups; only the prose between them may move. So
+  a suggestion cannot add a `\textbf`, drop one, reorder them, or hand a one-argument macro
+  two. The prompt says all of this too — and a prompt is a request, which is the same
+  division of labour `keywords.yaml` draws between `allowed` and `denied`.
+- **`NEVER_ALLOWED` is a blocklist inside the allowlist, and it is not a hedge.** The
+  widening is about the *shape* of a line, but for `\input`, `\write`, `\def`, `\csname`
+  and friends the **argument is the whole risk** — a resume that legitimately says
+  `\input{skills.tex}` would otherwise license a suggestion of `\input{/etc/passwd}`. Those
+  are never picked up from a line, however the document uses them. Tested by name.
 - **`apply_edits` replaces a line it was handed verbatim, and does nothing else.** No search,
   no fuzzy match, no insertion — which puts the preamble out of reach by construction and is
   why a document that compiled before compiles after. The cost is real: it cannot add a bullet

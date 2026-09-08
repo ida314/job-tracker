@@ -179,6 +179,36 @@ also refuses unbalanced braces (they change where the enclosing group ends) and 
 (it comments out the rest of the physical line, including whatever the original line carried
 after the part being replaced).
 
+### Your own macros, and why the list could not be global
+
+A real resume does not write `\item`. It writes `\resumeItem{...}`, `\resumeSubheading{...}`
+and `\href{...}{...}` — macros the document defines in its own preamble, which no fixed list
+can know. So the global list refused every bullet rewrite there was. On the night `tailor`
+was first switched on this produced **93 proposals carrying 0 edits**; in an instrumented
+sample **16 of 17 otherwise-grounded edits died here**, each one ordinary prose inside the
+same `\resumeItem{}` the line it replaced already used. Nothing reported it, because a
+refused edit is an absent edit and absence is this task's normal answer.
+
+`sanitize(suggestion, context)` takes the line being replaced, and two rules come out of it:
+
+- **A command is allowed if it is on the global list, or if that line already runs it.** The
+  widening is bounded by the line, never by the document — a macro used elsewhere in your
+  resume is not thereby allowed here.
+- **The line's skeleton must come back unchanged.** The commands that lay it out return in
+  the same order, the same number of times, with the same number of argument groups. Only
+  the prose between them may move. A suggestion cannot add emphasis, remove it, reorder
+  anything, or hand a one-argument macro two — the last is balanced, carries no new command,
+  and is a compile error.
+
+That second rule is where *"do not restyle my resume"* is enforced rather than requested.
+The prompt asks for it as well, at length, and the prompt is the half a model can ignore.
+
+**`NEVER_ALLOWED` is the exception, and it is a blocklist inside an allowlist on purpose.**
+For `\input`, `\write`, `\openout`, `\def`, `\csname` and their relatives the *argument*
+is the risk, not the presence: a resume that legitimately says `\input{skills.tex}` must not
+license a suggestion of `\input{/etc/passwd}`. Those are never picked up from a line,
+whatever the document does with them.
+
 Three more things stand behind it, and none is redundant:
 
 - `apply_edits` only replaces a line it was handed **verbatim**. It does not search, fuzzy

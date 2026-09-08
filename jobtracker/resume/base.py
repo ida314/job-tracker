@@ -69,12 +69,18 @@ class ResumeFormat:
         """Does this text look like a document this format can edit?"""
         return True
 
-    def sanitize(self, suggestion: str) -> Optional[str]:
+    def sanitize(self, suggestion: str, context: Optional[str] = None) -> Optional[str]:
         """The suggestion, or None if it may not be written into a document.
 
         Every format that compiles is a format whose input is a program, so this is a
         security control rather than a style rule. See `latex.py` for what that means
         concretely.
+
+        `context` is the line being replaced, when the caller has one. A format may use
+        it to allow the document's own macros and to refuse a suggestion that changes the
+        line's layout rather than its words — neither of which is decidable from the
+        suggestion alone. Optional because it is a *widening*: a format that ignores it
+        is as strict as it was before, never stricter.
         """
         return suggestion
 
