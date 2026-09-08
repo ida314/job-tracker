@@ -166,6 +166,76 @@ def test_a_comment_character_is_refused(latex):
     assert latex.sanitize(r"\item Built APIs % and hid the rest") is None
 
 
+# -- the guard knows the line it is guarding ------------------------------------------
+# A real resume writes `\resumeItem{...}`, not `\item`. The global allowlist knows no
+# such macro, so before `context` existed every bullet rewrite was refused: measured
+# 2026-09-07, 93 proposals carried 0 edits and 16 of 17 grounded edits died here.
+BULLET = r"  \resumeItem{Built a REST API in Flask for an internal analytics tool}"
+BULLET_RESUME = RESUME.replace(LINE, BULLET)
+
+
+def test_a_documents_own_macro_is_allowed_in_the_line_that_already_runs_it(latex):
+    r"""The bug this whole mechanism exists for: `\resumeItem` is not on any global list.
+
+    It is allowed here because the line being replaced already runs it — the widening is
+    bounded by the line, never by the document.
+    """
+    rewritten = r"  \resumeItem{Built a REST API in Flask serving high-throughput HTTP traffic}"
+    assert latex.sanitize(rewritten, BULLET) is not None
+    # And without a line to compare against, exactly as strict as it always was.
+    assert latex.sanitize(rewritten) is None
+
+
+def test_the_skeleton_must_come_back_unchanged(latex):
+    """"Do not change how this is presented", enforced rather than asked for.
+
+    Adding emphasis, dropping it, or reordering the commands are all layout changes, and
+    none of them is decidable from the suggestion alone — which is why `context` is the
+    argument that makes the rule expressible at all.
+    """
+    added = r"  \resumeItem{Built a \textbf{REST} API in Flask for an internal analytics tool}"
+    assert latex.sanitize(added, BULLET) is None
+    dropped = r"  Built a REST API in Flask for an internal analytics tool"
+    assert latex.sanitize(dropped, BULLET) is None
+
+
+def test_an_extra_argument_group_is_refused(latex):
+    r"""Balanced braces are not enough once there is a line to compare against.
+
+    `\resumeItem` takes one argument. A suggestion handing it two is balanced, carries
+    no new command, and is a compile error.
+    """
+    two_args = r"  \resumeItem{Built a REST API}{in Flask}"
+    assert latex.sanitize(two_args, BULLET) is None
+
+
+def test_context_never_licenses_a_file_reading_primitive(latex):
+    r"""The exception to the widening, and the reason it is safe.
+
+    A resume that legitimately says `\input{skills.tex}` must not thereby license a
+    suggestion of `\input{/etc/passwd}` — for these commands the argument is the whole
+    risk, so they are never picked up from a line however the document uses them.
+    """
+    line = r"\input{skills.tex}"
+    assert latex.sanitize(r"\input{/etc/passwd}", line) is None
+
+
+def test_the_bullet_rewrite_survives_parsing_end_to_end(latex):
+    """The guard is not the only thing in the way, so assert the whole path.
+
+    A unit test on `sanitize` alone would have passed on the day the live corpus produced
+    zero edits, because the call site was handing it no line at all.
+    """
+    answer = json.dumps({"edits": [{
+        "section": "experience",
+        "current_line": BULLET,
+        "suggestion": r"  \resumeItem{Built a REST API in Flask serving high-throughput HTTP traffic}",
+        "evidence": "high-throughput HTTP services",
+    }]})
+    got = tailor.parse_edits(answer, BULLET_RESUME, DESCRIPTION, latex)
+    assert got is not None and len(got.edits) == 1
+
+
 def test_a_refused_suggestion_takes_its_edit_with_it(latex):
     """The guard has to run inside parsing, not only at assembly time.
 

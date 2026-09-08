@@ -679,10 +679,36 @@ user to touch the outer loop, which is why it may only propose.
 
 ## Import plugins
 
-`jobtracker plugins`, `jobtracker/plugins/`, and one extra loop in `cmd_check`. Full guide in
-`docs/plugins.md`. Added 2026-08-31. Discord is the first, and the third registry in this
-package after `sources/` and `tasks/` — one module plus one import line, module pure,
-`runner.py` owns the socket.
+`jobtracker plugins`, `jobtracker/plugins/`, a card on `/settings`, and one extra loop in
+`cmd_check`. Full guide in `docs/plugins.md`. Added 2026-08-31. Discord is the first, and the
+third registry in this package after `sources/` and `tasks/` — one module plus one import
+line, module pure, `runner.py` owns the socket.
+
+- **The switch is on `/settings` as well as the CLI** (2026-09-08), and `cmd_plugins` used to
+  say it never could be: "a page would write a curated file". That read DESIGN.md §2.3 one
+  step too strictly — it forbids a *scheduled* run writing curation, which is why `/tuning`
+  edits criteria.yaml and `/companies` appends to companies.yaml. `serve` is a process you
+  started; a click is something you did. `POST /api/plugin` calls `settings.set_enabled`, the
+  same and only writer the CLI uses, so the button and the terminal cannot come to disagree
+  about a file they both own.
+- **The page carries the switch and nothing else.** No `set`, because a feed's options are
+  typed once and the page's question is "is it on"; no **`purge`**, because disabling is one
+  click back while purge deletes imported postings, and a destructive control beside a toggle
+  is one somebody presses meaning the toggle; and **never the token**, which is env-only
+  precisely so it stays out of a screenshot. A test asserts the card's only button class.
+- **Every registered plugin gets a card, on or off.** A switchboard listing only what is
+  enabled cannot answer the question you open it with — why nothing happened last night — and
+  `tailor` ships off, so it would have had no way to turn on the one plugin that needs it.
+- **`unavailable_reason` is asked only of an enabled plugin**, which is the queue's own rule
+  carried onto the page: switched off is a decision you typed, and a reason printed beside it
+  reads as a fault.
+- **The request carries the state it wants, not "toggle".** A double click then lands as one
+  flip, because the second sends what the first did.
+- **A malformed plugins.yaml is a banner, and the switches are honestly refused.** Everywhere
+  else it stops the feed; here it degrades so the page you would open to fix it still renders.
+  It may not offer a one-click fix: `set_options` reads before it merges, so replacing a file
+  it could not parse would discard the settings it could not read — the first draft of that
+  banner promised exactly that, which is a refusal naming an action you cannot take.
 
 **A plugin has a `kind` since 2026-09-01, and there are two.** `import` is everything below —
 a feed of postings. `task` is the switch for a bounded model role in `tasks/`; it implements
@@ -1003,6 +1029,27 @@ first that composes prose** — so the bound is not the shape of the answer.
   **allowlist** of control sequences, because a blocklist is a guess and `\csname` composes
   command names out of characters. It runs inside parsing, not at assembly — an edit that
   renders and is refused later is one you accept and watch do nothing.
+- **The line being replaced is the second half of that allowlist** (2026-09-07), and without
+  it there was no first half. A real resume writes `\resumeItem{...}`, `\resumeSubheading`
+  and `\href` — macros its own preamble defines and no global list knows — so the fixed list
+  refused *every* bullet rewrite. Measured the night `tailor` was first switched on: **93
+  proposals carried 0 edits**, and in an instrumented sample **16 of 17 otherwise-grounded
+  edits died at `sanitize`**, each one ordinary prose inside the same `\resumeItem{}` the
+  line already used. A guard that cannot pass the only line shape its input has is not
+  strict, it is off — and it fails as silent absence, which is why it read as "the model has
+  nothing to say" for a whole corpus. `sanitize(suggestion, context)` widens the list with
+  the commands **that line already runs**, never with the document's.
+- **The skeleton must come back unchanged, and that is where "do not restyle my resume"
+  is enforced.** The commands that lay a line out must return in the same order, the same
+  number, with the same number of argument groups; only the prose between them may move. So
+  a suggestion cannot add a `\textbf`, drop one, reorder them, or hand a one-argument macro
+  two. The prompt says all of this too — and a prompt is a request, which is the same
+  division of labour `keywords.yaml` draws between `allowed` and `denied`.
+- **`NEVER_ALLOWED` is a blocklist inside the allowlist, and it is not a hedge.** The
+  widening is about the *shape* of a line, but for `\input`, `\write`, `\def`, `\csname`
+  and friends the **argument is the whole risk** — a resume that legitimately says
+  `\input{skills.tex}` would otherwise license a suggestion of `\input{/etc/passwd}`. Those
+  are never picked up from a line, however the document uses them. Tested by name.
 - **`apply_edits` replaces a line it was handed verbatim, and does nothing else.** No search,
   no fuzzy match, no insertion — which puts the preamble out of reach by construction and is
   why a document that compiled before compiles after. The cost is real: it cannot add a bullet

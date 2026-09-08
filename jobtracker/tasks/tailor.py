@@ -120,10 +120,34 @@ Rules:
 - `suggestion` is the replacement for that line. Keep the candidate's own facts: you may
   re-word, re-order, and surface what is already there. You may NOT add an employer, a
   technology, a metric, a date or an achievement the resume does not already contain.
-- Keep the LaTeX structure of the line you are replacing. If the line begins with \\item,
-  so does yours. Do not introduce any LaTeX command that was not already in the line.
 - Prefer few, strong edits. An empty list is a good answer when the resume already
   addresses the posting; say nothing rather than inventing something to say.
+
+THE LATEX IS NOT YOURS TO CHANGE. You are rewriting the English inside a line, nothing
+else. `suggestion` must carry exactly the same commands as `current_line`, in the same
+order, the same number of times, with the same braces around the same arguments:
+
+- If the line is `\\resumeItem{...}`, yours is `\\resumeItem{...}` — the same macro, one
+  argument, and every character outside the braces identical, indentation included.
+- Do NOT add a command the line does not already have, and do NOT remove one it does.
+  No new `\\textbf`, no new `\\textit`, no new `\\href`, no spacing or font macros.
+- Do NOT change what a `\\href` points at, or reword a heading, date, employer or title.
+- These are the candidate's own macros and they decide how the page is laid out. A
+  suggestion that changes them is refused outright, so it costs you the edit.
+
+MATCH THE STYLE OF THE BULLETS ALREADY THERE. A tailored line has to read as though it
+was written at the same sitting as the ones around it:
+
+- Same voice and tense as the neighbouring bullets — past-tense and verb-first if that is
+  what they do. Do not switch to "Responsible for" or to the present tense.
+- Roughly the same length. A bullet that grows by half a line re-flows the page and is
+  the most common way a tailored resume starts to look tailored.
+- Same punctuation, capitalization and abbreviation habits, including whether bullets end
+  in a full stop.
+- No adjectives the original does not use: no "mission-critical", "robust", "scalable"
+  unless that word is already in the line.
+- Re-order and re-word what is there to surface what the posting asks for. That is the
+  whole job: the facts do not change, the emphasis does.
 
 The technology list, when one is given, is the ONLY vocabulary of technology names you
 may write. A name that is not in it and not already in the resume may not appear in a
@@ -313,7 +337,10 @@ def parse_edits(
         if current not in resume_text:
             continue
 
-        suggestion = fmt.sanitize(str(item.get("suggestion") or ""))
+        # With the line it replaces, so the resume's own macros are allowed and the
+        # line's layout has to come back unchanged. Without it, every `\resumeItem`
+        # bullet in a real resume is refused — see `resume/latex.py`.
+        suggestion = fmt.sanitize(str(item.get("suggestion") or ""), current)
         if suggestion is None or suggestion.strip() == current.strip():
             continue
 
