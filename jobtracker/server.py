@@ -342,7 +342,18 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path,
     from .prefill import gap_ask_count, split_gaps
 
     p.append(f"<h2>Unanswered questions ({len(gaps)})</h2>")
-    if not gaps:
+    off = config.prefill_off()
+    if off:
+        # The whole gap loop belongs to prefill: these rows are minted by a plan run and
+        # spent by a form fill, and with the switch off nothing on either end runs. The
+        # count stays in the heading and the rows stay in the database — this is a
+        # decision that can be reversed, and answering questions for a fill that will
+        # not happen is the one thing this page should not ask of you.
+        p.append(f"<p class='banner off'>{html.escape(off)}</p>")
+        p.append("<p class=note>These are kept, not discarded: they are what earlier "
+                 "forms asked and nothing could answer. Turn prefill back on and the "
+                 "list is exactly where it was.</p>")
+    elif not gaps:
         p.append("<p class=note>Nothing outstanding. Every field prefill has seen so "
                  "far has an answer.</p>")
 
@@ -350,7 +361,7 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path,
     # nine employers ask is answered once and fills nine forms forever; a question only
     # Stripe asks is worth exactly one application. Sorting the first by how many ask is
     # the whole point — that is the order in which answering pays.
-    generic, per_company = split_gaps(gaps)
+    generic, per_company = ([], []) if off else split_gaps(gaps)
     if generic:
         p.append(f"<h3>Asked everywhere <span class=count>{len(generic)}</span></h3>")
         p.append("<p class=note>Answer one of these once and every employer that asks "
@@ -670,6 +681,21 @@ def render_apply(conn: sqlite3.Connection, session, answers_path=None,
         "<body><div class=wrap>",
         f"<h1>Fill in {dashboard_mod.version_chip()}</h1>", _NAV,
     ]
+
+    # Named here rather than left to "no window is open", which is true and useless:
+    # this page's only entry point is a button the dashboard no longer renders, so
+    # somebody arriving at a bookmarked /apply would read a working feature that has
+    # simply not been started. The switch is the news.
+    off = config.prefill_off()
+    if off:
+        p.append(f"<p class='banner off'>{html.escape(off)}</p>")
+        p.append(
+            "<p class=note>Nothing is deleted — the browser this page mirrors, the "
+            "plans behind it and the answer bank are all still here. Set the variable "
+            "and restart <code>serve</code> to get the flow back.</p>"
+        )
+        p.append("</div></body></html>")
+        return "\n".join(p)
 
     if session is None:
         p.append(
@@ -3332,6 +3358,9 @@ class Handler(BaseHTTPRequestHandler):
         button would silently do nothing in exactly the case it exists for. That is the
         apply-to regression's shape, and it is avoided by building the unit directly.
         """
+        off = config.prefill_off()
+        if off:
+            return {"ok": False, "error": off}
         company = str(payload.get("company") or "")
         job_id = str(payload.get("ats_job_id") or "")
         if not company or not job_id:
@@ -3571,6 +3600,17 @@ class Handler(BaseHTTPRequestHandler):
         nowhere else — so a failure this method could have seen would show up as a
         button sitting on "Opening…" forever.
         """
+        # First, and before the posting is even looked up. Everything below reports a
+        # different missing thing — no answer bank, no browser, a window already open —
+        # and each of those about a switched-off feature points at the wrong repair.
+        #
+        # This is also the only thing that starts a `live.Session`, so with the switch
+        # off every `/api/session/*` endpoint is inert by construction: they answer "no
+        # window is open" because nothing can open one.
+        off = config.prefill_off()
+        if off:
+            return {"ok": False, "error": off}
+
         company_name = str(payload.get("company") or "")
         job_id = str(payload.get("ats_job_id") or "")
         if not company_name or not job_id:
@@ -4404,6 +4444,11 @@ _EXTRA_CSS = """
 .banner{padding:.6rem .8rem;border-radius:6px;font-weight:600}
 .banner.ok{background:#0f5132;color:#d1e7dd}
 .banner.bad{background:#58151c;color:#f8d7da}
+/* Switched off is neither of the two above. Green would read as "it worked" and red as
+   "it broke"; this is a decision somebody typed, so it is stated in the page's own
+   colours and left quiet. */
+.banner.off{background:var(--surface);border:1px solid var(--border);
+  color:var(--ink-2);font-weight:600}
 .regression{padding:.4rem .8rem;border-left:3px solid #dc3545;margin:.3rem 0}
 .sugg{padding:.4rem 0;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
 .rules{margin:.9rem 0;padding:.1rem 0 .6rem;border-top:1px solid var(--rule)}

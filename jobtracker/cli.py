@@ -1,18 +1,23 @@
 """Command-line entry point.
 
 The nightly sequence is  check -> work -> prepare -> dashboard,  and only `check`
-touches an ATS. `work` is the model's half; `prepare` rescores and prefills and needs no
-model at all. Everything after `check` reads state.db and, at most, the local router.
+touches an ATS. `work` is the model's half; `prepare` rescores and needs no model at
+all. Everything after `check` reads state.db and, at most, the local router.
+
+**The prefill half is switched off** (`config.PREFILL_ENABLED`, 2026-09-10) — applications
+are typed by hand. `prefill` and `apply-to` say so and exit 0, `prepare` skips its
+planning step and still rescores. `JOBTRACKER_PREFILL=1` brings it back; nothing is
+deleted. See docs/prefill.md.
 
 Subcommands:
   check         the daily pipeline: fetch -> health -> store -> match -> report,
                 caching descriptions so every later pass can run offline
   work          run the next available model task, or the one you name. The scheduler
                 picks by priority, which is the pipeline's own dependency order
-  prefill       work out what goes in every box of the forms worth applying to
+  prefill       [off] work out what goes in every box of the forms worth applying to
                 (no model: it reads answers.yaml, and asks you about what is missing)
-  prepare       make tomorrow's picks ready: rescore, then prefill the top N
-  apply-to      open an application in a browser with your answers already filled in
+  prepare       make tomorrow's picks ready: rescore, then prefill the top N [off]
+  apply-to      [off] open an application in a browser with your answers filled in
   resolve       alias for `work --task level`  (kept: it is in muscle memory and cron)
   rank          score open matches against profile.yaml (a model helps; not required)
   today         the jobs to apply to today; --applied/--skip/--snooze to act on one
@@ -1628,6 +1633,17 @@ def cmd_tailor(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def _say_switched_off(what: str) -> None:
+    """Print that the prefill half is off, and how to bring it back.
+
+    One wording for all three commands, and it follows `cmd_work`'s: a feature you
+    switched off is the system doing what you said, so it is a plain statement and an
+    exit 0 — never an error, which would make a nightly `prepare` red for a decision.
+    """
+    print(f"{what}: prefilled applications are switched off.")
+    print("  JOBTRACKER_PREFILL=1 turns them back on — see docs/prefill.md.")
+
+
 def cmd_prefill(args: argparse.Namespace) -> int:
     """Work out what goes in every box of every form worth applying to.
 
@@ -1635,8 +1651,15 @@ def cmd_prefill(args: argparse.Namespace) -> int:
     gating it behind a reachable router — which is what living in that queue would have
     meant — would silently build no plans on a night the GPU was down. Same argument
     that has always kept scoring out of the queue.
+
+    Switched off since 2026-09-10 (`config.PREFILL_ENABLED`), and this returns before
+    it opens the database: there is nothing to plan for a form nothing will ever open.
     """
     from . import prefill as prefill_mod
+
+    if config.prefill_off():
+        _say_switched_off("prefill")
+        return EXIT_OK
 
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
@@ -1696,6 +1719,15 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             print("  Run `check` then `work` — or you have dispositioned everything.")
             return 0
 
+        if config.prefill_off():
+            # Rescoring is the half that still earns its place: it is what stops
+            # `today` opening on yesterday's order. What goes with the switch is the
+            # planning and the readiness verdict — "NOT READY" about every pick would
+            # be a nightly exit 2 for a feature nobody turned on, which is the dbt Labs
+            # trap with a different cause.
+            _say_switched_off("prepare")
+            return _report_picks(picks)
+
         if ctx.answers is None:
             print(f"No answer bank at {ctx.answers_path} — cannot prefill.")
             print("  cp answers.example.yaml answers.yaml, then fill it in.")
@@ -1736,6 +1768,20 @@ def _unprefillable_reason(ctx, row) -> str | None:
     if company.check_method in ("aggregator", "plugin"):
         return "apply on the employer's own page — this came from a feed, not a board"
     return None
+
+
+def _report_picks(picks) -> int:
+    """Tomorrow's picks, with nothing said about filling them in. Always exit 0.
+
+    What `prepare` still answers with prefill switched off: which jobs `today` will
+    surface, so the nightly run is still worth reading. It deliberately prints no
+    readiness line at all rather than a "prefill: off" beside each one — a fact repeated
+    per row about a decision you made once is noise, and the switch is named above.
+    """
+    print(f"\nTomorrow: {len(picks)} pick(s)\n")
+    for i, row in enumerate(picks, 1):
+        print(f"  {i}. {row['company']} — {row['title'][:52]}")
+    return EXIT_OK
 
 
 def _report_readiness(conn, picks, ctx) -> int:
@@ -1813,6 +1859,14 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
     window open — see docs/prefill.md for why that boundary is where it is.
     """
     from . import browser as browser_mod, resumes
+
+    # Before the database opens, and before the answer bank is read. `fill_application`
+    # refuses too — that is the guard that matters, since it is the one call that
+    # launches a browser — but a refusal three checks deep would report whichever piece
+    # of configuration happened to be missing rather than the switch.
+    if config.prefill_off():
+        _say_switched_off("apply-to")
+        return EXIT_OK
 
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
@@ -2630,7 +2684,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pf = sub.add_parser(
         "prefill",
-        help="work out what goes in every box of the forms worth applying to",
+        help="[switched off] work out what goes in every box of the forms "
+             "worth applying to",
     )
     pf.add_argument("--criteria", default=str(config.CRITERIA_YAML))
     pf.add_argument("--profile", default=str(config.PROFILE_YAML))
@@ -2645,7 +2700,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser(
         "prepare",
-        help="make tomorrow's picks ready to apply to (rescore + prefill the top N)",
+        help="make tomorrow's picks ready to apply to (rescore; prefill is off)",
     )
     pr.add_argument("--criteria", default=str(config.CRITERIA_YAML))
     pr.add_argument("--profile", default=str(config.PROFILE_YAML))
@@ -2660,7 +2715,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     at = sub.add_parser(
         "apply-to",
-        help="open an application in a browser with your answers already filled in",
+        help="[switched off] open an application in a browser, filled in",
     )
     at.add_argument("company")
     at.add_argument("job_id")

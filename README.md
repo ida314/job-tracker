@@ -85,7 +85,8 @@ python -m jobtracker.cli mail                         # narrow the mailbox, no m
 python -m jobtracker.cli work --task inbox            # read the candidates
 python -m jobtracker.cli mail --list                  # proposals awaiting your ruling
 
-# prefilled applications — see docs/prefill.md.  No model anywhere in here.
+# prefilled applications — SWITCHED OFF since 2026-09-10; see docs/prefill.md.
+export JOBTRACKER_PREFILL=1                           # everything below is off without it
 cp answers.example.yaml answers.yaml                  # gitignored; holds your details
 python -m jobtracker.cli prefill                      # plan every match worth applying to
 python -m jobtracker.cli prepare                      # the same, for tomorrow's picks only
@@ -180,7 +181,11 @@ pytest -q
 JOBTRACKER_DB=data/state.db python -m jobtracker.cli check
 ```
 
-Filling application forms is an optional extra, because it pulls a browser:
+Filling application forms is **switched off** (`JOBTRACKER_PREFILL=1` turns it back
+on — see `docs/prefill.md`); applications are typed by hand. Nothing is deleted, and the
+rest of this section describes it as it works when it is on.
+
+It is also an optional extra, because it pulls a browser:
 
 ```bash
 pip install 'jobtracker[browser]' && playwright install chrome

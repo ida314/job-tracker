@@ -48,7 +48,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
-from . import live, store
+from . import config, live, store
 from .answers import normalize_label, slugify
 from .models import FormField
 from .prefill import resolve_field
@@ -69,6 +69,11 @@ NO_PLAYWRIGHT = (
 def unavailable_reason() -> Optional[str]:
     """Why no browser can be driven right now, or None if one can.
 
+    The switch is checked before the import, because "switched off" and "not installed"
+    are two different states and only one of them is a fault: telling somebody to run
+    `playwright install` about a feature they turned off is the same wrong answer as a
+    disabled plugin reporting a missing token.
+
     Exists for callers that cannot see an exception. `serve` starts the fill on a daemon
     thread, so anything raised in `fill_application` reaches the log and nothing else —
     a missing Playwright would show up in the page as a button that says "Opening…" over
@@ -78,6 +83,9 @@ def unavailable_reason() -> Optional[str]:
     Only the import is checked. Whether a browser *binary* is installed is a question
     `_launch` can only answer by launching one, which is seconds, not milliseconds.
     """
+    off = config.prefill_off()
+    if off:
+        return off
     try:
         import playwright.sync_api  # noqa: F401
     except ImportError:
@@ -639,6 +647,15 @@ def fill_application(
     commands from the dashboard, so the fields can be typed somewhere with no latency
     instead of through a video stream of this window. It implies `hold`.
     """
+    # The hard guard, and the reason it is here rather than only at the callers: this
+    # is the one function in the repo that launches a browser at a third party's form,
+    # and a switch enforced only in the UI is a switch a future caller walks straight
+    # past. Both callers already turn `BrowserUnavailable` into a refusal somebody
+    # reads, so the switched-off world needs no new error path.
+    off = config.prefill_off()
+    if off:
+        raise BrowserUnavailable(off)
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover - depends on the optional extra

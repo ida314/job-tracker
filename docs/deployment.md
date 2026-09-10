@@ -109,6 +109,7 @@ is a fact about the company.
 | `JOBTRACKER_LLM_URL` | For `work`/`rank` | `http://HOST:PORT` of the inference router. The model tag is discovered from `/v1/models`. Absent → `work` is a no-op; `rank` still re-scores from stored judgments |
 | `SIR_BASE_URL` / `SIR_ENDPOINTS` | Alternative | The SDK's own variables, honoured so a host already pointing services at the router need not repeat itself |
 | `JOBTRACKER_PROFILE` | No | Defaults to the copy baked into the image. Mount it to tune the ranking without rebuilding |
+| `JOBTRACKER_PREFILL` | No | **The prefill/browser half is off by default since 2026-09-10** — applications are typed by hand. `1` turns `prefill`, `apply-to`, `prepare`'s planning step and `serve`'s "Open prefilled"/`/apply` back on. Every row below it that mentions `prefill` or `apply-to` is conditional on this. CI sets it when asserting the serve image can drive a browser, because a switch and a lost capability must not mask each other |
 | `JOBTRACKER_ANSWERS` | For `prefill`/`apply-to` | Your answer bank. Not in the image — it is personal data. Absent → `jobtracker prefill` refuses and says so, `prepare` says it cannot prefill, and nothing else notices |
 | `JOBTRACKER_BROWSER_PROFILE` | For `apply-to` | Persistent browser profile. Put it on a volume or every run starts logged out |
 | `DISPLAY` | For `apply-to`/`serve`'s button | Not ours, but load-bearing: Playwright draws a real window on the host running the command. A headless host needs an X display (`Xvfb :100`) or the launch fails. `/apply` is where you type, so nobody looks at it in the ordinary case — but it still has to exist |
@@ -140,7 +141,8 @@ one-shot commands against the same `$JOBTRACKER_DB`, in order:
 ```sh
 jobtracker check              # fetch → health → store → match → cache descriptions → report
 jobtracker work               # the next model task; repeat until it reports nothing to do
-jobtracker prepare            # rescore, then prefill tomorrow's picks. No model needed.
+jobtracker prepare            # rescore tomorrow's picks. No model needed.
+                              # (also prefills them, when JOBTRACKER_PREFILL=1)
 jobtracker dashboard          # render state.db → a static HTML file
 ```
 
@@ -171,7 +173,9 @@ re-sort the queue now" — which costs no model calls at all.
   container killed mid-run keeps everything that already landed.
 - **`prepare` is the last thing to run and the one whose exit code matters.** It
   rescores, takes the postings `today` will surface in the morning, and makes sure each
-  has a prefill plan. Exit 2 means at least one pick has no plan at all — the state that
+  has a prefill plan. **With prefill switched off it rescores, prints the picks and exits
+  0** — the readiness verdict goes with the feature, because NOT READY about picks nobody
+  will prefill is a nightly exit 2 for a decision somebody typed. Exit 2 means at least one pick has no plan at all — the state that
   leaves you opening a blank form — and the output names why for each one. **Unanswered
   questions never cause exit 2**: a form with gaps is the normal state, especially in the
   first weeks, and failing on it would leave the job permanently red for a condition only

@@ -35,7 +35,7 @@ from collections import Counter
 from datetime import date
 from typing import Optional
 
-from . import applications as apps_mod, rank as rank_mod, store
+from . import applications as apps_mod, config, rank as rank_mod, store
 from . import build_version
 from .criteria import Criteria
 from .match import location_label, location_rank
@@ -851,7 +851,10 @@ def build_dashboard(
     ranked_open = rank_mod.available(ranked, today)
     picks, rest = ranked_open[:3], ranked_open[3:]
     unranked = sum(1 for r in ranked if r["score"] is None)
-    plans = store.plans_by_posting(conn)
+    # `None`, not `{}`, and not the query: with prefill switched off there is no plan
+    # worth reporting and nothing that could act on one. Passed down rather than tested
+    # in each renderer, so one read of the switch decides the whole page.
+    plans = None if config.prefill_off() else store.plans_by_posting(conn)
     overrides = store.posting_resumes(conn)
     suggestions = store.suggestions_by_posting(conn)
     built = _built_resumes()
@@ -1100,16 +1103,22 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
         # Only under `serve`. The static file must stay offline and read-only, and a
         # button that cannot drive a browser is worse than no button — the same rule
         # the disposition buttons follow.
-        parts.append(
-            f'<button class="apply-to" data-company="{c}" data-job="{j}">'
-            "Open prefilled</button>"
-        )
-        # Re-plan this one posting against the answers and resume as they stand now.
-        # Rules only, no model and no network — see `server._rebuild_plan`.
-        parts.append(
-            f'<button class="pick-rebuild" data-company="{c}" data-job="{j}">'
-            "Rebuild prefill</button>"
-        )
+        # Both of these drive the prefill half, so both go with its switch. Absent
+        # rather than disabled: a control that is present and refuses is a defect you
+        # go looking for, and the endpoints behind them refuse anyway — this is the
+        # `interactive` rule (no dead button in a mailed file) applied to a second
+        # reason a click could not work.
+        if not config.prefill_off():
+            parts.append(
+                f'<button class="apply-to" data-company="{c}" data-job="{j}">'
+                "Open prefilled</button>"
+            )
+            # Re-plan this one posting against the answers and resume as they stand
+            # now. Rules only, no model and no network — see `server._rebuild_plan`.
+            parts.append(
+                f'<button class="pick-rebuild" data-company="{c}" data-job="{j}">'
+                "Rebuild prefill</button>"
+            )
         for action, label in (
             ("applied", "I applied"), ("skipped", "Skip"), ("snoozed", "Snooze 7d"),
         ):
@@ -1132,7 +1141,15 @@ def _prefill_line(parts, row, plans) -> None:
     Rendered in the static file too, without the button. The counts are the useful part
     even offline: they say whether opening this one will take thirty seconds or ten
     minutes, which is exactly the question the Today tab exists to answer.
+
+    Nothing at all when prefill is switched off — not a "prefill: off" line. `plans` is
+    None in both worlds, so the two are told apart by the switch and not by the absence:
+    "no prefill yet, run `jobtracker prefill`" is an instruction, and printing an
+    instruction you cannot follow on all three cards every day is the noise
+    `_tailor_line` already refuses to make about a feature nobody enabled.
     """
+    if config.prefill_off():
+        return
     plan = (plans or {}).get((row["company"], row["ats_job_id"]))
     if plan is None:
         parts.append(

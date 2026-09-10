@@ -130,7 +130,12 @@ jobs:
           v = jobtracker.build_version()
           print(v)
           sys.exit(0 if "+" in v else 1)'
-          docker run --rm --entrypoint python jobtracker-serve:ci -c '
+          # `-e JOBTRACKER_PREFILL=1`: this asks whether the *image* can drive a
+          # browser, and since 2026-09-10 the app ships with that half switched off, so
+          # `unavailable_reason()` would answer with the switch and hide the only thing
+          # this check exists to see. The switch is a decision about the running system;
+          # a lost capability in the image is a defect, and they must not mask each other.
+          docker run --rm -e JOBTRACKER_PREFILL=1 --entrypoint python jobtracker-serve:ci -c '
           from jobtracker import browser
           import sys
           r = browser.unavailable_reason()
@@ -264,7 +269,12 @@ jobs:
           v = jobtracker.build_version()
           print(v)
           sys.exit(0 if "+" in v else 1)'
-          docker run --rm --entrypoint python "$IMG" -c '
+          # `-e JOBTRACKER_PREFILL=1`: this asks whether the *image* can drive a
+          # browser, and since 2026-09-10 the app ships with that half switched off, so
+          # `unavailable_reason()` would answer with the switch and hide the only thing
+          # this check exists to see. The switch is a decision about the running system;
+          # a lost capability in the image is a defect, and they must not mask each other.
+          docker run --rm -e JOBTRACKER_PREFILL=1 --entrypoint python "$IMG" -c '
           from jobtracker import browser
           import sys
           r = browser.unavailable_reason()

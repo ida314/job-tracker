@@ -40,7 +40,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
-from . import resumes, store
+from . import config, resumes, store
 from .answers import normalize_label, slugify
 from .models import FormField
 from .sources import get_source
@@ -466,7 +466,15 @@ class Report:
 
 
 def unavailable_reason(ctx) -> Optional[str]:
-    """Why planning cannot run at all, or None. Missing config, never missing work."""
+    """Why planning cannot run at all, or None. Missing config, never missing work.
+
+    The switch comes first, for the reason a disabled plugin is never asked for its
+    `unavailable_reason`: switched off is a decision you typed, and reporting a missing
+    answer bank about a feature nobody has turned on sends you to fix the wrong thing.
+    """
+    off = config.prefill_off()
+    if off:
+        return off
     if ctx.answers is None:
         return "answers.yaml not loaded (copy answers.example.yaml and fill it in)"
     return None

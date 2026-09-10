@@ -20,6 +20,55 @@ from .models import Company
 # Repo root = parent of the jobtracker/ package directory.
 ROOT = Path(__file__).resolve().parent.parent
 
+
+def _flag(name: str, default: bool) -> bool:
+    """An on/off environment switch. Anything unset falls back to the default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Whether the prefilled-application half of this repo is switched on: `jobtracker
+# prefill` and `jobtracker apply-to`, `prepare`'s prefill step, and everything under
+# `serve` that drives Chromium — the "Open prefilled" button, `/apply`, and the session
+# endpoints behind it.
+#
+# **Off since 2026-09-10, because applications are being typed by hand.** Nothing is
+# deleted: `prefill.py`, `browser.py` and `live.py` are intact and still tested (see
+# tests/conftest.py, which switches the feature on for the suite the way `sdk_installed`
+# forces the world it means), so bringing the whole thing back is this one variable:
+#
+#     JOBTRACKER_PREFILL=1 jobtracker serve
+#
+# Off is a decision somebody typed, so every surface says so rather than going quiet —
+# the rule a switched-off plugin already follows. What it must not do is *reason* about
+# it on every row: a permanent "prefill: off" chip on each of three cards is the noise
+# `_tailor_line` refuses to print, so the cards simply drop their prefill line and the
+# two places you would go looking — Settings and `/apply` — name it once each.
+#
+# The switch is here rather than in plugins.yaml because that registry holds import
+# feeds and bounded model roles, and this is neither: prefill asks a model nothing
+# (DESIGN.md §8.1) and imports no postings.
+PREFILL_ENABLED = _flag("JOBTRACKER_PREFILL", False)
+
+PREFILL_OFF = (
+    "prefilled applications are switched off — set JOBTRACKER_PREFILL=1 to turn "
+    "them back on (docs/prefill.md)"
+)
+
+
+def prefill_off() -> str | None:
+    """Why the prefill/browser half cannot run, or None when it is switched on.
+
+    A function rather than a bare read of the constant, so the answer is taken at the
+    point of use: that is what lets one test force each world with
+    `monkeypatch.setattr(config, "PREFILL_ENABLED", ...)` and never depend on which
+    module imported which first.
+    """
+    return None if PREFILL_ENABLED else PREFILL_OFF
+
+
 COMPANIES_YAML = Path(os.environ.get("JOBTRACKER_COMPANIES", ROOT / "companies.yaml"))
 CRITERIA_YAML = Path(os.environ.get("JOBTRACKER_CRITERIA", ROOT / "criteria.yaml"))
 PROFILE_YAML = Path(os.environ.get("JOBTRACKER_PROFILE", ROOT / "profile.yaml"))

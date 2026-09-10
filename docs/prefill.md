@@ -1,5 +1,36 @@
 # Prefill: opening an application with your answers already in it
 
+> ## Switched off since 2026-09-10
+>
+> Applications are being typed by hand, so everything in this document is **off by
+> default**: `jobtracker prefill`, `jobtracker apply-to`, `prepare`'s planning step, and
+> under `serve` the "Open prefilled" button, `/apply` and every session endpoint behind
+> it. `prepare` still rescores and still prints tomorrow's picks; nothing else in the
+> pipeline changed.
+>
+> ```
+> JOBTRACKER_PREFILL=1 jobtracker serve      # the whole thing back, unchanged
+> ```
+>
+> **Nothing was deleted.** `prefill.py`, `browser.py` and `live.py` are intact, and the
+> tests that describe them run against them — `tests/conftest.py` switches the feature
+> on for the suite, the way the `sdk_installed` fixture forces the world it means, and
+> `tests/test_prefill_switch.py` tests the off world on its own. That is what keeps this
+> turnable back on rather than turning into code nobody can vouch for.
+>
+> Three consequences worth knowing before you flip it back:
+>
+> * **Every stored plan, gap and learned question key is still in `state.db`.** Settings
+>   keeps the count in its heading and stops rendering the cards, because answering a
+>   question for a fill that will not happen is the one thing that page should not ask.
+> * **The picks render no prefill line at all**, rather than "prefill: off" or "no
+>   prefill yet — run `jobtracker prefill`". An instruction you cannot follow, on three
+>   cards, every day, is the noise `_tailor_line` already refuses to make about a
+>   feature nobody enabled.
+> * **`fill_application` refuses too**, not just the UI. That is deliberate: it is the
+>   one function in the repo that launches a browser at a third party's form, and a
+>   switch enforced only at the callers is one the next caller walks straight past.
+
 Two halves, and the split is what makes the second one optional:
 
 ```
