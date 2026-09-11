@@ -163,6 +163,12 @@ tailored resume's **↓** and follows the same two rules: absent entirely when n
 been written, and interactive-only, because a dead button in a mailed file is worse than
 no button.
 
+**The date on the letter is the day it was compiled**, not the day you send it — `fill`
+takes `today` from the run that built the PDF, and a PDF that is already current is not
+rebuilt. So a letter built tonight still says tonight's date when you download it next
+week. That is usually right (it is when the letter was written) and occasionally not;
+`jobtracker coverletter build --rebuild` recompiles everything and re-dates it.
+
 There is nothing to *accept*. `resume_suggestions` has a `resolution` because a suggestion
 is a proposal about a document you already wrote, so accepting and dismissing are real
 states. A letter is a draft written for one posting and has no meaning at another: there
