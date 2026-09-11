@@ -715,8 +715,11 @@ The first model role that composes prose, so the bound is not the shape of the a
   two lists, and `yaml.safe_dump` deletes all of them.
 - **Nothing anywhere accepts an edit on a click.** Attaching is `tailor build --attach`, after
   reading the diff at `/apply`. **Building and downloading are not accepting** and are allowed from
-  the actions cell. The Today card and `/apply` carry no control of any kind, which is what keeps
-  `.pick [data-act]` and `.lf` selecting exactly what they did.
+  the actions cell and, under `serve`, from a Today card's documents line (`_docs_line`), which
+  renders the actions cell's own `↓`/`✉` through `_tailor_control`/`_letter_control` with **no
+  `data-act`** — that is what keeps `.pick [data-act]` meaning the three disposition buttons. The
+  card's tailor line stays a count with no control, and `/apply` carries no control of any kind,
+  which keeps `.lf` selecting exactly what it did.
 
 ---
 

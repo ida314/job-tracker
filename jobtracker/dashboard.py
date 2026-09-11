@@ -284,6 +284,17 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .resume button:hover { color: var(--ink); border-color: var(--ink-2); }
 .pick .resume button[disabled] { opacity: .5; cursor: default; }
 
+/* A pick's two documents: the same `↓` and `✉` the actions cell carries, each beside a
+   word saying which document it is — a card has the room a table row does not. */
+.pick .docs { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+              margin-top: 6px; font-size: 12px; color: var(--muted); }
+.pick .docs button, .pick .docs a { appearance: none; background: var(--page);
+    color: var(--ink-2); border: 1px solid var(--rule); border-radius: 6px;
+    padding: 1px 9px; margin-left: 4px; font: inherit; font-size: 12px;
+    cursor: pointer; text-decoration: none; }
+.pick .docs button:hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); }
+.pick .docs button[disabled] { opacity: .5; cursor: default; }
+
 /* The rest of the ranking. A <details>, so it opens with no script at all — and not a
    table, so the filter JS can never reach into the Today tab. */
 .rest { margin: 0 0 26px; }
@@ -996,7 +1007,7 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         parts.append('<div class="picks">')
         for i, row in enumerate(picks, 1):
             _pick(parts, i, row, by_name, today, interactive, criteria, plans,
-                  overrides, suggestions, held)
+                  overrides, suggestions, held, built, letters, letters_built)
         parts.append("</div>")
 
     if unranked:
@@ -1086,7 +1097,8 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
 
 
 def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
-          overrides=None, suggestions=None, held=None) -> None:
+          overrides=None, suggestions=None, held=None, built=None, letters=None,
+          letters_built=None) -> None:
     tier = _tier_of(row["company"], by_name)
     var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
@@ -1120,6 +1132,7 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
     _prefill_line(parts, row, plans)
     _tailor_line(parts, row, suggestions, held)
     _resume_line(parts, row, interactive, overrides)
+    _docs_line(parts, row, interactive, suggestions, held, built, letters, letters_built)
 
     parts.append('<div class="act">')
     parts.append(
@@ -1323,15 +1336,7 @@ def _track_cell(row, tracked=None, suggestions=None, built=None, held=None,
     j = html.escape(row["ats_job_id"], quote=True)
     bits: list[str] = []
 
-    row_suggestions = (suggestions or {}).get(key)
-    count = 0
-    state = "pending"
-    if row_suggestions is not None:
-        try:
-            count = len(json.loads(row_suggestions["edits"] or "[]"))
-        except (TypeError, ValueError):
-            count = 0
-        state = row_suggestions["resolution"]
+    count, state = _proposal(suggestions, key)
     if count:
         # Absent when nothing was proposed, the same rule `_tailor_line` follows: `tailor`
         # ships switched off, and a permanent "0" on every row is noise about a feature
@@ -1360,39 +1365,16 @@ def _track_cell(row, tracked=None, suggestions=None, built=None, held=None,
                      + ", ".join(waiting["terms"])))
             bits.append(f'<span class="theld" title="{html.escape(note, quote=True)}">'
                         f"{word}</span>")
-        elif state != "dismissed":
-            if _track_cell_built(row, built):
-                bits.append(
-                    f'<a class="tailor-dl" href="/api/tailored?company={_q(row["company"])}'
-                    f'&amp;job={_q(row["ats_job_id"])}" '
-                    'title="Download the tailored resume" download>&darr;</a>'
-                )
-            else:
-                bits.append(
-                    f'<button class="tailor-build" data-company="{c}" data-job="{j}" '
-                    'title="Build the tailored resume">&darr;</button>'
-                )
+        else:
+            bits.append(_tailor_control(row, state, built))
 
     # The cover letter, beside the resume and following exactly its two rules: absent
     # when nothing was written, and a download once the PDF exists. `coverletter` ships
     # off like `tailor` does, so a permanent mark on every row would be noise about a
     # feature nobody enabled.
-    #
-    # The glyph is an envelope rather than a second arrow. Two identical `↓` on one row
-    # is a cell you have to hover to read, and these fetch different documents.
     letter_row = (letters or {}).get(key)
     if letter_row is not None:
-        if _letter_built(row, letters_built, letter_row):
-            bits.append(
-                f'<a class="letter-dl" href="/api/coverletter?company={_q(row["company"])}'
-                f'&amp;job={_q(row["ats_job_id"])}" '
-                'title="Download the cover letter" download>&#9993;</a>'
-            )
-        else:
-            bits.append(
-                f'<button class="letter-build" data-company="{c}" data-job="{j}" '
-                'data-glyph="&#9993;" title="Build the cover letter">&#9993;</button>'
-            )
+        bits.append(_letter_control(row, letter_row, letters_built))
 
     if key in (tracked or set()):
         bits.append('<span class="tracked" title="Already in the tracker">tracked</span>')
@@ -1402,6 +1384,97 @@ def _track_cell(row, tracked=None, suggestions=None, built=None, held=None,
             'title="Record that you applied to this">+ tracker</button>'
         )
     return "".join(bits)
+
+
+def _proposal(suggestions, key) -> tuple[int, str]:
+    """`(edit count, resolution)` for one posting's tailor proposal; `(0, "pending")` when
+    there is none or its edits will not parse."""
+    row_suggestions = (suggestions or {}).get(key)
+    if row_suggestions is None:
+        return 0, "pending"
+    try:
+        count = len(json.loads(row_suggestions["edits"] or "[]"))
+    except (TypeError, ValueError):
+        count = 0
+    return count, row_suggestions["resolution"]
+
+
+def _tailor_control(row, state, built) -> str:
+    """The `↓`: a build button until the tailored PDF exists, a download link after.
+
+    One rendering for both places it appears — the actions cell and a pick's documents
+    line — so the classes the delegated handler in `_JS` selects cannot drift between
+    them. Nothing for a dismissed proposal, which is a decision you made rather than work
+    waiting. Callers decide the all-held case, because each says it differently.
+    """
+    if state == "dismissed":
+        return ""
+    if _track_cell_built(row, built):
+        return (
+            f'<a class="tailor-dl" href="/api/tailored?company={_q(row["company"])}'
+            f'&amp;job={_q(row["ats_job_id"])}" '
+            'title="Download the tailored resume" download>&darr;</a>'
+        )
+    c = html.escape(row["company"], quote=True)
+    j = html.escape(row["ats_job_id"], quote=True)
+    return (
+        f'<button class="tailor-build" data-company="{c}" data-job="{j}" '
+        'title="Build the tailored resume">&darr;</button>'
+    )
+
+
+def _letter_control(row, letter_row, letters_built) -> str:
+    """The `✉`: build the cover letter, or download it once a current PDF exists.
+
+    An envelope rather than a second arrow — two identical `↓` side by side is a control
+    you have to hover to read, and these fetch different documents. Shared by the actions
+    cell and a pick's documents line, `_tailor_control`'s reason.
+    """
+    if _letter_built(row, letters_built, letter_row):
+        return (
+            f'<a class="letter-dl" href="/api/coverletter?company={_q(row["company"])}'
+            f'&amp;job={_q(row["ats_job_id"])}" '
+            'title="Download the cover letter" download>&#9993;</a>'
+        )
+    c = html.escape(row["company"], quote=True)
+    j = html.escape(row["ats_job_id"], quote=True)
+    return (
+        f'<button class="letter-build" data-company="{c}" data-job="{j}" '
+        'data-glyph="&#9993;" title="Build the cover letter">&#9993;</button>'
+    )
+
+
+def _docs_line(parts, row, interactive, suggestions=None, held=None, built=None,
+               letters=None, letters_built=None) -> None:
+    """A pick's two documents — the tailored resume and the cover letter — to build or
+    download, with the same two controls the actions cell carries on every other row.
+
+    **Under `serve` only**: both are `/api/` routes, dead in a mailed file. Its own line
+    rather than a tail on `_tailor_line`, which stays a count with no control — that line
+    describes a proposal, and what is decided about a proposal happens at `/apply`.
+    Neither control accepts anything or carries `data-act`: building and downloading
+    send nothing to an employer, and `.pick [data-act]` must keep meaning the three
+    disposition buttons.
+
+    Each half is absent until its document exists, the rule both features ship with, and
+    the resume's is absent when every edit is held — `_tailor_line` already says why, and
+    a build over nothing compilable would only refuse.
+    """
+    if not interactive:
+        return
+    key = (row["company"], row["ats_job_id"])
+    bits: list[str] = []
+    count, state = _proposal(suggestions, key)
+    if count and not ((held or {}).get(key) or {}).get("all"):
+        control = _tailor_control(row, state, built)
+        if control:
+            bits.append(f'<span class="doc">tailored resume {control}</span>')
+    letter_row = (letters or {}).get(key)
+    if letter_row is not None:
+        bits.append('<span class="doc">cover letter '
+                    f'{_letter_control(row, letter_row, letters_built)}</span>')
+    if bits:
+        parts.append(f'<div class="docs">{"".join(bits)}</div>')
 
 
 def _track_cell_built(row, built) -> bool:

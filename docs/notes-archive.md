@@ -1212,7 +1212,11 @@ first that composes prose** — so the bound is not the shape of the answer.
   not accepting** and are allowed from the actions cell since 2026-09-02 — a compile sends
   nothing to an employer, and a PDF you download is a document you then read. The Today card
   and `/apply` still carry no control of any kind, which is what keeps `.pick [data-act]` and
-  `.lf` selecting exactly what they did.
+  `.lf` selecting exactly what they did. **Revised 2026-09-11:** the Today card got the
+  actions cell's `↓` and `✉` on a documents line of its own, on request — the top three were
+  the one place you could not fetch either PDF. What the old rule protected was the
+  *selector*, and neither control carries `data-act`, so `.pick [data-act]` is unchanged; the
+  card's tailor count line and `/apply` are still control-free.
 
 ## The ambiguity pass
 

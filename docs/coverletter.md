@@ -161,7 +161,9 @@ Under `serve`, every posting row that has a letter carries an **✉** in its act
 a build button until the PDF exists, a download link afterwards. It sits beside the
 tailored resume's **↓** and follows the same two rules: absent entirely when nothing has
 been written, and interactive-only, because a dead button in a mailed file is worse than
-no button.
+no button. The three Today picks carry the same pair on a line of their own, labelled
+*tailored resume* and *cover letter* — `dashboard._docs_line`, rendering the actions
+cell's controls through the same two helpers.
 
 **The date on the letter is the day it was compiled**, not the day you send it — `fill`
 takes `today` from the run that built the PDF, and a PDF that is already current is not
@@ -197,5 +199,5 @@ on the other — so the order between those two is a cost argument and nothing e
   resume, and a prompt is a request. `denied` is the only part of this that is a bound.
   **Read the letter.**
 - **It does not send anything.** Building and downloading are not accepting, which is the
-  whole of why they are allowed from the actions cell.
+  whole of why they are allowed from the actions cell and a Today card's documents line.
 - **It never writes to your template.** Paragraphs are spliced into a copy in memory.

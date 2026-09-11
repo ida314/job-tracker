@@ -1011,6 +1011,78 @@ def test_the_letter_column_exists_only_under_serve():
     assert "letter-build" not in static and "letter-dl" not in static
 
 
+def _picks_only(doc):
+    panel = _today_panel(doc)
+    end = panel.find('<details class="rest">')
+    return panel if end < 0 else panel[:end]
+
+
+def _docs_block(picks):
+    start = picks.index('<div class="docs">')
+    return picks[start:picks.index("</div>", start)]
+
+
+def test_a_pick_offers_both_documents_like_the_rest_of_the_ranking():
+    """The top three are where you most want the PDFs, and they were the one place the
+    page did not offer them. Same classes as the actions cell, so the one delegated
+    handler builds and swaps them."""
+    conn = _ranked_pool(6)
+    _suggest(conn, "Acme", "1", 2)
+    _letter(conn, "Acme", "1")
+    companies = [_company("Acme", 1), _company("Zeta", 3)]
+    block = _docs_block(_picks_only(dashboard.build_dashboard(
+        conn, companies, "2026-07-22", interactive=True)))
+    assert 'class="tailor-build" data-company="Acme" data-job="1"' in block
+    assert 'class="letter-build" data-company="Acme" data-job="1"' in block
+
+    with mock.patch.object(dashboard, "_built_resumes",
+                           return_value={resume.tailored_stem("Acme", "1")}), \
+         mock.patch.object(dashboard, "_built_letters",
+                           return_value={letter_mod.letter_stem("Acme", "1"):
+                                         "2026-07-22"}):
+        block = _docs_block(_picks_only(dashboard.build_dashboard(
+            conn, companies, "2026-07-22", interactive=True)))
+    assert 'href="/api/tailored?company=Acme&amp;job=1"' in block
+    assert 'href="/api/coverletter?company=Acme&amp;job=1"' in block
+    assert "-build" not in block
+
+
+def test_a_picks_documents_are_serve_only_and_never_a_disposition():
+    """An `/api/` href is dead in a mailed file. And neither control is one of the three
+    disposition buttons, so neither may carry the attribute that selects them."""
+    conn = _ranked_pool(6)
+    _suggest(conn, "Acme", "1", 2)
+    _letter(conn, "Acme", "1")
+    companies = [_company("Acme", 1), _company("Zeta", 3)]
+    static = _picks_only(dashboard.build_dashboard(conn, companies, "2026-07-22"))
+    assert 'class="docs"' not in static
+    assert "/api/" not in static
+
+    block = _docs_block(_picks_only(dashboard.build_dashboard(
+        conn, companies, "2026-07-22", interactive=True)))
+    assert "data-act" not in block
+    assert "attach" not in block
+
+
+def test_a_pick_with_neither_document_renders_no_documents_line():
+    """Both features ship off; an empty line on every card is noise about them."""
+    conn = _ranked_pool(6)
+    picks = _picks_only(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22", interactive=True))
+    assert 'class="docs"' not in picks
+
+
+def test_a_pick_offers_the_letter_alone_when_the_resume_was_dismissed():
+    """A dismissed proposal is a decision, not work waiting; the letter is unaffected."""
+    conn = _ranked_pool(6)
+    _suggest(conn, "Acme", "1", 2, resolution="dismissed")
+    _letter(conn, "Acme", "1")
+    block = _docs_block(_picks_only(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22", interactive=True)))
+    assert "tailor-" not in block
+    assert 'class="letter-build"' in block
+
+
 def test_the_two_documents_never_share_a_download_url():
     """One posting, two files, two routes. Sharing either would hand over the wrong one."""
     conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))

@@ -296,16 +296,19 @@ the phrase from the job description it answers. That phrase is why the block is 
 rendering — it is a verbatim quote, so the page can say *why* an edit was proposed instead
 of asking you to take it on trust. The Today card carries a count.
 
-**Neither surface has a button, in either mode.** Accepting means attaching a document to an
-application, and a control on either page would put a model-authored PDF one click from a
-real application with the diff unread.
+**Neither surface can accept an edit, in either mode.** Accepting means attaching a document
+to an application, and a control that did it would put a model-authored PDF one click from a
+real application with the diff unread. `/apply` has no button at all, and the card's count
+line has none either; the card's separate documents line only builds and downloads (below).
 
 ## Getting the PDF from the page
 
 Every posting row outside the three picks — both tables on the All postings tab, and the
 drawer under Today — carries a chip when `tailor` has proposed something, and beside it a
-`↓`. Under `serve` only: the static dashboard renders no actions column, and the download is
-a `/api/` href, which is as dead in a mailed file as a button would be.
+`↓`. The three picks carry the same `↓` — beside the cover letter's `✉` — on a documents
+line of their own (`_docs_line`, since 2026-09-11), rendered by the same `_tailor_control`
+and without `data-act`. Under `serve` only: the static dashboard renders no actions column,
+and the download is a `/api/` href, which is as dead in a mailed file as a button would be.
 
 The `↓` is a build button until the PDF exists and a download link afterwards, because
 nothing stores the path — `resume_suggestions` has no path column, so the file's own presence
