@@ -1691,7 +1691,7 @@ def cmd_coverletter(args: argparse.Namespace) -> int:
         # only thing absent is the last step. `tailor build` makes the same call.
         fmt = resume_mod.get_format("latex")
         blocked = fmt.unavailable_reason() if fmt else "no latex format is registered"
-        built = failed = stale = 0
+        built = failed = stale = current = 0
         for row in rows:
             head = f"{row['company']} — {row['ats_job_id']}"
             try:
@@ -1711,6 +1711,17 @@ def cmd_coverletter(args: argparse.Namespace) -> int:
                       f"(no {', '.join(missing)}) — re-run `work --task coverletter`")
                 stale += 1
                 continue
+            # Already compiled from these paragraphs. Skipped rather than rebuilt,
+            # which is what makes a nightly `coverletter build` cost one compile per new
+            # letter instead of one per letter ever written. `--rebuild` is the override,
+            # and it is the escape hatch for the day-granularity hole in `is_current`.
+            out = letter_mod.letter_path(row["company"], row["ats_job_id"])
+            if not args.rebuild and out.is_file() and letter_mod.is_current(
+                letter_mod.built_day(out), row["written_at"]
+            ):
+                current += 1
+                continue
+
             if blocked:
                 print(f"  {head}: {len(paragraphs)} paragraph(s) ready, not compiled")
                 continue
@@ -1725,7 +1736,6 @@ def cmd_coverletter(args: argparse.Namespace) -> int:
                 print(f"  {head}: {exc}", file=sys.stderr)
                 failed += 1
                 continue
-            out = letter_mod.letter_path(row["company"], row["ats_job_id"])
             resume_mod.write_pdf(out, blob)
             built += 1
             print(f"  {head}: {len(paragraphs)} paragraph(s) -> {out}")
@@ -1734,7 +1744,8 @@ def cmd_coverletter(args: argparse.Namespace) -> int:
             # Named, not silent, and not an error: every letter above is still written.
             print(f"\nNothing was compiled — {blocked}")
             return EXIT_OK
-        print(f"\n{built} compiled, {failed} failed")
+        print(f"\n{built} compiled, {failed} failed"
+              + (f", {current} already current" if current else ""))
         if stale:
             print(f"{stale} letter(s) predate the current template and were skipped.")
         return EXIT_DEGRADED if failed else EXIT_OK
@@ -2814,6 +2825,8 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("action", nargs="?", default="build", choices=["build"])
     cl.add_argument("--company", default=None, help="only this company")
     cl.add_argument("--limit", type=int, default=None, help="compile at most N")
+    cl.add_argument("--rebuild", action="store_true",
+                    help="recompile even letters whose PDF is already current")
     cl.add_argument("--coverletter-source", default=None, dest="coverletter_source",
                     help=f"template (default: {config.COVERLETTER_TEX})")
     cl.add_argument("--db", default=None)

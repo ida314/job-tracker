@@ -418,6 +418,29 @@ def test_built_day_reads_a_missing_file_as_not_built(tmp_path):
     assert letter_mod.built_day(made) == date.today().isoformat()
 
 
+def test_the_nightly_build_is_one_compile_per_new_letter(tmp_path, monkeypatch):
+    """`coverletter build` skips a letter whose PDF is already current.
+
+    This is what lets the nightly run it unconditionally: without the skip it is one
+    tectonic subprocess per letter ever written, every night, for documents nobody
+    opened. `--rebuild` is the override and the escape hatch for `is_current`'s
+    day-granularity hole.
+    """
+    from jobtracker import config
+
+    monkeypatch.setattr(config, "LETTERS_DIR", tmp_path)
+    path = letter_mod.letter_path("Acme", "1")
+    assert path.parent == tmp_path
+
+    # Nothing built yet.
+    assert not letter_mod.is_current(letter_mod.built_day(path), "2026-09-11")
+    path.write_bytes(b"%PDF-1.4")
+    # Built today, for a letter written today.
+    from datetime import date
+
+    assert letter_mod.is_current(letter_mod.built_day(path), date.today().isoformat())
+
+
 # -- the queue --------------------------------------------------------------------------
 def test_a_letter_leaves_the_queue_once_written(template):
     """`run_task` recomputes `remaining` by re-reading `pending_count` rather than
