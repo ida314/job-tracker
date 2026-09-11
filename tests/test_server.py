@@ -4082,6 +4082,59 @@ def test_the_download_cannot_be_walked_out_of_the_tailored_directory(tmp_path, m
     assert b"secret" not in sink.body
 
 
+def test_the_tex_copy_is_the_source_the_build_would_compile(tmp_path, monkeypatch):
+    """Through the router, so the route exists and not merely the method. The text is the
+    resume with the stored edits applied — the same derivation the `↓` compiles."""
+    db = _tailor_db(tmp_path)
+    _with_resume(monkeypatch)
+    h = _handler_for(db, config.CRITERIA_YAML)
+    h.path = "/api/tailored-tex?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h.do_GET()
+    assert sink.status == 200
+    res = json.loads(sink.body)
+    assert res["ok"] is True
+    assert res["tex"] == "line 0\nline 1\n tailored"
+    assert res["applied"] == 2
+
+
+def test_the_tex_copy_needs_no_tex_engine(tmp_path, monkeypatch):
+    """Tectonic is in the serve image only. Copying the source is how you get the
+    document on a machine that cannot compile it, so the engine is not asked for."""
+    db = _tailor_db(tmp_path)
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch, fmt=_FakeFormat(blocked="tectonic is not installed"))
+    h = _handler_for(db, config.CRITERIA_YAML)
+    h.path = "/api/tailored-tex?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h._send_tailored_tex()
+    assert json.loads(sink.body)["ok"] is True
+    assert started == []
+
+
+def test_the_tex_copy_refuses_in_words_and_puts_nothing_on_the_clipboard(tmp_path,
+                                                                        monkeypatch):
+    """A refusal is JSON with an error, never a body the page would copy as LaTeX."""
+    db = _tailor_db(tmp_path, resolution="dismissed")
+    _with_resume(monkeypatch)
+    h = _handler_for(db, config.CRITERIA_YAML)
+    h.path = "/api/tailored-tex?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h._send_tailored_tex()
+    res = json.loads(sink.body)
+    assert res["ok"] is False
+    assert "dismissed" in res["error"]
+    assert "tex" not in res
+
+
+def test_the_tex_copy_refuses_a_request_naming_no_posting(tmp_path):
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+    h.path = "/api/tailored-tex?company=Acme"
+    sink = _Sink().install(h)
+    h._send_tailored_tex()
+    assert sink.status == 400
+
+
 def test_adding_an_ordinary_posting_to_the_tracker_removes_it_from_the_queue(tmp_path):
     """What the "+ tracker" button does. It reuses the picks' own endpoint, so a job
     tracked from the All postings tab leaves tomorrow's ranking exactly as one tracked

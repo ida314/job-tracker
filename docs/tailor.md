@@ -316,6 +316,16 @@ under `$JOBTRACKER_TAILORED` is what "built" means. Pressing it POSTs to `/api/t
 which compiles on a daemon thread and answers `building` / `ready` / `error`; the page polls
 the same endpoint, which starts at most one build per posting.
 
+Beside the `↓`, in both of its states, is `tex`: it copies the LaTeX the PDF is compiled
+from to the clipboard. `GET /api/tailored-tex` is a pure read through
+`server._tailored_source`, the same helper the build endpoint calls, so the clipboard and
+the PDF agree on which edits landed and which are held. It asks for no TeX engine, which is
+what makes it useful on a machine without tectonic. `serve` is usually plain http on a
+tailnet address — not a secure context, so `navigator.clipboard` is absent — and the
+handler falls back to a hidden-textarea `execCommand('copy')`, saying so if the browser
+refuses both. One caveat: a PDF built before a keyword ruling is not rebuilt by a plain
+`↓`, while the copy is always derived now, so the two can differ until Finish rebuilds it.
+
 **This is not accepting.** A compile sends nothing to an employer and a downloaded PDF is a
 document you then read. Attaching one to an application is still `tailor build --attach`,
 after the diff has been read at `/apply`, which is where the reasoning is rendered.

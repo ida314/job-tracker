@@ -400,11 +400,17 @@ def test_both_things_that_compile_a_resume_ask_the_same_function():
     from jobtracker import cli, server
 
     build = inspect.getsource(cli.cmd_tailor)
-    endpoint = inspect.getsource(server.Handler._api_tailor_build)
-    for name, source in (("cmd_tailor", build), ("_api_tailor_build", endpoint)):
+    derive = inspect.getsource(server.Handler._tailored_source)
+    for name, source in (("cmd_tailor", build), ("_tailored_source", derive)):
         assert "split_edits(" in source, name
         # And neither re-implements the scan: no direct term matching in a compiler.
         assert "occurs(" not in source, name
+    # The server's two readers — the build and the LaTeX copy — share that one helper,
+    # so the clipboard and the PDF cannot disagree about which edits landed.
+    for method in (server.Handler._api_tailor_build, server.Handler._send_tailored_tex):
+        source = inspect.getsource(method)
+        assert "_tailored_source(" in source, method.__name__
+        assert "split_edits(" not in source, method.__name__
 
 
 # -- the dashboard's reading ---------------------------------------------------------

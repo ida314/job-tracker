@@ -257,6 +257,10 @@ proposed something, a chip and a way to get the compiled PDF.
 - **`resume.tailored_stem` / `tailored_path` are the single derivation.** Nothing stores the
   path; the file's existence is what "built" means. A second copy of that expression is how the
   button and the terminal come to mean different files.
+- **`tex` copies the source the `↓` compiles** — `GET /api/tailored-tex`, a pure read through
+  `server._tailored_source`, the one derivation `/api/tailor-build` also calls. It needs no TeX
+  engine. `serve` over tailnet http is not a secure context, so the handler falls back to
+  `execCommand('copy')`.
 - **`/api/tailor-build` is start and poll at once**, idempotent, one build per posting, and a
   failure is reported once then cleared. Everything knowable is decided before the thread exists,
   and a refusal **names the missing engine** — an exception on a daemon thread reaches the log

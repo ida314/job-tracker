@@ -923,6 +923,36 @@ def test_the_download_link_escapes_its_query_string():
     assert 'href="/api/tailored?company=A%26B%20%22Co%22&amp;job=x%2F1"' in panel
 
 
+def test_the_tex_copy_sits_beside_the_resume_download_in_both_states():
+    """The source is derived on request, not read off the PDF, so the copy is offered
+    whether or not the PDF has been built — and nowhere the `↓` is not."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    copy = 'class="tailor-tex" data-company="Acme" data-job="1"'
+    _suggest(conn, "Acme", "1", 2)
+    unbuilt = _all_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
+    assert copy in unbuilt
+    assert unbuilt.index('class="tailor-build"') < unbuilt.index(copy)
+
+    with mock.patch.object(dashboard, "_built_resumes",
+                           return_value={resume.tailored_stem("Acme", "1")}):
+        built = _all_panel(dashboard.build_dashboard(
+            conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
+    assert copy in built
+    assert built.index('class="tailor-dl"') < built.index(copy)
+
+    static = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22"))
+    assert "tailor-tex" not in static
+
+
+def test_a_dismissed_proposal_offers_no_tex_copy():
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _suggest(conn, "Acme", "1", 2, resolution="dismissed")
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                 interactive=True))
+    assert "tailor-tex" not in panel
+
+
 def test_the_actions_controls_have_their_handlers_on_the_page_that_renders_them():
     """The regression this repo already shipped: a button rendered by one file with its
     handler in another file's script, so every click did nothing at all."""
@@ -934,11 +964,11 @@ def test_the_actions_controls_have_their_handlers_on_the_page_that_renders_them(
     doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
                                     interactive=True)
     script = doc[doc.rindex("<script>"):doc.rindex("</script>")]
-    for cls in ("track", "tailor-build", "letter-build"):
+    for cls in ("track", "tailor-build", "tailor-tex", "letter-build"):
         assert f'class="{cls}"' in doc, cls
         assert f"button.{cls}" in script, cls
     for endpoint in ("/api/disposition", "/api/tailor-build", "/api/tailored",
-                     "/api/coverletter-build", "/api/coverletter"):
+                     "/api/tailored-tex", "/api/coverletter-build", "/api/coverletter"):
         assert endpoint in script, endpoint
     assert doc.count("<script>") == 1
 
@@ -1033,6 +1063,7 @@ def test_a_pick_offers_both_documents_like_the_rest_of_the_ranking():
     block = _docs_block(_picks_only(dashboard.build_dashboard(
         conn, companies, "2026-07-22", interactive=True)))
     assert 'class="tailor-build" data-company="Acme" data-job="1"' in block
+    assert 'class="tailor-tex" data-company="Acme" data-job="1"' in block
     assert 'class="letter-build" data-company="Acme" data-job="1"' in block
 
     with mock.patch.object(dashboard, "_built_resumes",

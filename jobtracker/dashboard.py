@@ -294,6 +294,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
     cursor: pointer; text-decoration: none; }
 .pick .docs button:hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); }
 .pick .docs button[disabled] { opacity: .5; cursor: default; }
+.pick .docs .tailor-tex { margin-left: 4px; }
 
 /* The rest of the ranking. A <details>, so it opens with no script at all — and not a
    table, so the filter JS can never reach into the Today tab. */
@@ -339,7 +340,7 @@ td.act { text-align: right; }
 .act button:hover, .act a.tailor-dl:hover, .act a.letter-dl:hover {
     color: var(--ink); border-color: var(--ink-2); }
 .act button[disabled] { opacity: .5; cursor: default; }
-.act .tailor-build, .act a.tailor-dl,
+.act .tailor-build, .act a.tailor-dl, .act .tailor-tex,
 .act .letter-build, .act a.letter-dl { margin-right: 5px; }
 
 /* -- grouped tables ------------------------------------------------------------------
@@ -846,6 +847,61 @@ _JS = """
     b.disabled = true;
     b.textContent = '…';
     ask(b, kind, Date.now());
+  });
+
+  // "tex" -> the tailored resume's LaTeX on the clipboard. A GET, because it is a read:
+  // nothing is compiled and nothing is written.
+  //
+  // The async clipboard API exists only in a secure context, and `serve` is usually
+  // reached over plain http on a tailnet address, which is not one. So the fallback is
+  // the old hidden-textarea copy, which still works there as long as it runs close
+  // enough to the click to count as one. If both are refused the page says so rather
+  // than claiming "copied" over an empty clipboard.
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var t = document.createElement('textarea');
+      t.value = text;
+      t.setAttribute('readonly', '');
+      t.style.position = 'fixed';
+      t.style.opacity = '0';
+      document.body.appendChild(t);
+      t.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+      t.remove();
+      if (ok) { resolve(); } else { reject(new Error('refused')); }
+    });
+  }
+
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('button.tailor-tex') : null;
+    if (!b || b.disabled) return;
+    function reset() { b.disabled = false; b.textContent = 'tex'; }
+    b.disabled = true;
+    b.textContent = '…';
+    fetch('/api/tailored-tex?company=' + encodeURIComponent(b.dataset.company)
+          + '&job=' + encodeURIComponent(b.dataset.job), {cache: 'no-store'})
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (!res.ok) {
+          reset();
+          alert(res.error || 'could not derive the LaTeX');
+          return;
+        }
+        return copyText(res.tex).then(function () {
+          b.textContent = 'copied';
+          setTimeout(reset, 1500);
+        }, function () {
+          reset();
+          alert('the browser refused to let this page write to the clipboard');
+        });
+      }).catch(function () {
+        reset();
+        alert('could not reach the server');
+      });
   });
 })();
 
@@ -1400,26 +1456,34 @@ def _proposal(suggestions, key) -> tuple[int, str]:
 
 
 def _tailor_control(row, state, built) -> str:
-    """The `↓`: a build button until the tailored PDF exists, a download link after.
+    """The `↓` — a build button until the tailored PDF exists, a download link after —
+    and beside it `tex`, which copies the LaTeX that PDF is compiled from.
 
     One rendering for both places it appears — the actions cell and a pick's documents
     line — so the classes the delegated handler in `_JS` selects cannot drift between
     them. Nothing for a dismissed proposal, which is a decision you made rather than work
     waiting. Callers decide the all-held case, because each says it differently.
+
+    `tex` renders in both of the `↓`'s states: the source is derived on request, not read
+    off the built file, so it needs neither a build nor a TeX engine.
     """
     if state == "dismissed":
         return ""
+    c = html.escape(row["company"], quote=True)
+    j = html.escape(row["ats_job_id"], quote=True)
+    copy = (
+        f'<button class="tailor-tex" data-company="{c}" data-job="{j}" '
+        'title="Copy the tailored resume&#39;s LaTeX source">tex</button>'
+    )
     if _track_cell_built(row, built):
         return (
             f'<a class="tailor-dl" href="/api/tailored?company={_q(row["company"])}'
             f'&amp;job={_q(row["ats_job_id"])}" '
-            'title="Download the tailored resume" download>&darr;</a>'
+            'title="Download the tailored resume" download>&darr;</a>' + copy
         )
-    c = html.escape(row["company"], quote=True)
-    j = html.escape(row["ats_job_id"], quote=True)
     return (
         f'<button class="tailor-build" data-company="{c}" data-job="{j}" '
-        'title="Build the tailored resume">&darr;</button>'
+        'title="Build the tailored resume">&darr;</button>' + copy
     )
 
 

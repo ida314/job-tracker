@@ -2349,6 +2349,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_preview()
             elif path == "/api/tailored":
                 self._send_tailored()
+            elif path == "/api/tailored-tex":
+                self._send_tailored_tex()
             elif path == "/api/coverletter":
                 self._send_coverletter()
             else:
@@ -3806,6 +3808,92 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send_bytes(blob, "application/pdf", filename=path.name)
 
+    def _tailored_source(self, company: str, job_id: str) -> tuple[dict | None, dict | None]:
+        """The LaTeX `tailor build` would compile for one posting: `(source, None)`, or
+        `(None, refusal)` naming why there is nothing to compile.
+
+        Shared by the build endpoint and the copy route, so the text on your clipboard and
+        the PDF behind the `↓` are one derivation — a second copy of it is how the button
+        and the terminal come to mean different documents. It stops short of asking for a
+        TeX engine: copying the source needs none, and that is half of why you would copy
+        it.
+
+        `source` carries `fmt`, `tex`, `applied` (edits that landed), and `waiting` /
+        `terms` for edits held on a keyword decision.
+        """
+        conn = self._conn()
+        try:
+            row = store.get_suggestions(conn, company, job_id)
+        finally:
+            conn.close()
+        if row is None:
+            return None, {"ok": False,
+                          "error": "tailor has not proposed anything for this job"}
+        if row["resolution"] == "dismissed":
+            return None, {"ok": False,
+                          "error": "these suggestions are dismissed — they come back when "
+                                   "the resume changes"}
+
+        from .cli import _load_resume
+
+        text, fmt, _digest = _load_resume()
+        if text is None or fmt is None:
+            return None, {"ok": False,
+                          "error": f"no resume source at {config.RESUME_TEX} — write one, "
+                                   "or set $JOBTRACKER_RESUME_TEX"}
+        try:
+            edits = [resume_mod.Edit(**e) for e in json.loads(row["edits"] or "[]")]
+        except (TypeError, ValueError) as exc:
+            return None, {"ok": False,
+                          "error": f"the stored suggestions did not parse: {exc}"}
+
+        # Edits leaning on a technology you have not ruled on are held out of the
+        # compile. `split_edits` is the shared derivation — the CLI runs the same one, so
+        # the button and the terminal cannot mean different documents.
+        keywords, kw_error = self._keywords()
+        if kw_error:
+            return None, {"ok": False, "error": kw_error}
+        edits, waiting = kw_mod.split_edits(edits, store.flags_of(row), keywords)
+        terms = sorted({t for _e, ts in waiting for t in ts})
+        if not edits:
+            if waiting:
+                # Named, because "no edits apply" would send you to re-run the model over
+                # a proposal that is fine and waiting on you.
+                return None, {"ok": False,
+                              "error": f"every edit here is waiting on a keyword decision "
+                                       f"({', '.join(terms)}) — rule on them under Settings"}
+            return None, {"ok": False, "error": "there are no edits to compile"}
+
+        tailored, applied = fmt.apply_edits(text, edits)
+        if not applied:
+            # The resume moved under a proposal made against an older version of it.
+            return None, {"ok": False,
+                          "error": f"none of {len(edits)} edit(s) still apply — re-run "
+                                   "`jobtracker work --task tailor`"}
+        return {"fmt": fmt, "tex": tailored, "applied": applied,
+                "waiting": waiting, "terms": terms}, None
+
+    def _send_tailored_tex(self) -> None:
+        """One posting's tailored resume as LaTeX, for the page's copy button.
+
+        A GET and a pure read: nothing is compiled, written or accepted, and no engine is
+        needed — which is why it answers on a machine without tectonic, where the `↓`
+        cannot. JSON rather than `text/plain` so a refusal arrives in words the page can
+        show instead of as a body it would put on your clipboard.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        company = (query.get("company") or [""])[0]
+        job_id = (query.get("job") or [""])[0]
+        if not company or not job_id:
+            self._send_json({"ok": False, "error": "company and job are required"}, 400)
+            return
+        source, refusal = self._tailored_source(company, job_id)
+        if refusal:
+            self._send_json(refusal)
+            return
+        self._send_json({"ok": True, "tex": source["tex"], "applied": source["applied"],
+                         "held": len(source["waiting"]), "held_terms": source["terms"]})
+
     def _send_coverletter(self) -> None:
         """Hand over one posting's cover letter, if `coverletter build` has made it.
 
@@ -4022,53 +4110,11 @@ class Handler(BaseHTTPRequestHandler):
                 del _BUILDS[key]
                 return {"ok": True, "state": "error", "error": state}
 
-        conn = self._conn()
-        try:
-            row = store.get_suggestions(conn, company, job_id)
-        finally:
-            conn.close()
-        if row is None:
-            return {"ok": False, "error": "tailor has not proposed anything for this job"}
-        if row["resolution"] == "dismissed":
-            return {"ok": False,
-                    "error": "these suggestions are dismissed — they come back when the "
-                             "resume changes"}
-
-        from .cli import _load_resume
-
-        text, fmt, _digest = _load_resume()
-        if text is None or fmt is None:
-            return {"ok": False,
-                    "error": f"no resume source at {config.RESUME_TEX} — write one, or "
-                             "set $JOBTRACKER_RESUME_TEX"}
-        try:
-            edits = [resume_mod.Edit(**e) for e in json.loads(row["edits"] or "[]")]
-        except (TypeError, ValueError) as exc:
-            return {"ok": False, "error": f"the stored suggestions did not parse: {exc}"}
-
-        # Edits leaning on a technology you have not ruled on are held out of the
-        # compile. `split_edits` is the shared derivation — the CLI runs the same one, so
-        # the button and the terminal cannot mean different documents.
-        keywords, kw_error = self._keywords()
-        if kw_error:
-            return {"ok": False, "error": kw_error}
-        edits, waiting = kw_mod.split_edits(edits, store.flags_of(row), keywords)
-        terms = sorted({t for _e, ts in waiting for t in ts})
-        if not edits:
-            if waiting:
-                # Named, because "no edits apply" would send you to re-run the model over
-                # a proposal that is fine and waiting on you.
-                return {"ok": False,
-                        "error": f"every edit here is waiting on a keyword decision "
-                                 f"({', '.join(terms)}) — rule on them under Settings"}
-            return {"ok": False, "error": "there are no edits to compile"}
-
-        tailored, applied = fmt.apply_edits(text, edits)
-        if not applied:
-            # The resume moved under a proposal made against an older version of it.
-            return {"ok": False,
-                    "error": f"none of {len(edits)} edit(s) still apply — re-run "
-                             "`jobtracker work --task tailor`"}
+        source, refusal = self._tailored_source(company, job_id)
+        if refusal:
+            return refusal
+        fmt, tailored, applied = source["fmt"], source["tex"], source["applied"]
+        waiting, terms = source["waiting"], source["terms"]
 
         blocked = fmt.unavailable_reason()
         if blocked:
