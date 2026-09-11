@@ -330,11 +330,6 @@ td.act { text-align: right; }
 .act button[disabled] { opacity: .5; cursor: default; }
 .act .tailor-build, .act a.tailor-dl,
 .act .letter-build, .act a.letter-dl { margin-right: 5px; }
-/* The cover letter's chip, beside the resume's. Its own class only so the glyph and the
-   hover text can differ — a letter is a document written for this posting, where the
-   resume chip counts edits proposed to a document you already had. */
-.act .lchip { display: inline-block; font-size: 11px; color: var(--muted);
-              vertical-align: middle; margin-right: 5px; }
 
 /* -- grouped tables ------------------------------------------------------------------
    Rows render visible and JS collapses them on load — the `.tabs` rule applied to
