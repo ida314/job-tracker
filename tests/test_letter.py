@@ -389,6 +389,35 @@ def test_the_stem_cannot_carry_a_separator_out_of_a_company_name():
     assert "/" not in stem and ".." not in stem
 
 
+# -- a built letter, and whether it is still the letter ---------------------------------
+def test_a_rebuilt_letter_makes_the_old_pdf_stale():
+    """"The file exists" and "the file is the letter the page describes" are two
+    questions, and conflating them hands you yesterday's PDF.
+
+    Editing the template re-keys every posting and `work` writes new paragraphs. The PDF
+    beside them is then a document nothing in the database still claims — and a download
+    link over it is the one way this feature could give you a letter that disagrees with
+    the one you were shown.
+    """
+    assert letter_mod.is_current("2026-09-11", "2026-09-11")
+    assert letter_mod.is_current("2026-09-12", "2026-09-11")
+    assert not letter_mod.is_current("2026-09-10", "2026-09-11")
+    # Never built at all.
+    assert not letter_mod.is_current("", "2026-09-11")
+    # A row from before this comparison existed has nothing to compare against, and must
+    # not rebuild forever.
+    assert letter_mod.is_current("2026-09-10", "")
+
+
+def test_built_day_reads_a_missing_file_as_not_built(tmp_path):
+    assert letter_mod.built_day(tmp_path / "nope.pdf") == ""
+    made = tmp_path / "x.pdf"
+    made.write_bytes(b"%PDF-1.4")
+    from datetime import date
+
+    assert letter_mod.built_day(made) == date.today().isoformat()
+
+
 # -- the queue --------------------------------------------------------------------------
 def test_a_letter_leaves_the_queue_once_written(template):
     """`run_task` recomputes `remaining` by re-reading `pending_count` rather than

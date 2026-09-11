@@ -1276,19 +1276,25 @@ def _built_resumes() -> set[str]:
         return set()
 
 
-def _built_letters() -> set[str]:
-    """Every cover letter already on disk, by stem, listed once per page.
+def _built_letters() -> dict:
+    """Every cover letter on disk, as `{stem: the ISO day it was built}`.
 
-    A `stat` per row would be thousands of them on these tables — `_built_resumes`'
-    reason, and the same reading of a missing directory: a machine that has never run
-    `coverletter build` has none, which means "nothing is built" rather than an error.
+    A dict where `_built_resumes` returns a set, because the question here has a second
+    half: a letter is rewritten whenever the template moves, and the PDF beside it is
+    then a document nothing still claims. The day comes off the same directory listing —
+    one pass, not a `stat` per row, which on these tables would be thousands.
+
+    A missing directory is a machine that has never run `coverletter build`. That reads
+    as "nothing is built" rather than as an error, which is exactly what it means.
     """
     from . import config
+    from . import letter as letter_mod
 
     try:
-        return {path.stem for path in config.LETTERS_DIR.glob("*.pdf")}
+        return {p.stem: letter_mod.built_day(p)
+                for p in config.LETTERS_DIR.glob("*.pdf")}
     except OSError:
-        return set()
+        return {}
 
 
 def _track_cell(row, tracked=None, suggestions=None, built=None, held=None,
@@ -1379,8 +1385,9 @@ def _track_cell(row, tracked=None, suggestions=None, built=None, held=None,
     #
     # The glyph is an envelope rather than a second arrow. Two identical `↓` on one row
     # is a cell you have to hover to read, and these fetch different documents.
-    if (letters or {}).get(key) is not None:
-        if _letter_built(row, letters_built):
+    letter_row = (letters or {}).get(key)
+    if letter_row is not None:
+        if _letter_built(row, letters_built, letter_row):
             bits.append(
                 f'<a class="letter-dl" href="/api/coverletter?company={_q(row["company"])}'
                 f'&amp;job={_q(row["ats_job_id"])}" '
@@ -1415,17 +1422,28 @@ def _track_cell_built(row, built) -> bool:
     return resume_mod.tailored_stem(row["company"], row["ats_job_id"]) in built
 
 
-def _letter_built(row, letters_built) -> bool:
-    """Whether that posting's cover letter is already on disk.
+def _letter_built(row, letters_built, letter_row=None) -> bool:
+    """Whether that posting's cover letter is on disk AND is the one described here.
 
-    Against a set of stems listed once by `build_dashboard`, not a `stat` per row —
+    Against the mapping `build_dashboard` listed once, not a `stat` per row —
     `_track_cell_built`'s reason, and these tables carry thousands of postings.
+
+    The second half is why this is not a set membership test. Edit the template and the
+    paragraphs are rewritten; the PDF from before is still there, and rendering a
+    download link over it would hand you a letter that disagrees with the one the page is
+    describing. Stale reads as "not built", so the cell offers the build button — which
+    is both true and the thing that fixes it.
     """
     from . import letter as letter_mod
 
     if not letters_built:
         return False
-    return letter_mod.letter_stem(row["company"], row["ats_job_id"]) in letters_built
+    stem = letter_mod.letter_stem(row["company"], row["ats_job_id"])
+    if stem not in letters_built:
+        return False
+    return letter_mod.is_current(
+        letters_built[stem], (letter_row["written_at"] if letter_row else "")
+    )
 
 
 def _q(value: str) -> str:

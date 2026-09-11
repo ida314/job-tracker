@@ -970,12 +970,36 @@ def test_a_built_letter_renders_a_download_and_not_a_build_button():
     conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
     _letter(conn, "Acme", "1")
     stem = letter_mod.letter_stem("Acme", "1")
-    with mock.patch.object(dashboard, "_built_letters", return_value={stem}):
+    with mock.patch.object(dashboard, "_built_letters",
+                           return_value={stem: "2026-07-22"}):
         panel = _all_panel(dashboard.build_dashboard(
             conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
     assert 'class="letter-dl"' in panel
     assert "letter-build" not in panel
     assert "/api/coverletter?company=Acme&amp;job=1" in panel
+
+
+def test_a_stale_letter_pdf_offers_the_build_button_not_a_download():
+    """A template edit rewrites the paragraphs and leaves the old PDF on disk. Rendering
+    a download over it would hand you a letter that disagrees with the page describing
+    it, so stale reads as "not built" — which is true, and offers the thing that fixes
+    it."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _letter(conn, "Acme", "1")          # written_at = 2026-07-22
+    stem = letter_mod.letter_stem("Acme", "1")
+
+    with mock.patch.object(dashboard, "_built_letters",
+                           return_value={stem: "2026-07-21"}):
+        stale = _all_panel(dashboard.build_dashboard(
+            conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
+    assert 'class="letter-build"' in stale
+    assert "letter-dl" not in stale
+
+    with mock.patch.object(dashboard, "_built_letters",
+                           return_value={stem: "2026-07-22"}):
+        fresh = _all_panel(dashboard.build_dashboard(
+            conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
+    assert 'class="letter-dl"' in fresh
 
 
 def test_the_letter_column_exists_only_under_serve():
@@ -995,7 +1019,8 @@ def test_the_two_documents_never_share_a_download_url():
     with mock.patch.object(dashboard, "_built_resumes",
                            return_value={resume.tailored_stem("Acme", "1")}), \
          mock.patch.object(dashboard, "_built_letters",
-                           return_value={letter_mod.letter_stem("Acme", "1")}):
+                           return_value={letter_mod.letter_stem("Acme", "1"):
+                                         "2026-07-22"}):
         panel = _all_panel(dashboard.build_dashboard(
             conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
     assert "/api/tailored?company=Acme&amp;job=1" in panel
