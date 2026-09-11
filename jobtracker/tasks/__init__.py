@@ -12,8 +12,10 @@ so "work the next available task" and "keep every stage drained" are one instruc
 
     inbox   40   read replies from employers -> proposes application updates
     tailor  50   propose resume edits for a match -> proposes, and stops
+    cover-  60   write a cover letter for a match -> writes a draft, and stops
+    letter
 
-The last two are outside that chain and say so rather than pretending otherwise.
+The last three are outside that chain and say so rather than pretending otherwise.
 
 `inbox` consumes nothing the others produce. It goes after them because its queue refills
 from an external stream on its own schedule, so anywhere earlier a busy mailbox would
@@ -23,6 +25,13 @@ starve the pipeline's own stages.
 nothing, and it goes last on the same starvation argument turned up one notch: its unit
 key is a hash of your resume, so editing one line of that re-keys **every** posting at
 once. Ahead of `inbox`, one save would push a mailbox behind several hundred units.
+
+`coverletter` is last on that argument turned up one notch again. Its unit key hashes the
+*template* as well as the resume, so it is re-keyed by two documents rather than one, and
+it is the most expensive unit in the queue — a page of composed prose against a resume
+and a description, where `tailor` returns a handful of lines. It also consumes nothing
+`tailor` produces: the two read the same scored matches and neither waits on the other,
+so the order between them is a cost argument and nothing more.
 
 **A task can be switched off**, in plugins.yaml — see `plugins/roles.py`. The switch is
 enablement only: `survey()` takes the enabled set as an argument, this package never reads
@@ -51,6 +60,7 @@ from . import level  # noqa: F401  (side effect: register())
 from . import judge  # noqa: F401  (side effect: register())
 from . import inbox  # noqa: F401  (side effect: register())
 from . import tailor  # noqa: F401  (side effect: register())
+from . import coverletter  # noqa: F401  (side effect: register())
 from .runner import (  # noqa: F401
     DEFAULT_CONCURRENCY,
     Candidate,

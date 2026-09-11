@@ -121,6 +121,26 @@ RESUMES_DIR = Path(os.environ.get("JOBTRACKER_RESUMES", ROOT / "data" / "resumes
 # output a diff you can read. Absent is a normal state: `tailor` reports itself unavailable.
 RESUME_TEX = Path(os.environ.get("JOBTRACKER_RESUME_TEX", ROOT / "resume.tex"))
 
+# Your cover-letter template, as LaTeX. Curated and personal like the resume beside it,
+# and read the same way: a file you wrote that the pipeline only ever reads.
+#
+# It is a template rather than a prompt, and that is the design. The paragraphs the model
+# writes are the ones this file marks out — a `%` comment saying what a paragraph should
+# do, followed by placeholder prose in capitals — so changing what the letter argues is
+# an edit to this document, in LaTeX, with no second configuration file to keep in step.
+# Everything outside `\begin{document}` is out of any slot's reach, which is what keeps
+# your name, your contact details and the page geometry yours. See jobtracker/letter.py.
+#
+# Absent is a normal state: `coverletter` reports itself unavailable and the rest of the
+# queue runs.
+COVERLETTER_TEX = Path(
+    os.environ.get("JOBTRACKER_COVERLETTER_TEX", ROOT / "coverletter.tex")
+)
+
+# Where a cover letter is assembled. Generated state, so it goes under ./data beside the
+# tailored resumes — nothing here is authored by hand and deleting it costs a rebuild.
+LETTERS_DIR = Path(os.environ.get("JOBTRACKER_LETTERS", ROOT / "data" / "letters"))
+
 # Which technologies `tailor` is allowed to write onto your resume. Curated like the
 # three above, and written by the Settings page on a click you made — the same standing
 # as companies.yaml, which /companies appends to.

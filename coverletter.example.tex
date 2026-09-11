@@ -1,0 +1,156 @@
+%-------------------------------------------------------------------------------------
+% Cover letter template — the tracked example.
+%
+% Copy this to $JOBTRACKER_COVERLETTER_TEX (default: coverletter.tex beside the resume;
+% on a deployed box, /data/coverletter.tex), put your own details in, and edit the briefs.
+% The real file is gitignored, like answers.yaml and resume.tex — it carries your name,
+% your email and your phone.
+%
+% HOW A SLOT WORKS. `coverletter` writes the paragraphs this file marks out, and it finds
+% them the way the file already reads:
+%
+%     a run of %% comment lines   ->  the BRIEF, handed to the model verbatim
+%     followed by prose with a    ->  the PLACEHOLDER, replaced by what it writes
+%     PLACEHOLDER IN CAPITALS
+%
+% So you steer the letter by editing this document, in LaTeX, with no second config file
+% to keep in step. Rewrite a brief and that paragraph is argued differently — and because
+% the template's hash is half the task's unit key, every posting is asked again.
+%
+% Three rules fall out of that, and they are worth knowing before you edit:
+%
+%   * PROSE WITH NO PLACEHOLDER IS NOT A SLOT. The closing below carries a comment and no
+%     capitals, so it is fixed text and is passed through byte for byte. That is how you
+%     pin a sentence you always want said exactly one way.
+%   * EVERYTHING OUTSIDE \begin{document} IS OUT OF REACH. Your name, your contact line,
+%     the packages and the page geometry cannot be addressed by any slot.
+%   * COMPANY, JOB TITLE and DATE ARE FILLED IN FROM THE APPLICATION RECORD, wherever they
+%     appear. The model is never asked for them and is told not to write them.
+%
+% The model writes PLAIN TEXT. Every reserved character it returns is escaped before it
+% reaches this document, the backslash included, so nothing it writes can be a command.
+% See jobtracker/letter.py and docs/coverletter.md.
+%-------------------------------------------------------------------------------------
+
+\documentclass[letterpaper,11pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+
+% Guarded because these two are pdfTeX primitives that XeTeX does not have, and the
+% engine this repo compiles with is tectonic. Unguarded, EVERY build dies at
+% `glyphtounicode:7: Undefined control sequence` with no PDF — which reads as a broken
+% feature rather than as a template that names a primitive its engine lacks. Text still
+% extracts from a tectonic build without it, so ATS parsability is not lost.
+\ifdefined\pdfgentounicode\input{glyphtounicode}\fi
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Margins
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-.5in}
+\addtolength{\textheight}{1.0in}
+
+\urlstyle{same}
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+\ifdefined\pdfgentounicode\pdfgentounicode=1\fi
+
+% Letter spacing
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% ----- Applicant information — yours, and out of every slot's reach -----
+\newcommand{\YourName}{YOUR NAME}
+\newcommand{\YourContact}{
+you@example.com \, $|$ \,
+github.com/yourhandle \, $|$ \,
+linkedin.com/in/yourhandle \, $|$ \,
++1 555-555-5555
+}
+
+% ----- Filled in from the application record, not by the model -----
+\newcommand{\RecipientName}{COMPANY Recruiting Team}
+\newcommand{\RecipientOrg}{COMPANY}
+\newcommand{\LetterDate}{DATE}
+\newcommand{\LetterSubject}{Re: JOB TITLE}
+\newcommand{\LetterGreeting}{Dear COMPANY team,}
+\newcommand{\LetterSignoff}{Best,}
+
+\begin{document}
+
+% ----- Header -----
+\begin{center}
+    \textbf{\Huge \scshape \YourName} \\ \vspace{2pt}
+    \small \YourContact
+\end{center}
+
+% ----- Recipient block -----
+\RecipientName \\
+\RecipientOrg \\
+\LetterDate
+
+\vspace{10pt}
+\textbf{\LetterSubject}
+
+\vspace{6pt}
+\LetterGreeting
+
+% Paragraph 1:
+% Briefly state the role being applied for and why it is a strong fit.
+% Introduce the most relevant theme from the candidate's background.
+% Keep this specific to the company and role without excessive praise
+% or generic statements about being "passionate" or "excited."
+I'm applying for the JOB TITLE role at COMPANY. My recent work has focused on RELEVANT AREA OR THEME, particularly RELEVANT TECHNICAL EXPERIENCE. The role stood out to me because of its focus on SPECIFIC RESPONSIBILITY, SYSTEM, PRODUCT, OR ENGINEERING PROBLEM FROM THE JOB POSTING.
+
+% Paragraph 2:
+% Use the strongest and most directly relevant professional experience.
+% Select one or two concrete accomplishments from the resume.
+% Explain what was built, the candidate's level of ownership, and the
+% technical or operational outcome. Prefer evidence and specifics over
+% a list of technologies.
+In my work at MOST RELEVANT COMPANY OR EXPERIENCE, I MOST RELEVANT ACCOMPLISHMENT. I ALSO RELEVANT SECOND ACCOMPLISHMENT OR TECHNICAL RESPONSIBILITY. This work gave me hands-on experience with SKILLS OR ENGINEERING CONCERNS THAT DIRECTLY MAP TO THE ROLE.
+
+% Paragraph 3:
+% Connect another relevant experience, project, or skill to the broader
+% responsibilities of the role. Focus on engineering mindset, platform
+% thinking, reliability, observability, developer tooling, distributed
+% systems, or another theme emphasized in the posting.
+% Do not simply repeat resume bullets.
+I'm also interested in the broader engineering problems around RELEVANT ROLE THEME. Through SECOND EXPERIENCE OR PROJECT, I RELEVANT ACCOMPLISHMENT OR RESPONSIBILITY. That experience shaped how I think about RELEVANT ENGINEERING PRINCIPLE, especially when building systems intended to be reliable, reusable, and easy for other engineers to work with.
+
+% Paragraph 4:
+% Close the fit argument by connecting the candidate's experience to what
+% the team is building. Mention one or two concrete aspects of the role or
+% company. Keep the tone grounded and forward-looking.
+I'd be interested in bringing that experience to COMPANY and contributing to SPECIFIC TEAM, PLATFORM, PRODUCT, OR TECHNICAL AREA. The opportunity to work on RELEVANT RESPONSIBILITY FROM JOB POSTING is especially aligned with the kind of engineering work I want to continue developing.
+
+% Closing:
+% Keep this short. Do not add exaggerated enthusiasm or repeat the letter.
+%
+% No placeholder, so this is NOT a slot — it is fixed text and comes through byte for
+% byte. Every letter closes with exactly this sentence.
+Thank you for your consideration. I'd welcome the opportunity to discuss the role further.
+
+\vspace{10pt}
+\LetterSignoff\\[4pt]
+\YourName
+
+\end{document}
