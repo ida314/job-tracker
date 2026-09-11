@@ -99,6 +99,18 @@ _ESCAPE_RE = re.compile("|".join(re.escape(c) for c in _ESCAPES))
 
 _WS = re.compile(r"\s+")
 
+# How a model elides: three-or-more dots, or the single ellipsis character.
+_ELLIPSIS = re.compile(r"\s*(?:\.{3,}|\u2026)\s*")
+
+# A fragment shorter than this is not evidence of anything — "the", "and", "a team" occur
+# in every document ever written, so accepting one would turn an elided quote into a
+# substring lottery rather than a grounding check.
+_MIN_FRAGMENT = 12
+
+# And the fragments together have to amount to a quote. One 12-character match plus one
+# more is still thin; this is the floor on the whole thing.
+MIN_QUOTE_CHARS = 30
+
 
 class TemplateError(ValueError):
     """The template cannot be used, phrased for the person who has to fix it."""
@@ -163,6 +175,56 @@ def escape_text(text: str) -> str:
 def flat(text: str) -> str:
     """Whitespace-normalized, for containment checks. The helper `inbox` and `tailor` use."""
     return _WS.sub(" ", (text or "")).strip()
+
+
+def grounded_in(quote: str, *sources) -> Optional[str]:
+    """The name of the source document containing `quote`, or None.
+
+    `sources` are `(name, text)` pairs, tried in order. A cover letter has two documents
+    it may draw on — the posting for a claim about the role, the resume for one about the
+    candidate — and which one a quote came from is worth keeping, so this returns the name
+    rather than a bool.
+
+    **An elided quote counts, if every fragment of it is real.** Measured against the live
+    corpus: the model reliably writes good letters and then quotes like
+
+        "We build programmable financial infrastructure... We maintain"
+
+    joining two non-contiguous spans with an ellipsis. That is a quoting *style*, not a
+    fabrication — both halves are in the posting — but a plain containment test rejects it,
+    and because a letter is all-or-nothing one elided quote costs the whole letter. Stripe's
+    New Grad req failed three nights running on exactly this and was set aside.
+
+    So an ellipsis splits the quote and **every** fragment must occur in the *same* source.
+    That keeps what grounding is for: the claim "this paragraph is answering something
+    really written down" survives, because each piece is still verbatim and still from one
+    document. Two bounds stop it degrading into a substring lottery — a fragment under
+    `_MIN_FRAGMENT` chars is not evidence of anything, and the fragments together must
+    reach `MIN_QUOTE_CHARS`.
+
+    The prompt also asks for a short contiguous phrase, which is where most of the fix
+    is. This is the half that does not depend on being obeyed.
+    """
+    needle = flat(quote)
+    if not needle:
+        return None
+    pairs = [(name, flat(text)) for name, text in sources]
+
+    for name, text in pairs:
+        if needle in text:
+            return name
+
+    parts = [p for p in (bit.strip() for bit in _ELLIPSIS.split(needle)) if p]
+    if len(parts) < 2:
+        return None
+    if any(len(p) < _MIN_FRAGMENT for p in parts):
+        return None
+    if sum(len(p) for p in parts) < MIN_QUOTE_CHARS:
+        return None
+    for name, text in pairs:
+        if all(p in text for p in parts):
+            return name
+    return None
 
 
 def parse(text: str) -> Template:
