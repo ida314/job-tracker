@@ -100,6 +100,11 @@ Return one entry per paragraph, each with:
   real sentence this paragraph is answering. If you cannot copy one, you have nothing to
   say in that paragraph and the letter will be discarded.
 
+Copy a SHORT, CONTIGUOUS run of words for `evidence` — one clause is plenty. Do NOT join
+two separate parts of a sentence with "..." and do not tidy up the wording. It is checked
+against the document character for character, and the whole letter is thrown away if it
+does not match.
+
 WRITE PLAIN TEXT ONLY. No LaTeX, no markdown, no backslash commands, no formatting marks
 of any kind. Write the sentences a person would read aloud. Anything else is escaped into
 literal characters and will appear in the letter as the symbols you typed.
@@ -167,7 +172,7 @@ def parse_letter(
     1. not JSON, or `paragraphs` is not a list        -> no answer
     2. a key the template did not declare             -> drop that entry
     3. `text` empty, or longer than a paragraph       -> no answer
-    4. `evidence` absent from BOTH source documents   -> no answer
+    4. `evidence` in neither source document          -> no answer
     5. `text` carrying a term you have DENIED         -> no answer
     6. a slot the template declared and nothing filled -> no answer
 
@@ -200,8 +205,6 @@ def parse_letter(
 
     keywords = keywords if keywords is not None else kw_mod.Keywords()
     wanted = set(template.keys)
-    flat_description = letter_mod.flat(description)
-    flat_resume = letter_mod.flat(resume_text)
 
     kept: dict = {}
     for item in raw:
@@ -220,13 +223,10 @@ def parse_letter(
         # — and `_flat` on both sides, because a quote that survives a line wrap is still
         # a quote.
         evidence = letter_mod.flat(str(item.get("evidence") or ""))
-        if not evidence:
-            return None
-        if evidence in flat_description:
-            source = "description"
-        elif evidence in flat_resume:
-            source = "resume"
-        else:
+        source = letter_mod.grounded_in(
+            evidence, ("description", description), ("resume", resume_text)
+        )
+        if source is None:
             return None
 
         # A technology you ruled out, in prose about to be compiled and sent. Refused

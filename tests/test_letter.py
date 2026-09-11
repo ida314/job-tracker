@@ -288,6 +288,55 @@ def test_evidence_may_be_grounded_in_the_resume_or_the_description(template):
     assert {p.source for p in out.paragraphs} == {"description", "resume"}
 
 
+def test_an_elided_quote_counts_when_every_fragment_is_real():
+    """The failure that set Stripe's New Grad req aside for three nights.
+
+    The model writes a good letter and then quotes like "We build programmable financial
+    infrastructure... We maintain" — two real, non-contiguous spans joined by an ellipsis.
+    That is a quoting style, not a fabrication, and a plain containment test rejects it;
+    because a letter is all-or-nothing, one elided quote cost the entire letter.
+
+    Each fragment still has to be verbatim and still has to come from the SAME document,
+    so what grounding is for survives: the paragraph is answering something really
+    written down.
+    """
+    source = ("description",
+              "We build programmable financial infrastructure for the internet. "
+              "We maintain a large distributed system handling millions of requests.")
+    assert letter_mod.grounded_in(
+        "We build programmable financial infrastructure... We maintain a large "
+        "distributed system", source) == "description"
+    # The single-character ellipsis too.
+    assert letter_mod.grounded_in(
+        "We build programmable financial\u2026 a large distributed system", source
+    ) == "description"
+
+
+def test_an_elided_quote_is_not_a_substring_lottery():
+    """Two bounds keep the relaxation from becoming "some words appear somewhere".
+
+    A fragment shorter than `_MIN_FRAGMENT` is not evidence of anything — "the" and "and"
+    occur in every document ever written — and the fragments together have to amount to a
+    quote at all.
+    """
+    source = ("description", "We build programmable financial infrastructure for teams.")
+    # Fragments too short to mean anything.
+    assert letter_mod.grounded_in("We...for...teams", source) is None
+    # Long enough individually, but one of them is simply not there.
+    assert letter_mod.grounded_in(
+        "We build programmable... an entirely invented clause here", source) is None
+    # Real fragments, but not enough of them to be a quote.
+    assert letter_mod.MIN_QUOTE_CHARS == 30
+
+
+def test_fragments_must_come_from_one_document():
+    """A quote stitched across the posting and the resume is not a quote from either."""
+    assert letter_mod.grounded_in(
+        "high-throughput HTTP services... Built a REST API in Flask",
+        ("description", DESCRIPTION), ("resume", RESUME),
+    ) is None
+
+
 def test_an_ungrounded_paragraph_discards_the_whole_letter(template):
     """A quote in neither document is a requirement nobody wrote down."""
     answer = _answer(p1={"evidence": "we require ten years of Kubernetes"})
