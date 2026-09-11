@@ -720,6 +720,64 @@ The first model role that composes prose, so the bound is not the shape of the a
 
 ---
 
+## Cover letters
+
+`jobtracker/letter.py`, `jobtracker/tasks/coverletter.py`, `jobtracker coverletter build`.
+`docs/coverletter.md`. The second model role that composes prose and the first that
+composes a whole document, so `tailor`'s guard does not transfer — it is replaced.
+
+- **The model never writes LaTeX.** Not under an allowlist: `escape_text` escapes every
+  reserved character, **backslash first**, so nothing it returns can be a control
+  sequence. Stronger than `resume/latex.py` and it can afford to be — `tailor` must pass
+  `\resumeItem{...}` through, nothing here needs a macro to survive. Do not "reuse
+  `sanitize`" here; it would be a weakening.
+- **`COMPANY`, `JOB TITLE` and `DATE` come from the record**, substituted by `fill`. The
+  model is never asked — a letter addressed to the wrong employer is the one mistake a
+  cover letter does not survive, and the database already knows.
+- **The substitution runs on the template's text only, never on a composed paragraph.**
+  `COMPANY` is an ordinary English word, so walking the whole document once after
+  splicing — the obvious implementation — lets a letter saying *"we discussed COMPANY at
+  length"* be rewritten by a step the model is not part of. Segments, not one pass.
+- **A slot is a `%` comment plus prose carrying a CAPS placeholder**, inside
+  `\begin{document}`. The comment is the brief, handed to the model verbatim, so **the
+  template is the prompt** — there is no prompt file to edit. **Prose with no placeholder
+  is not a slot** and comes through byte for byte, which is how fixed sentences stay fixed.
+- **`\begin{document}` is found in code, never in a comment.** A template that explains
+  its own safety property in a comment would otherwise have that sentence taken as the
+  document start, dragging the preamble into slot range. The tracked example did exactly
+  this on its first parse; there is a test named after it.
+- **`parse_letter` is all-or-nothing**, the opposite of `parse_edits`. `fill` leaves an
+  unanswered slot as its placeholder, so a partial letter is a PDF with SHOUTING CAPS in
+  it — and writing the row would drain the unit, so it would never be re-asked. Same
+  reason a denied term discards the whole letter where in `tailor` it drops one edit and
+  is written as an empty proposal: here there is no rest to compile.
+- **`evidence` may be grounded in the description *or* the resume** — one document per
+  kind of paragraph — and which one is stored as `source`.
+- **`cover_letters` has no `resolution`, no dismiss and no attach path.** A suggestion is
+  a proposal about a document you wrote, so refusing it is a state worth keeping; a letter
+  is a draft for one posting with no meaning at another. Deleting the row is "no thanks".
+- **`letter_stem` is the single derivation** and carries a `_letter` suffix — without it a
+  build would overwrite the tailored resume for the same posting, both being minted from
+  the same `resumes.stored_name` pair.
+- **The actions cell's letter control is `✉`, not a second `↓`.** Two identical glyphs on
+  one row is a cell you have to hover to read, and they fetch different documents.
+  `interactive`-only, absent until a letter exists, and it carries no `data-act`.
+- **`_LETTER_BUILDS` is its own dict, not a namespaced key in `_BUILDS`.** Both are keyed
+  by posting and a posting can have both compiling at once; shared, the second start reads
+  the first's "building" and the first success drops the entry, so a poll reports ready
+  about a file that is not there.
+- **Priority 60, last.** Re-keyed by two documents you edit rather than one, and a page of
+  prose per unit. It consumes nothing `tailor` produces — the order between them is cost.
+- **Guard `\pdfgentounicode`.** `\input{glyphtounicode}` is a pdfTeX primitive XeTeX
+  lacks, so unguarded it kills *every* tectonic build with no PDF. `\ifdefined` both
+  lines; text still extracts, so ATS parsability is not lost. Same fix `data/resume.tex`
+  carries.
+- **The guard is not a fact checker.** Grounding proves a paragraph can quote a real
+  sentence, never that its claims follow from it. `denied` is the only bound; the rest is
+  a prompt. Do not claim more for it.
+
+---
+
 ## Slug repair
 
 `jobtracker repair`, `docs/repair.md`. The only bounded model role where the model is a
