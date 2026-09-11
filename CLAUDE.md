@@ -769,6 +769,13 @@ composes a whole document, so `tailor`'s guard does not transfer — it is repla
 - **The actions cell's letter control is `✉`, not a second `↓`.** Two identical glyphs on
   one row is a cell you have to hover to read, and they fetch different documents.
   `interactive`-only, absent until a letter exists, and it carries no `data-act`.
+- **`tex✉` copies the source the `✉` compiles** — `GET /api/coverletter-tex`, a pure read
+  through `server._letter_source`, the one derivation `/api/coverletter-build` also calls.
+  It needs no TeX engine. The envelope is on the label for the same reason it is on the
+  download: the resume's `tex` sits two controls to its left in the same cell, and a bare
+  `tex` on each is the ambiguity that rule exists to prevent. One delegated handler serves
+  both copies, choosing the endpoint off the class and restoring the label it read from
+  the button rather than a hardcoded string.
 - **`_LETTER_BUILDS` is its own dict, not a namespaced key in `_BUILDS`.** Both are keyed
   by posting and a posting can have both compiling at once; shared, the second start reads
   the first's "building" and the first success drops the entry, so a poll reports ready

@@ -2353,6 +2353,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_tailored_tex()
             elif path == "/api/coverletter":
                 self._send_coverletter()
+            elif path == "/api/coverletter-tex":
+                self._send_coverletter_tex()
             else:
                 self._send("<h1>404</h1>", 404)
         except Exception:  # noqa: BLE001
@@ -3894,6 +3896,27 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "tex": source["tex"], "applied": source["applied"],
                          "held": len(source["waiting"]), "held_terms": source["terms"]})
 
+    def _send_coverletter_tex(self) -> None:
+        """One posting's cover letter as LaTeX, for the page's copy button.
+
+        `_send_tailored_tex`'s counterpart in every respect: a GET, a pure read, nothing
+        compiled or written, and no engine asked for — which is what lets it answer on a
+        machine where the `✉` cannot. JSON rather than `text/plain` so a refusal arrives
+        in words the page can show, instead of as a body it would put on your clipboard.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        company = (query.get("company") or [""])[0]
+        job_id = (query.get("job") or [""])[0]
+        if not company or not job_id:
+            self._send_json({"ok": False, "error": "company and job are required"}, 400)
+            return
+        source, refusal = self._letter_source(company, job_id)
+        if refusal:
+            self._send_json(refusal)
+            return
+        self._send_json({"ok": True, "tex": source["tex"],
+                         "paragraphs": source["paragraphs"]})
+
     def _send_coverletter(self) -> None:
         """Hand over one posting's cover letter, if `coverletter build` has made it.
 
@@ -3928,6 +3951,64 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         self._send_bytes(blob, "application/pdf", filename=path.name)
+
+    def _letter_source(self, company: str, job_id: str) -> tuple[dict | None, dict | None]:
+        """The LaTeX `coverletter build` would compile for one posting: `(source, None)`,
+        or `(None, refusal)` naming why there is nothing to compile.
+
+        `_tailored_source`'s counterpart, and shared with the build endpoint for the same
+        reason: the text on your clipboard and the PDF behind the `✉` are one
+        derivation, so the two cannot come to mean different letters. It stops short of
+        asking for a TeX engine — copying the source needs none, and on this box only the
+        serve image carries tectonic at all.
+
+        Both checks here are about the template, which is a file you edit: it has to load
+        *now* rather than when the letter was written, and it has to still declare every
+        slot the stored letter answered. `fill` would meet either disagreement by leaving
+        the slot as its placeholder, which is how a letter ends up SHOUTING CAPS at an
+        employer. Refused and named instead.
+
+        `source` carries `tex`, `paragraphs` (how many were spliced) and `written_at`.
+        """
+        conn = self._conn()
+        try:
+            row = store.get_letter(conn, company, job_id)
+            title = ""
+            if row is not None:
+                found = conn.execute(
+                    "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
+                    (company, job_id),
+                ).fetchone()
+                title = (found["title"] if found else "") or ""
+        finally:
+            conn.close()
+        if row is None:
+            return None, {"ok": False,
+                          "error": "no cover letter has been written for this job"}
+
+        template, error = letter_mod.load()
+        if template is None:
+            return None, {"ok": False, "error": error}
+        try:
+            paragraphs = {
+                para["key"]: para["text"]
+                for para in json.loads(row["paragraphs"] or "[]")
+            }
+        except (TypeError, ValueError) as exc:
+            return None, {"ok": False,
+                          "error": f"the stored letter did not parse: {exc}"}
+        missing = [k for k in template.keys if k not in paragraphs]
+        if missing:
+            return None, {"ok": False,
+                          "error": f"this letter predates the current template — it has "
+                                   f"no {', '.join(missing)}. Re-run "
+                                   f"`jobtracker work --task coverletter`"}
+
+        # COMPANY, JOB TITLE and DATE come from the record and never from the model, and
+        # the substitution runs on the template's own text only — `fill` owns both rules.
+        tex = letter_mod.fill(template, paragraphs, company, title, _today())
+        return ({"tex": tex, "paragraphs": len(paragraphs),
+                 "written_at": row["written_at"]}, None)
 
     def _api_coverletter_build(self, payload: dict) -> dict:
         """Build one posting's cover letter, and report on a build already running.
@@ -3973,14 +4054,13 @@ class Handler(BaseHTTPRequestHandler):
 
         conn = self._conn()
         try:
+            # Only `written_at`, for the currency check below. The letter itself is
+            # derived by `_letter_source`, which reads its own row — one extra tiny
+            # query on the compile path, in exchange for the ready check keeping its
+            # place *before* the template is loaded. A posting whose PDF is already
+            # current must answer `ready` even when the template on disk has since
+            # broken, which is not true of anything past this point.
             row = store.get_letter(conn, company, job_id)
-            title = ""
-            if row is not None:
-                found = conn.execute(
-                    "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
-                    (company, job_id),
-                ).fetchone()
-                title = (found["title"] if found else "") or ""
         finally:
             conn.close()
         if row is None:
@@ -3998,21 +4078,9 @@ class Handler(BaseHTTPRequestHandler):
         ):
             return {"ok": True, "state": "ready"}
 
-        template, error = letter_mod.load()
-        if template is None:
-            return {"ok": False, "error": error}
-        try:
-            paragraphs = {
-                p["key"]: p["text"] for p in json.loads(row["paragraphs"] or "[]")
-            }
-        except (TypeError, ValueError) as exc:
-            return {"ok": False, "error": f"the stored letter did not parse: {exc}"}
-        missing = [k for k in template.keys if k not in paragraphs]
-        if missing:
-            return {"ok": False,
-                    "error": f"this letter predates the current template — it has no "
-                             f"{', '.join(missing)}. Re-run "
-                             f"`jobtracker work --task coverletter`"}
+        source, refusal = self._letter_source(company, job_id)
+        if refusal:
+            return refusal
 
         fmt = resume_mod.get_format("latex")
         if fmt is None:
@@ -4023,9 +4091,6 @@ class Handler(BaseHTTPRequestHandler):
             # about a missing dependency pointed at the wrong cause.
             return {"ok": False, "error": blocked}
 
-        source = letter_mod.fill(
-            template, paragraphs, company, title, _today()
-        )
         stem = letter_mod.letter_stem(company, job_id)
         # Removed on the request thread, before the thread that replaces it exists. A
         # stale file left in place would answer a concurrent poll `ready` and hand over
@@ -4037,7 +4102,7 @@ class Handler(BaseHTTPRequestHandler):
             # The only thing on this thread is the subprocess and the write. Every input
             # was computed above; it opens no database connection and needs none.
             try:
-                blob = resume_mod.assemble(fmt, source, stem=stem)
+                blob = resume_mod.assemble(fmt, source["tex"], stem=stem)
                 resume_mod.write_pdf(out, blob)
             except resume_mod.AssemblyFailed as exc:
                 with _BUILD_LOCK:
@@ -4060,7 +4125,7 @@ class Handler(BaseHTTPRequestHandler):
             target=_run, name=f"jobtracker-letter-{stem}", daemon=True
         ).start()
         return {"ok": True, "state": "building",
-                "detail": f"compiling {len(paragraphs)} paragraph(s) into {out.name}"}
+                "detail": f"compiling {source['paragraphs']} paragraph(s) into {out.name}"}
 
     def _api_tailor_build(self, payload: dict) -> dict:
         """Build one posting's tailored resume, and report on a build already running.

@@ -18,7 +18,8 @@ from html.parser import HTMLParser
 import pytest
 import yaml
 
-from jobtracker import config, curation, dashboard, models, resume, server, store
+from jobtracker import (config, curation, dashboard, letter as letter_mod, models,
+                        resume, server, store)
 from jobtracker.criteria import load_criteria
 
 # Titles, locations and URLs all arrive from third-party ATS APIs and are
@@ -4132,6 +4133,148 @@ def test_the_tex_copy_refuses_a_request_naming_no_posting(tmp_path):
     h.path = "/api/tailored-tex?company=Acme"
     sink = _Sink().install(h)
     h._send_tailored_tex()
+    assert sink.status == 400
+
+
+_LETTER_TEMPLATE = r"""\documentclass[letterpaper,11pt]{article}
+
+\newcommand{\RecipientOrg}{COMPANY}
+\newcommand{\LetterDate}{DATE}
+\newcommand{\LetterSubject}{Re: JOB TITLE}
+
+\begin{document}
+
+\RecipientOrg \\
+\LetterDate
+
+% Paragraph 1:
+% State the role and why it fits.
+I am applying for the JOB TITLE role at COMPANY. My work has focused on RELEVANT AREA.
+
+% Paragraph 2:
+% Use the strongest directly relevant experience.
+In my work at MOST RELEVANT EXPERIENCE, I MOST RELEVANT ACCOMPLISHMENT.
+
+Sincerely, Dylan Dodds
+
+\end{document}
+"""
+
+
+@pytest.fixture
+def template(tmp_path_factory, monkeypatch):
+    """A cover-letter template on disk, where `letter_mod.load` will find it."""
+    path = tmp_path_factory.mktemp("tpl") / "coverletter.tex"
+    path.write_text(_LETTER_TEMPLATE, encoding="utf-8")
+    monkeypatch.setattr(config, "COVERLETTER_TEX", path)
+    return path
+
+
+def _letter_db(tmp_path, template, paragraphs=None):
+    """A posting with a cover letter written against it.
+
+    Answers every slot the template declares unless the caller says otherwise — the
+    letter a `work` run would have written, which is what the copy route reads.
+    """
+    db = tmp_path / "letter.db"
+    conn = store.connect(db)
+    store.sync_postings(conn, "Acme", [
+        models.Posting("Acme", "1", "Backend Engineer", "https://x/1", "NYC")
+    ], "2026-07-22")
+    store.record_verdict(
+        conn, models.Verdict("Acme", "1", models.Decision.MATCH, "why", "rules"),
+        "2026-07-22")
+    if paragraphs is None:
+        parsed, error = letter_mod.load(template)
+        assert parsed is not None, error
+        paragraphs = [{"key": k, "text": f"composed {k}", "evidence": "e",
+                       "source": "resume"} for k in parsed.keys]
+    store.record_letter(conn, "Acme", "1", json.dumps(paragraphs), "u1", "2026-07-22")
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_the_letter_tex_copy_is_the_source_the_build_would_compile(tmp_path, template):
+    """Through the router, so the route exists and not merely the method. The text is the
+    template with the stored paragraphs spliced in — the derivation the `✉` compiles."""
+    db = _letter_db(tmp_path, template)
+    h = _handler_for(db, config.CRITERIA_YAML)
+    h.path = "/api/coverletter-tex?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h.do_GET()
+    assert sink.status == 200
+    res = json.loads(sink.body)
+    assert res["ok"] is True
+    assert res["paragraphs"] >= 1
+    assert "composed" in res["tex"]
+    assert res["tex"].lstrip().startswith("\\documentclass")
+
+
+def test_the_letter_tex_copy_carries_the_employer_from_the_record(tmp_path, template):
+    """`COMPANY`, `JOB TITLE` and `DATE` are substituted by `fill`, never asked of the
+    model. What you copy has to be the letter that would be sent, placeholders and all
+    resolved — a SHOUTING CAPS placeholder on the clipboard is the bug this catches."""
+    db = _letter_db(tmp_path, template)
+    h = _handler_for(db, config.CRITERIA_YAML)
+    h.path = "/api/coverletter-tex?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h._send_coverletter_tex()
+    tex = json.loads(sink.body)["tex"]
+    assert "Acme" in tex
+    assert "Backend Engineer" in tex
+    assert "COMPANY" not in tex
+    assert "JOB TITLE" not in tex
+
+
+def test_the_letter_tex_copy_needs_no_tex_engine(tmp_path, monkeypatch, template):
+    """Tectonic is in the serve image only, and this is the route that gets you the
+    document on a machine that cannot compile it. It never reaches for a format."""
+    db = _letter_db(tmp_path, template)
+    started = _no_thread(monkeypatch)
+    monkeypatch.setattr(resume, "get_format",
+                        lambda *a, **k: pytest.fail("asked for a TeX format"))
+    h = _handler_for(db, config.CRITERIA_YAML)
+    h.path = "/api/coverletter-tex?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h._send_coverletter_tex()
+    assert json.loads(sink.body)["ok"] is True
+    assert started == []
+
+
+def test_the_letter_tex_copy_refuses_a_letter_that_predates_the_template(tmp_path,
+                                                                        template):
+    """`fill` would answer a missing slot by leaving its placeholder, which is how a
+    letter goes out SHOUTING at an employer. Refused in words, with no `tex` to copy."""
+    db = _letter_db(tmp_path, template,
+                    paragraphs=[{"key": "nosuch", "text": "x",
+                                 "evidence": "e", "source": "resume"}])
+    h = _handler_for(db, config.CRITERIA_YAML)
+    h.path = "/api/coverletter-tex?company=Acme&job=1"
+    sink = _Sink().install(h)
+    h._send_coverletter_tex()
+    res = json.loads(sink.body)
+    assert res["ok"] is False
+    assert "predates" in res["error"]
+    assert "tex" not in res
+
+
+def test_the_letter_tex_copy_refuses_a_job_with_no_letter(tmp_path, template):
+    db = _letter_db(tmp_path, template)
+    h = _handler_for(db, config.CRITERIA_YAML)
+    h.path = "/api/coverletter-tex?company=Acme&job=999"
+    sink = _Sink().install(h)
+    h._send_coverletter_tex()
+    res = json.loads(sink.body)
+    assert res["ok"] is False
+    assert "tex" not in res
+
+
+def test_the_letter_tex_copy_refuses_a_request_naming_no_posting(tmp_path):
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML)
+    h.path = "/api/coverletter-tex?company=Acme"
+    sink = _Sink().install(h)
+    h._send_coverletter_tex()
     assert sink.status == 400
 
 
