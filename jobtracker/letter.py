@@ -398,3 +398,42 @@ def letter_path(company: str, ats_job_id: str) -> Path:
     from . import config
 
     return config.LETTERS_DIR / f"{letter_stem(company, ats_job_id)}.pdf"
+
+
+def built_day(path: Path) -> str:
+    """The ISO day a built PDF was written, or `''` if it is not there.
+
+    A day rather than a timestamp because that is the resolution the other side of the
+    comparison has: `cover_letters.written_at` is `ctx.today`, and a task takes its clock
+    from the context rather than reading one — `runner.py` owns every clock in this
+    package.
+    """
+    from datetime import date
+
+    try:
+        return date.fromtimestamp(path.stat().st_mtime).isoformat()
+    except OSError:
+        return ""
+
+
+def is_current(built: str, written_at: str) -> bool:
+    """Whether a PDF built on day `built` reflects a letter written on `written_at`.
+
+    "The file exists" is not the same question as "the file is the letter the page is
+    describing", and conflating them is how a template edit hands you yesterday's PDF.
+    Rewriting a brief re-keys every posting, `work` writes new paragraphs, and the file
+    on disk is then a document nothing in the database still claims — offered, under a
+    download link, with nothing saying so.
+
+    **Known hole, documented rather than hidden:** this compares days, so a template
+    edited *and* rebuilt within one day is not detected. Both sides are days — see
+    `built_day` — and the escape hatch is `jobtracker coverletter build`, which rebuilds
+    unconditionally and is the command you are already running in that situation.
+    """
+    if not built:
+        return False
+    if not written_at:
+        # A row with no date is one written before this comparison existed. Treated as
+        # current so it is not rebuilt forever; there is nothing to compare it against.
+        return True
+    return built >= written_at[:10]

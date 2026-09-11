@@ -3872,9 +3872,6 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": False, "error": "company and ats_job_id are required"}
 
         out = letter_mod.letter_path(company, job_id)
-        if out.is_file():
-            return {"ok": True, "state": "ready"}
-
         key = (company, job_id)
         with _BUILD_LOCK:
             state = _LETTER_BUILDS.get(key)
@@ -3901,6 +3898,17 @@ class Handler(BaseHTTPRequestHandler):
         if row is None:
             return {"ok": False,
                     "error": "no cover letter has been written for this job"}
+
+        # "The file exists" is not the same question as "the file is the letter this page
+        # is describing". Asked after the row is read, and that ordering is the point: a
+        # template edit rewrites the paragraphs, and the PDF beside them is then a
+        # document nothing in the database still claims. Answering `ready` about it is
+        # the one way this endpoint could hand over a letter that disagrees with what you
+        # were shown.
+        if out.is_file() and letter_mod.is_current(
+            letter_mod.built_day(out), row["written_at"]
+        ):
+            return {"ok": True, "state": "ready"}
 
         template, error = letter_mod.load()
         if template is None:
@@ -3931,6 +3939,11 @@ class Handler(BaseHTTPRequestHandler):
             template, paragraphs, company, title, _today()
         )
         stem = letter_mod.letter_stem(company, job_id)
+        # Removed on the request thread, before the thread that replaces it exists. A
+        # stale file left in place would answer a concurrent poll `ready` and hand over
+        # the very document this rebuild exists to replace — `_api_tailor_build` makes
+        # the same move under `force`.
+        out.unlink(missing_ok=True)
 
         def _run() -> None:
             # The only thing on this thread is the subprocess and the write. Every input
