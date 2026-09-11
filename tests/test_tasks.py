@@ -135,16 +135,36 @@ def test_inbox_runs_after_the_chain_so_a_busy_mailbox_cannot_starve_it():
     assert get_task("inbox").priority > get_task("level").priority
 
 
-def test_tailor_runs_last_because_one_resume_edit_re_keys_every_unit():
+def test_tailor_runs_behind_inbox_because_one_resume_edit_re_keys_every_unit():
     """`tailor`'s unit_key is a hash of the resume text, not of the posting.
 
     That is what makes a rewritten resume re-ask every posting — the property it is there
     for — and it is exactly why it cannot go earlier. Editing one line re-keys the entire
     queue at once, so ahead of `inbox` a single save would push a mailbox behind several
     hundred units. Same starvation argument `inbox` makes, one notch up.
+
+    This asserted `task_names()[-1] == "tailor"` until `coverletter` arrived behind it,
+    which is the second time that has happened here — `inbox`'s test above says the same
+    thing about itself. "Last" is never the claim worth pinning: what is load-bearing is
+    "behind the queue it could starve", and writing it that way is what stops the next
+    role at the end of the chain from looking like a regression.
     """
-    assert task_names()[-1] == "tailor"
     assert get_task("tailor").priority > get_task("inbox").priority
+
+
+def test_coverletter_runs_last_because_it_is_re_keyed_by_two_documents():
+    """`coverletter` is re-keyed by the template *and* the resume, and costs the most.
+
+    `tailor`'s argument, with both terms turned up. Its unit key hashes two files you
+    edit rather than one, so there are two ways to re-key the whole queue at once; and a
+    unit is a page of composed prose where `tailor`'s is a handful of lines, so it is the
+    most expensive answer in the queue to spend a budget on.
+
+    It consumes nothing `tailor` produces — both read the same scored matches — so the
+    order between those two is a cost argument and nothing else.
+    """
+    assert task_names()[-1] == "coverletter"
+    assert get_task("coverletter").priority > get_task("tailor").priority
 
 
 def test_the_first_task_with_work_wins(criteria, profile):

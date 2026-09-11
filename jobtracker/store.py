@@ -307,6 +307,38 @@ CREATE TABLE IF NOT EXISTS resume_suggestions (
     PRIMARY KEY (company, ats_job_id)
 );
 
+-- The body paragraphs `coverletter` wrote for one posting. Same single-reader invariant
+-- as `resume_suggestions` above, and for the same DESIGN.md 8.1 reason: nothing joins
+-- this into ranking, matching or prefill, and what reaches an employer is a PDF you
+-- downloaded and attached yourself.
+--
+-- `paragraphs` is JSON: [{key, text, evidence, source}]. `key` names a slot the template
+-- declared; `evidence` is a verbatim quote and `source` says which document it was found
+-- in ('description' or 'resume'). A row exists only if EVERY slot came back grounded —
+-- `parse_letter` is all-or-nothing, because `letter.fill` leaves an unfilled slot as its
+-- placeholder prose and a letter with SHOUTING CAPS in the middle is not one you can send.
+--
+-- `unit_key` is `<template_hash>:<resume_hash>:<keywords_hash>`, and it is compared whole
+-- by `matches_needing_a_letter` — the mechanism `resume_hash` gives `tailor`, with the
+-- template folded in because the template is half the question. Edit a paragraph's brief
+-- and every posting is asked again. One column rather than three because nothing reads
+-- the parts separately: the only question ever asked of it is "was this letter written
+-- under the configuration we have now", which is an equality test on the whole string.
+--
+-- No `resolution` column, deliberately, where `resume_suggestions` has one. A suggestion
+-- is a proposal about a document you wrote, so accepting and dismissing are real states.
+-- A letter is a draft written *for* one posting: it has no meaning at another, there is
+-- nothing to re-propose, and the only two things you do with it are build it and send it.
+-- Deleting the row is what "no thanks" means here, and the next run writes another.
+CREATE TABLE IF NOT EXISTS cover_letters (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    paragraphs  TEXT NOT NULL,
+    unit_key    TEXT NOT NULL,
+    written_at  TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
+
 -- Mail the deterministic narrower tied to a row in `applications`. Written only by
 -- `jobtracker mail` — never by a task, never by the web server. Reading a mailbox is I/O,
 -- and the rule that made `check` cache descriptions applies unchanged: the `inbox` task
@@ -1016,6 +1048,11 @@ _PURGE_BY_COMPANY = [
     # description and the resume. Your ruling on one is not in here — accepting a
     # suggestion attaches a file, and that lives in `posting_resumes`.
     "resume_suggestions",
+    # Machine-authored and re-derivable for the same reason, one step more so: a letter
+    # carries no ruling at all (see the table's comment on why it has no `resolution`),
+    # so there is nothing here a purge could throw away that the next `work` will not
+    # write again from the same template.
+    "cover_letters",
 ]
 
 # Deliberately NOT purged, and each for its own reason:
@@ -2477,6 +2514,90 @@ def record_suggestions(
         """,
         (company, ats_job_id, edits, resume_hash, now, flagged, keywords_hash),
     )
+
+
+# -- cover letters --------------------------------------------------------------------
+def matches_needing_a_letter(
+    conn: sqlite3.Connection, unit_key: str, limit: Optional[int] = None,
+) -> list[sqlite3.Row]:
+    """Scored, open matches with no letter written under the current configuration.
+
+    The same population `matches_needing_tailoring` reads, and deliberately the same SQL
+    shape: a match, still open, with a cached description to read, and a score — because
+    a letter is written for the postings you are actually going to see, in the order you
+    will see them. `description != ''` matters as much as `IS NOT NULL` for the reason it
+    does there: NULL is never fetched, `''` is fetched and genuinely empty, and neither
+    is text a model can write a letter from.
+
+    One `unit_key` comparison rather than three columns, and it is what makes a unit
+    leave the queue once it is done — `run_task` recomputes `remaining` by re-reading
+    `pending_count` rather than subtracting, so a task whose queue does not shrink after
+    `apply` reports a backlog forever.
+
+    Postings you have already applied to or skipped are excluded. A letter for a job that
+    is behind you is a page of prose nobody will read, and it is the most expensive
+    per-unit answer in the queue.
+    """
+    sql = """
+        SELECT p.company, p.ats_job_id, p.title, p.description, r.score
+        FROM postings p
+        JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        JOIN rankings r ON p.company=r.company AND p.ats_job_id=r.ats_job_id
+        LEFT JOIN applications a ON p.company=a.company AND p.ats_job_id=a.ats_job_id
+        LEFT JOIN deferrals d ON p.company=d.company AND p.ats_job_id=d.ats_job_id
+        LEFT JOIN cover_letters l
+               ON p.company=l.company AND p.ats_job_id=l.ats_job_id
+        WHERE v.verdict='match' AND p.closed_at IS NULL
+          AND r.score IS NOT NULL
+          AND p.description IS NOT NULL AND p.description != ''
+          AND a.company IS NULL
+          AND d.company IS NULL
+          AND (l.unit_key IS NULL OR l.unit_key != ?)
+        ORDER BY r.score DESC, p.company
+    """
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    return list(conn.execute(sql, (unit_key,)))
+
+
+def record_letter(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, paragraphs: str,
+    unit_key: str, now: str,
+) -> None:
+    """Store the letter written for one posting. The caller commits.
+
+    A re-write replaces the old one outright. There is no ruling to preserve — unlike
+    `record_suggestions`, which resets a `resolution` and has to justify it — because a
+    letter has no states: the row is the current draft under the current template, and a
+    re-write only happens when the configuration that produced it moved.
+    """
+    conn.execute(
+        """
+        INSERT INTO cover_letters (company, ats_job_id, paragraphs, unit_key, written_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            paragraphs=excluded.paragraphs, unit_key=excluded.unit_key,
+            written_at=excluded.written_at
+        """,
+        (company, ats_job_id, paragraphs, unit_key, now),
+    )
+
+
+def get_letter(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM cover_letters WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+
+
+def letters_by_posting(conn: sqlite3.Connection) -> dict:
+    """Every letter, for cheap render-time lookup. The dashboard's one read."""
+    return {
+        (r["company"], r["ats_job_id"]): r
+        for r in conn.execute("SELECT * FROM cover_letters")
+    }
 
 
 def get_suggestions(

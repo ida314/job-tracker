@@ -33,6 +33,8 @@ Subcommands:
                 writes to the mailbox. `work --task inbox` is what reads the candidates
   tailor        assemble a tailored resume from the edits `work --task tailor` proposed;
                 --attach uses each result as that posting's resume
+  coverletter   compile a cover letter from the paragraphs `work --task coverletter`
+                wrote, into the slots your own template marks out
   verify-slugs  fetch each API board's identity; --write seeds expected_board_name
   repair        read careers pages for broken boards' new slugs; --write applies
   plugins       list, enable, disable or configure a plugin (a feed, or a model role)
@@ -63,6 +65,7 @@ from pathlib import Path
 from opentelemetry import metrics
 
 from . import applications as apps_mod, build_version, config, health as health_mod, report as report_mod, safewrite, store, telemetry, tuning
+from . import letter as letter_mod
 from .criteria import load_criteria
 # companies.yaml has one writer module now — `serve`'s add form needs the same appender
 # `add-company` does, and two implementations of "append a curated entry" is how they
@@ -1159,6 +1162,13 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
     resume_text, resume_format, resume_hash = _load_resume(
         getattr(args, "resume_source", None)
     )
+    # Read here, never in the task, for `_load_resume`'s reason: a task never opens a
+    # file, so its queue cannot depend on a path being mounted at unit time. Both halves
+    # of the answer are carried — the template, or why there is none — because an absent
+    # file and an unparseable one are different things to go and do.
+    letter_template, letter_error = letter_mod.load(
+        getattr(args, "coverletter_source", None)
+    )
 
     return TaskContext(
         today=today,
@@ -1170,6 +1180,8 @@ def _build_context(args: argparse.Namespace, today: str, fetcher=None):
         resume_format=resume_format,
         resume_hash=resume_hash,
         keywords=_load_keywords(getattr(args, "keywords", None)),
+        letter_template=letter_template,
+        letter_error=letter_error or "",
         tiers=rank_mod.tier_lookup(companies),
         companies={c.name: c for c in companies},
         fetcher=fetcher,
@@ -1631,6 +1643,119 @@ def cmd_tailor(args: argparse.Namespace) -> int:
         return EXIT_DEGRADED if failed else EXIT_OK
     finally:
         conn.close()
+
+
+def cmd_coverletter(args: argparse.Namespace) -> int:
+    """Compile a cover letter from the paragraphs `coverletter` already wrote.
+
+    Deterministic, and deliberately not a `work` task for the reason `tailor build` is
+    not one: it asks a model nothing, and `cmd_work` returns early when no router is
+    configured. A pass that needs no model must not be gated behind one being reachable,
+    or a night with the GPU down compiles nothing and reports it as though there were
+    nothing to compile.
+
+    It never writes to your template. The paragraphs are spliced into a copy in memory
+    and the result is a NEW file under `LETTERS_DIR`; what reaches an employer is a PDF
+    you downloaded and attached yourself.
+
+    There is no `dismiss` here where `tailor` has one, and the absence is the same
+    argument the table makes: a suggestion is a proposal about a document you wrote, so
+    refusing it is a state worth keeping. A letter is a draft written for one posting and
+    has no meaning anywhere else — there is nothing to re-propose, so deleting the row is
+    what "no thanks" means and the next run writes another.
+    """
+    from . import letter as letter_mod
+    from . import resume as resume_mod
+
+    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    today = args.since or _today()
+    try:
+        template, error = letter_mod.load(getattr(args, "coverletter_source", None))
+        if template is None:
+            print(f"No usable cover-letter template: {error}", file=sys.stderr)
+            return 1
+
+        rows = list(store.letters_by_posting(conn).values())
+        if args.company:
+            rows = [r for r in rows if r["company"] == args.company]
+        if not rows:
+            print("Nothing to compile — no letters have been written yet.")
+            print("  `jobtracker plugins enable coverletter`, then `jobtracker work`.")
+            return 0
+        rows.sort(key=lambda r: (r["company"], r["ats_job_id"]))
+        if args.limit:
+            rows = rows[:args.limit]
+
+        # The engine, asked once. A missing toolchain is one fact about this machine, not
+        # one fact per posting — and it is not an error: the letters are written and the
+        # only thing absent is the last step. `tailor build` makes the same call.
+        fmt = resume_mod.get_format("latex")
+        blocked = fmt.unavailable_reason() if fmt else "no latex format is registered"
+        built = failed = stale = 0
+        for row in rows:
+            head = f"{row['company']} — {row['ats_job_id']}"
+            try:
+                paragraphs = {
+                    p["key"]: p["text"] for p in json.loads(row["paragraphs"] or "[]")
+                }
+            except (TypeError, ValueError) as exc:
+                print(f"  {head}: the stored letter did not parse: {exc}", file=sys.stderr)
+                failed += 1
+                continue
+            # A letter written against a template that has since been edited. Named
+            # rather than compiled: `fill` would leave the slots this letter does not
+            # answer as placeholder prose, which is a PDF with SHOUTING CAPS in it.
+            missing = [k for k in template.keys if k not in paragraphs]
+            if missing:
+                print(f"  {head}: written under an older template "
+                      f"(no {', '.join(missing)}) — re-run `work --task coverletter`")
+                stale += 1
+                continue
+            if blocked:
+                print(f"  {head}: {len(paragraphs)} paragraph(s) ready, not compiled")
+                continue
+
+            source = letter_mod.fill(
+                template, paragraphs, row["company"], _title_of(conn, row), today
+            )
+            stem = letter_mod.letter_stem(row["company"], row["ats_job_id"])
+            try:
+                blob = resume_mod.assemble(fmt, source, stem=stem)
+            except resume_mod.AssemblyFailed as exc:
+                print(f"  {head}: {exc}", file=sys.stderr)
+                failed += 1
+                continue
+            out = letter_mod.letter_path(row["company"], row["ats_job_id"])
+            resume_mod.write_pdf(out, blob)
+            built += 1
+            print(f"  {head}: {len(paragraphs)} paragraph(s) -> {out}")
+
+        if blocked:
+            # Named, not silent, and not an error: every letter above is still written.
+            print(f"\nNothing was compiled — {blocked}")
+            return EXIT_OK
+        print(f"\n{built} compiled, {failed} failed")
+        if stale:
+            print(f"{stale} letter(s) predate the current template and were skipped.")
+        return EXIT_DEGRADED if failed else EXIT_OK
+    finally:
+        conn.close()
+
+
+def _title_of(conn, row) -> str:
+    """The posting's title, for the letter's subject line.
+
+    Read at compile time rather than stored on the letter, and that is the same call
+    `resume.tailored_stem` makes about a path: one derivation, from the row that owns the
+    fact. A title copied into `cover_letters` would be a second copy that a re-fetched
+    posting could silently disagree with, and the subject line is the one part of the
+    letter a recruiter checks against the req they posted.
+    """
+    found = conn.execute(
+        "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
+        (row["company"], row["ats_job_id"]),
+    ).fetchone()
+    return (found["title"] if found else "") or ""
 
 
 def _say_switched_off(what: str) -> None:
@@ -2681,6 +2806,21 @@ def build_parser() -> argparse.ArgumentParser:
     # No `_llm_flags`: this pass opens no socket to a model, which is why it is a command
     # and not a task. See cmd_tailor.
     tl.set_defaults(func=cmd_tailor)
+
+    cl = sub.add_parser(
+        "coverletter",
+        help="compile a cover letter from the paragraphs `work` wrote",
+    )
+    cl.add_argument("action", nargs="?", default="build", choices=["build"])
+    cl.add_argument("--company", default=None, help="only this company")
+    cl.add_argument("--limit", type=int, default=None, help="compile at most N")
+    cl.add_argument("--coverletter-source", default=None, dest="coverletter_source",
+                    help=f"template (default: {config.COVERLETTER_TEX})")
+    cl.add_argument("--db", default=None)
+    cl.add_argument("--since", default=None)
+    # No `_llm_flags`: this pass opens no socket to a model, which is why it is a command
+    # and not a task. See cmd_coverletter.
+    cl.set_defaults(func=cmd_coverletter)
 
     pf = sub.add_parser(
         "prefill",

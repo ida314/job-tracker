@@ -104,6 +104,14 @@ class TaskContext:
     # a valid and common value and means *unrestricted*, never "nothing allowed" — so
     # unlike `resume_text` its absence is not an `unavailable_reason`.
     keywords: Any = None
+    # The parsed cover-letter template, and why it is not here when it is not. Two fields
+    # rather than one because the two absences call for opposite responses, which is the
+    # distinction `unavailable_reason` exists to make: no file at all is a feature you
+    # have not configured, and a file that will not parse is one you need to go and fix.
+    # Folding them into a bare None would report a broken template as an absent one, and
+    # send you to write a document that is already there.
+    letter_template: Any = None
+    letter_error: str = ""
 
 
 class Task:
