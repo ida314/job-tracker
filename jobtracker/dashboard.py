@@ -303,8 +303,9 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .restlist .act { margin-left: auto; }
 
 /* -- the actions cell ----------------------------------------------------------------
-   One row's controls anywhere that is not a pick: put it in the tracker, and get the
-   tailored resume `tailor` proposed for it. Minimal on purpose — these sit on every row
+   One row's controls anywhere that is not a pick: put it in the tracker, and get the two
+   documents written for it — `tailor`'s resume and `coverletter`'s letter. Minimal on
+   purpose — these sit on every row
    of a table thousands long, so they are a chip and two glyph-sized controls, and they
    read as marks beside a row rather than as a toolbar under it. */
 td.act, .restlist .act { white-space: nowrap; }
@@ -320,13 +321,20 @@ td.act { text-align: right; }
    control over something that would refuse on click is the page disagreeing with
    itself. Warned rather than muted: it is a question addressed to you. */
 .act .theld { color: var(--warning); border-bottom: 1px dotted currentColor; cursor: help; }
-.act button, .act a.tailor-dl { appearance: none; background: var(--page);
+.act button, .act a.tailor-dl, .act a.letter-dl { appearance: none; background: var(--page);
     color: var(--ink-2); border: 1px solid var(--grid); border-radius: 5px;
     font: inherit; font-size: 11px; line-height: 1.6; padding: 1px 7px; cursor: pointer;
     text-decoration: none; vertical-align: middle; }
-.act button:hover, .act a.tailor-dl:hover { color: var(--ink); border-color: var(--ink-2); }
+.act button:hover, .act a.tailor-dl:hover, .act a.letter-dl:hover {
+    color: var(--ink); border-color: var(--ink-2); }
 .act button[disabled] { opacity: .5; cursor: default; }
-.act .tailor-build, .act a.tailor-dl { margin-right: 5px; }
+.act .tailor-build, .act a.tailor-dl,
+.act .letter-build, .act a.letter-dl { margin-right: 5px; }
+/* The cover letter's chip, beside the resume's. Its own class only so the glyph and the
+   hover text can differ — a letter is a document written for this posting, where the
+   resume chip counts edits proposed to a document you already had. */
+.act .lchip { display: inline-block; font-size: 11px; color: var(--muted);
+              vertical-align: middle; margin-right: 5px; }
 
 /* -- grouped tables ------------------------------------------------------------------
    Rows render visible and JS collapses them on load — the `.tabs` rule applied to
@@ -763,54 +771,75 @@ _JS = """
     });
   });
 
-  // The tailored resume. The build is a subprocess on a daemon thread, so the endpoint
-  // is idempotent and doubles as the poll: it answers building / ready / error, and only
-  // ever starts one. `ready` swaps the button for the download link the server would
-  // have rendered had the file existed when the page was built.
+  // The two compiled documents: the tailored resume, and the cover letter. Both builds
+  // are a subprocess on a daemon thread, so each endpoint is idempotent and doubles as
+  // the poll — it answers building / ready / error and only ever starts one. `ready`
+  // swaps the button for the download link the server would have rendered had the file
+  // existed when the page was built.
+  //
+  // One handler over a table of two descriptors rather than two copies of the polling
+  // loop. The loop is the part with the timeout, the give-up and the re-enable in three
+  // branches; duplicated, it is two of those to keep in step, and the second copy is
+  // where a fix stops being applied. What actually differs between them is four strings.
   var POLL_MS = 2000;
   var GIVE_UP_MS = 120000;
 
-  function done(b) {
+  var BUILDS = {
+    'tailor-build': {build: '/api/tailor-build', get: '/api/tailored',
+                     cls: 'tailor-dl', title: 'Download the tailored resume'},
+    'letter-build': {build: '/api/coverletter-build', get: '/api/coverletter',
+                     cls: 'letter-dl', title: 'Download the cover letter'}
+  };
+
+  function kindOf(b) {
+    for (var k in BUILDS) { if (b.classList.contains(k)) return BUILDS[k]; }
+    return null;
+  }
+
+  function done(b, kind) {
     var a = document.createElement('a');
-    a.className = 'tailor-dl';
-    a.href = '/api/tailored?company=' + encodeURIComponent(b.dataset.company)
+    a.className = kind.cls;
+    a.href = kind.get + '?company=' + encodeURIComponent(b.dataset.company)
            + '&job=' + encodeURIComponent(b.dataset.job);
-    a.title = 'Download the tailored resume';
+    a.title = kind.title;
     a.setAttribute('download', '');
-    a.innerHTML = '&darr;';
+    a.innerHTML = b.dataset.glyph || '&darr;';
     b.replaceWith(a);
   }
 
-  function ask(b, started) {
-    post('/api/tailor-build', {company: b.dataset.company, ats_job_id: b.dataset.job})
+  function ask(b, kind, started) {
+    post(kind.build, {company: b.dataset.company, ats_job_id: b.dataset.job})
       .then(function (res) {
-        if (res.ok && res.state === 'ready') { done(b); return; }
+        if (res.ok && res.state === 'ready') { done(b, kind); return; }
         if (res.ok && res.state === 'building') {
           if (Date.now() - started > GIVE_UP_MS) {
             b.disabled = false;
-            b.innerHTML = '&darr;';
+            b.innerHTML = b.dataset.glyph || '&darr;';
             alert('still compiling after two minutes — check the serve log');
             return;
           }
-          setTimeout(function () { ask(b, started); }, POLL_MS);
+          setTimeout(function () { ask(b, kind, started); }, POLL_MS);
           return;
         }
         b.disabled = false;
-        b.innerHTML = '&darr;';
+        b.innerHTML = b.dataset.glyph || '&darr;';
         alert(res.error || 'could not build it');
       }).catch(function () {
         b.disabled = false;
-        b.innerHTML = '&darr;';
+        b.innerHTML = b.dataset.glyph || '&darr;';
         alert('could not reach the server');
       });
   }
 
   document.addEventListener('click', function (e) {
-    var b = e.target.closest ? e.target.closest('button.tailor-build') : null;
+    var b = e.target.closest
+          ? e.target.closest('button.tailor-build, button.letter-build') : null;
     if (!b || b.disabled) return;
+    var kind = kindOf(b);
+    if (!kind) return;
     b.disabled = true;
     b.textContent = '…';
-    ask(b, Date.now());
+    ask(b, kind, Date.now());
   });
 })();
 
@@ -859,6 +888,8 @@ def build_dashboard(
     suggestions = store.suggestions_by_posting(conn)
     built = _built_resumes()
     held = _held_by_posting(suggestions)
+    letters = store.letters_by_posting(conn)
+    letters_built = _built_letters()
     pending_mail = store.pending_mail_count(conn)
 
     # Read straight off `applications` rather than joining through `postings`, which is
@@ -887,7 +918,7 @@ def build_dashboard(
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
-           rest, overrides, suggestions, tracked, built, held)
+           rest, overrides, suggestions, tracked, built, held, letters, letters_built)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -906,9 +937,10 @@ def build_dashboard(
     _tier_chart(parts, matches, by_name)
     _filters(parts, matches + uncertain, by_name, criteria)
     _table(parts, "Open matches", matches, by_name, "matches", False, criteria,
-           interactive, tracked, suggestions, built, held)
+           interactive, tracked, suggestions, built, held, letters, letters_built)
     _table(parts, "Uncertain — needs a human", uncertain, by_name, "uncertain", True,
-           criteria, interactive, tracked, suggestions, built, held)
+           criteria, interactive, tracked, suggestions, built, held, letters,
+           letters_built)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="boards" hidden>')
@@ -952,7 +984,7 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy) -> None:
 
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
            plans=None, rest=(), overrides=None, suggestions=None, tracked=None,
-           built=None, held=None) -> None:
+           built=None, held=None, letters=None, letters_built=None) -> None:
     """The three to apply to today.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -982,12 +1014,12 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         )
 
     _rest_of_ranking(parts, rest, by_name, today, criteria, plans, interactive,
-                     tracked, suggestions, built, held)
+                     tracked, suggestions, built, held, letters, letters_built)
 
 
 def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
                      interactive: bool = False, tracked=None, suggestions=None,
-                     built=None, held=None) -> None:
+                     built=None, held=None, letters=None, letters_built=None) -> None:
     """Everything the ranker scored below today's three, grouped by company.
 
     `<details>` rather than a JS drawer: it is native disclosure, it opens with no script
@@ -1043,7 +1075,9 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
             if plan is not None and plan["fields"]:
                 bits.append(f'prefill {plan["fields"] - plan["gaps"]}/{plan["fields"]} fields')
             act = (
-                f'<span class="act">{_track_cell(row, tracked, suggestions, built, held)}</span>'
+                f'<span class="act">'
+                f'{_track_cell(row, tracked, suggestions, built, held, letters, letters_built)}'
+                f'</span>'
                 if interactive else ""
             )
             parts.append(
@@ -1242,9 +1276,25 @@ def _built_resumes() -> set[str]:
         return set()
 
 
-def _track_cell(row, tracked=None, suggestions=None, built=None, held=None) -> str:
-    """The controls that belong to one posting anywhere but a pick: track it, and get its
-    tailored resume.
+def _built_letters() -> set[str]:
+    """Every cover letter already on disk, by stem, listed once per page.
+
+    A `stat` per row would be thousands of them on these tables — `_built_resumes`'
+    reason, and the same reading of a missing directory: a machine that has never run
+    `coverletter build` has none, which means "nothing is built" rather than an error.
+    """
+    from . import config
+
+    try:
+        return {path.stem for path in config.LETTERS_DIR.glob("*.pdf")}
+    except OSError:
+        return set()
+
+
+def _track_cell(row, tracked=None, suggestions=None, built=None, held=None,
+                letters=None, letters_built=None) -> str:
+    """The controls that belong to one posting anywhere but a pick: track it, and get the
+    two documents written for it — the tailored resume and the cover letter.
 
     Rendered **only under `serve`** — every caller gates on `interactive`, because these
     POST and the static file must stay a self-contained, offline artifact where a dead
@@ -1261,6 +1311,11 @@ def _track_cell(row, tracked=None, suggestions=None, built=None, held=None) -> s
       application with the diff unread. Attaching one is still `tailor build --attach`,
       after reading the diff at `/apply`. Building and downloading send nothing to an
       employer, which is the whole of why they are allowed here.
+
+    The cover letter sits inside that last rule and does not stretch it. There is nothing
+    to *accept* about a letter — it is written for this posting and has no meaning at
+    another, so it has no `resolution` and no attach path. Downloading one is you opening
+    a draft, and everything after that is you.
     """
     key = (row["company"], row["ats_job_id"])
     c = html.escape(row["company"], quote=True)
@@ -1317,6 +1372,26 @@ def _track_cell(row, tracked=None, suggestions=None, built=None, held=None) -> s
                     'title="Build the tailored resume">&darr;</button>'
                 )
 
+    # The cover letter, beside the resume and following exactly its two rules: absent
+    # when nothing was written, and a download once the PDF exists. `coverletter` ships
+    # off like `tailor` does, so a permanent mark on every row would be noise about a
+    # feature nobody enabled.
+    #
+    # The glyph is an envelope rather than a second arrow. Two identical `↓` on one row
+    # is a cell you have to hover to read, and these fetch different documents.
+    if (letters or {}).get(key) is not None:
+        if _letter_built(row, letters_built):
+            bits.append(
+                f'<a class="letter-dl" href="/api/coverletter?company={_q(row["company"])}'
+                f'&amp;job={_q(row["ats_job_id"])}" '
+                'title="Download the cover letter" download>&#9993;</a>'
+            )
+        else:
+            bits.append(
+                f'<button class="letter-build" data-company="{c}" data-job="{j}" '
+                'data-glyph="&#9993;" title="Build the cover letter">&#9993;</button>'
+            )
+
     if key in (tracked or set()):
         bits.append('<span class="tracked" title="Already in the tracker">tracked</span>')
     else:
@@ -1338,6 +1413,19 @@ def _track_cell_built(row, built) -> bool:
     if not built:
         return False
     return resume_mod.tailored_stem(row["company"], row["ats_job_id"]) in built
+
+
+def _letter_built(row, letters_built) -> bool:
+    """Whether that posting's cover letter is already on disk.
+
+    Against a set of stems listed once by `build_dashboard`, not a `stat` per row —
+    `_track_cell_built`'s reason, and these tables carry thousands of postings.
+    """
+    from . import letter as letter_mod
+
+    if not letters_built:
+        return False
+    return letter_mod.letter_stem(row["company"], row["ats_job_id"]) in letters_built
 
 
 def _q(value: str) -> str:
@@ -1623,7 +1711,7 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
 
 def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
            interactive: bool = False, tracked=None, suggestions=None, built=None,
-           held=None) -> None:
+           held=None, letters=None, letters_built=None) -> None:
     parts.append(
         f'<h2>{html.escape(heading)} '
         f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
@@ -1695,7 +1783,9 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
             )
             if interactive:
                 parts.append(
-                    f'<td class="act">{_track_cell(r, tracked, suggestions, built, held)}</td>'
+                    f'<td class="act">'
+                    f'{_track_cell(r, tracked, suggestions, built, held, letters, letters_built)}'
+                    f'</td>'
                 )
             parts.append("</tr>")
         parts.append("</tbody>")

@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from jobtracker import config, dashboard, resume, store
+from jobtracker import letter as letter_mod
 from jobtracker.models import Company, Decision, Posting, Verdict
 
 
@@ -929,13 +930,76 @@ def test_the_actions_controls_have_their_handlers_on_the_page_that_renders_them(
     _suggest(conn, "Acme", "1", 2)
     doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
                                     interactive=True)
+    _letter(conn, "Acme", "1")
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                    interactive=True)
     script = doc[doc.rindex("<script>"):doc.rindex("</script>")]
-    for cls in ("track", "tailor-build"):
+    for cls in ("track", "tailor-build", "letter-build"):
         assert f'class="{cls}"' in doc, cls
         assert f"button.{cls}" in script, cls
-    for endpoint in ("/api/disposition", "/api/tailor-build", "/api/tailored"):
+    for endpoint in ("/api/disposition", "/api/tailor-build", "/api/tailored",
+                     "/api/coverletter-build", "/api/coverletter"):
         assert endpoint in script, endpoint
     assert doc.count("<script>") == 1
+
+
+def _letter(conn, company, jid, key="key-1"):
+    paragraphs = [{"key": "p1", "text": "a", "evidence": "b", "source": "resume"}]
+    store.record_letter(conn, company, jid, json.dumps(paragraphs), key, "2026-07-22")
+    conn.commit()
+
+
+def test_the_letter_control_is_absent_until_one_is_written():
+    """`coverletter` ships switched off, so a permanent mark on every row of a table
+    thousands long is noise about a feature nobody enabled — the rule the tailor chip
+    already follows, applied to the second document."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                 interactive=True))
+    assert "letter-build" not in panel
+
+    _letter(conn, "Acme", "1")
+    panel = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                                 interactive=True))
+    assert 'class="letter-build"' in panel
+
+
+def test_a_built_letter_renders_a_download_and_not_a_build_button():
+    """The file's own existence is what "built" means — nothing stores the path, so the
+    cell asks exactly the question the download route will answer."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _letter(conn, "Acme", "1")
+    stem = letter_mod.letter_stem("Acme", "1")
+    with mock.patch.object(dashboard, "_built_letters", return_value={stem}):
+        panel = _all_panel(dashboard.build_dashboard(
+            conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
+    assert 'class="letter-dl"' in panel
+    assert "letter-build" not in panel
+    assert "/api/coverletter?company=Acme&amp;job=1" in panel
+
+
+def test_the_letter_column_exists_only_under_serve():
+    """The offline artifact rule. A build button in a mailed file has nowhere to POST,
+    and a dead control is worse than no control."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _letter(conn, "Acme", "1")
+    static = _all_panel(dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22"))
+    assert "letter-build" not in static and "letter-dl" not in static
+
+
+def test_the_two_documents_never_share_a_download_url():
+    """One posting, two files, two routes. Sharing either would hand over the wrong one."""
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    _suggest(conn, "Acme", "1", 2)
+    _letter(conn, "Acme", "1")
+    with mock.patch.object(dashboard, "_built_resumes",
+                           return_value={resume.tailored_stem("Acme", "1")}), \
+         mock.patch.object(dashboard, "_built_letters",
+                           return_value={letter_mod.letter_stem("Acme", "1")}):
+        panel = _all_panel(dashboard.build_dashboard(
+            conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
+    assert "/api/tailored?company=Acme&amp;job=1" in panel
+    assert "/api/coverletter?company=Acme&amp;job=1" in panel
 
 
 def test_the_actions_cell_never_carries_a_disposition_attribute():

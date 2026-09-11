@@ -51,6 +51,7 @@ from . import (
     curation,
     dashboard as dashboard_mod,
     keywords as kw_mod,
+    letter as letter_mod,
     live,
     rank as rank_mod,
     resume as resume_mod,
@@ -125,6 +126,19 @@ _VERIFY_LOCK = threading.Lock()
 # compile at once, since tectonic runs in a scratch directory of its own.
 _BUILDS: dict[tuple[str, str], str] = {}
 _BUILD_LOCK = threading.Lock()
+
+# Cover-letter compiles in flight, with the same shape and the same rules as `_BUILDS`
+# above — "building" or the last failure, dropped on success because the PDF on disk is
+# what ready means.
+#
+# Its own dictionary rather than a namespaced key in that one, and the reason is a
+# collision that would be silent: both are keyed by posting, and a posting can very
+# reasonably have a tailored resume and a cover letter building at the same moment. Shared,
+# the second start would read the first's "building" and answer that a compile it never
+# began was already under way — then drop the entry when *its* build finished, leaving the
+# other poll to report ready about a file that is not there. `_BUILD_LOCK` covers both;
+# one lock over two small dicts is not contention.
+_LETTER_BUILDS: dict[tuple[str, str], str] = {}
 
 
 # -- rendering (pure reads, testable without a server) ------------------------------
@@ -2335,6 +2349,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_preview()
             elif path == "/api/tailored":
                 self._send_tailored()
+            elif path == "/api/coverletter":
+                self._send_coverletter()
             else:
                 self._send("<h1>404</h1>", 404)
         except Exception:  # noqa: BLE001
@@ -2389,6 +2405,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_posting_resume_clear(payload))
             elif path == "/api/tailor-build":
                 self._send_json(self._api_tailor_build(payload))
+            elif path == "/api/coverletter-build":
+                self._send_json(self._api_coverletter_build(payload))
             elif path == "/api/keyword":
                 self._send_json(self._api_keyword(payload))
             elif path == "/api/plugin":
@@ -3787,6 +3805,161 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         self._send_bytes(blob, "application/pdf", filename=path.name)
+
+    def _send_coverletter(self) -> None:
+        """Hand over one posting's cover letter, if `coverletter build` has made it.
+
+        A GET, for `_send_tailored`'s reason: it is a download, so the browser navigates
+        and the page you were on stays where it was. The path is not built from anything
+        typed — `letter_path` runs both strings through `resumes.stored_name`, which slugs
+        to `[a-z0-9_]` — and the containment check after it is belt and braces for the day
+        that changes.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        company = (query.get("company") or [""])[0]
+        job_id = (query.get("job") or [""])[0]
+        if not company or not job_id:
+            self._send_json({"ok": False, "error": "company and job are required"}, 400)
+            return
+        path = letter_mod.letter_path(company, job_id)
+        try:
+            inside = path.resolve().parent == config.LETTERS_DIR.resolve()
+        except OSError:
+            inside = False
+        if not inside:
+            self._send_json({"ok": False, "error": "not a cover letter"}, 400)
+            return
+        try:
+            blob = path.read_bytes()
+        except OSError:
+            # Never built, or built and then deleted. Both are "there is nothing to
+            # download", and the page's answer to either is the build button.
+            self._send_json(
+                {"ok": False, "error": "no cover letter has been built for this job"},
+                404,
+            )
+            return
+        self._send_bytes(blob, "application/pdf", filename=path.name)
+
+    def _api_coverletter_build(self, payload: dict) -> dict:
+        """Build one posting's cover letter, and report on a build already running.
+
+        One endpoint for both, idempotent, at most one build per posting — the contract
+        `_api_tailor_build` sets out at length and this one keeps. **Everything knowable
+        is decided here, before the thread exists**, for the reason stated there: an
+        exception on a daemon thread reaches the log and nowhere else, so on a box with
+        no TeX engine a button that spun forever would be the only symptom.
+
+        Two checks are this endpoint's own, and both are about the template:
+
+        * The template has to load *now*, not when the letter was written. It is a file
+          on disk that you edit, so the letter in the table and the document it is about
+          to be spliced into can disagree — and `fill` would answer that by leaving the
+          unmatched slots as placeholder prose, handing you a PDF with SHOUTING CAPS in
+          the middle of it. Refused and named instead.
+        * A missing slot is that same disagreement, caught by key. It means the letter
+          predates an edit to the template, and the fix is another `work` run rather than
+          anything about this posting.
+
+        There is no `force` here where `_api_tailor_build` has one. That parameter exists
+        for Finish, which rebuilds PDFs a keyword ruling just invalidated; a letter has no
+        equivalent, because the only thing that invalidates one is the template or the
+        resume moving, and both of those move `unit_key` and re-write the row.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+
+        out = letter_mod.letter_path(company, job_id)
+        if out.is_file():
+            return {"ok": True, "state": "ready"}
+
+        key = (company, job_id)
+        with _BUILD_LOCK:
+            state = _LETTER_BUILDS.get(key)
+            if state == "building":
+                return {"ok": True, "state": "building"}
+            if state:
+                # Reported once and cleared, so the next click is a fresh attempt rather
+                # than a permanent refusal about a compile that failed an hour ago.
+                del _LETTER_BUILDS[key]
+                return {"ok": True, "state": "error", "error": state}
+
+        conn = self._conn()
+        try:
+            row = store.get_letter(conn, company, job_id)
+            title = ""
+            if row is not None:
+                found = conn.execute(
+                    "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
+                    (company, job_id),
+                ).fetchone()
+                title = (found["title"] if found else "") or ""
+        finally:
+            conn.close()
+        if row is None:
+            return {"ok": False,
+                    "error": "no cover letter has been written for this job"}
+
+        template, error = letter_mod.load()
+        if template is None:
+            return {"ok": False, "error": error}
+        try:
+            paragraphs = {
+                p["key"]: p["text"] for p in json.loads(row["paragraphs"] or "[]")
+            }
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": f"the stored letter did not parse: {exc}"}
+        missing = [k for k in template.keys if k not in paragraphs]
+        if missing:
+            return {"ok": False,
+                    "error": f"this letter predates the current template — it has no "
+                             f"{', '.join(missing)}. Re-run "
+                             f"`jobtracker work --task coverletter`"}
+
+        fmt = resume_mod.get_format("latex")
+        if fmt is None:
+            return {"ok": False, "error": "no latex format is registered"}
+        blocked = fmt.unavailable_reason()
+        if blocked:
+            # Named rather than generic. Twice in this repo's history a fixed message
+            # about a missing dependency pointed at the wrong cause.
+            return {"ok": False, "error": blocked}
+
+        source = letter_mod.fill(
+            template, paragraphs, company, title, _today()
+        )
+        stem = letter_mod.letter_stem(company, job_id)
+
+        def _run() -> None:
+            # The only thing on this thread is the subprocess and the write. Every input
+            # was computed above; it opens no database connection and needs none.
+            try:
+                blob = resume_mod.assemble(fmt, source, stem=stem)
+                resume_mod.write_pdf(out, blob)
+            except resume_mod.AssemblyFailed as exc:
+                with _BUILD_LOCK:
+                    _LETTER_BUILDS[key] = str(exc)
+                return
+            except Exception as exc:  # noqa: BLE001 — a bad compile must not kill serve
+                log.exception("cover letter build %s/%s failed", company, job_id)
+                with _BUILD_LOCK:
+                    _LETTER_BUILDS[key] = f"the build failed: {exc}"
+                return
+            with _BUILD_LOCK:
+                # Dropped rather than set to "ready": the file existing is what ready
+                # means, and one fact with two records is one that can disagree.
+                _LETTER_BUILDS.pop(key, None)
+            log.info("built cover letter for %s/%s -> %s", company, job_id, out)
+
+        with _BUILD_LOCK:
+            _LETTER_BUILDS[key] = "building"
+        threading.Thread(
+            target=_run, name=f"jobtracker-letter-{stem}", daemon=True
+        ).start()
+        return {"ok": True, "state": "building",
+                "detail": f"compiling {len(paragraphs)} paragraph(s) into {out.name}"}
 
     def _api_tailor_build(self, payload: dict) -> dict:
         """Build one posting's tailored resume, and report on a build already running.
