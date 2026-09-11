@@ -294,7 +294,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
     cursor: pointer; text-decoration: none; }
 .pick .docs button:hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); }
 .pick .docs button[disabled] { opacity: .5; cursor: default; }
-.pick .docs .tailor-tex { margin-left: 4px; }
+.pick .docs .tailor-tex, .pick .docs .letter-tex { margin-left: 4px; }
 
 /* The rest of the ranking. A <details>, so it opens with no script at all — and not a
    table, so the filter JS can never reach into the Today tab. */
@@ -341,7 +341,7 @@ td.act { text-align: right; }
     color: var(--ink); border-color: var(--ink-2); }
 .act button[disabled] { opacity: .5; cursor: default; }
 .act .tailor-build, .act a.tailor-dl, .act .tailor-tex,
-.act .letter-build, .act a.letter-dl { margin-right: 5px; }
+.act .letter-build, .act a.letter-dl, .act .letter-tex { margin-right: 5px; }
 
 /* -- grouped tables ------------------------------------------------------------------
    Rows render visible and JS collapses them on load — the `.tabs` rule applied to
@@ -876,13 +876,21 @@ _JS = """
     });
   }
 
+  // One handler for both documents. The endpoint comes off the class and the label to
+  // restore is read from the button rather than written here — the resume's says `tex`
+  // and the letter's `tex✉`, and a hardcoded string would silently relabel one of them
+  // the first time they diverged.
   document.addEventListener('click', function (e) {
-    var b = e.target.closest ? e.target.closest('button.tailor-tex') : null;
+    var b = e.target.closest
+      ? e.target.closest('button.tailor-tex, button.letter-tex') : null;
     if (!b || b.disabled) return;
-    function reset() { b.disabled = false; b.textContent = 'tex'; }
+    var was = b.textContent;
+    var url = b.classList.contains('letter-tex')
+      ? '/api/coverletter-tex' : '/api/tailored-tex';
+    function reset() { b.disabled = false; b.textContent = was; }
     b.disabled = true;
     b.textContent = '…';
-    fetch('/api/tailored-tex?company=' + encodeURIComponent(b.dataset.company)
+    fetch(url + '?company=' + encodeURIComponent(b.dataset.company)
           + '&job=' + encodeURIComponent(b.dataset.job), {cache: 'no-store'})
       .then(function (r) { return r.json(); })
       .then(function (res) {
@@ -1488,23 +1496,33 @@ def _tailor_control(row, state, built) -> str:
 
 
 def _letter_control(row, letter_row, letters_built) -> str:
-    """The `✉`: build the cover letter, or download it once a current PDF exists.
+    """The `✉` — build the cover letter, or download it once a current PDF exists — and
+    beside it `tex✉`, which copies the LaTeX that PDF is compiled from.
 
-    An envelope rather than a second arrow — two identical `↓` side by side is a control
-    you have to hover to read, and these fetch different documents. Shared by the actions
-    cell and a pick's documents line, `_tailor_control`'s reason.
+    An envelope rather than a second arrow: two identical `↓` side by side is a control
+    you have to hover to read, and these fetch different documents. The copy button
+    carries the same envelope for the same reason — in the actions cell nothing else
+    would distinguish it from the resume's `tex`, which sits two controls to its left.
+    Shared by the actions cell and a pick's documents line, `_tailor_control`'s reason.
+
+    `tex✉` renders in both of the `✉`'s states: the source is derived on request rather
+    than read off a built file, so it needs neither a build nor a TeX engine.
     """
+    c = html.escape(row["company"], quote=True)
+    j = html.escape(row["ats_job_id"], quote=True)
+    copy = (
+        f'<button class="letter-tex" data-company="{c}" data-job="{j}" '
+        'title="Copy the cover letter&#39;s LaTeX source">tex&#9993;</button>'
+    )
     if _letter_built(row, letters_built, letter_row):
         return (
             f'<a class="letter-dl" href="/api/coverletter?company={_q(row["company"])}'
             f'&amp;job={_q(row["ats_job_id"])}" '
-            'title="Download the cover letter" download>&#9993;</a>'
+            'title="Download the cover letter" download>&#9993;</a>' + copy
         )
-    c = html.escape(row["company"], quote=True)
-    j = html.escape(row["ats_job_id"], quote=True)
     return (
         f'<button class="letter-build" data-company="{c}" data-job="{j}" '
-        'data-glyph="&#9993;" title="Build the cover letter">&#9993;</button>'
+        'data-glyph="&#9993;" title="Build the cover letter">&#9993;</button>' + copy
     )
 
 
