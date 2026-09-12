@@ -14,6 +14,7 @@ Two surfaces, one dataset:
 | Add a job by hand | yes | no |
 | Change a stage, set a reminder, delete | yes | no |
 | See everything, with history | yes | yes |
+| See what you actually submitted | on the posting page, linked from the title | no |
 
 Plus a terminal mirror: `jobtracker applications` lists the same grouping, and
 `jobtracker apply` writes.
@@ -186,6 +187,24 @@ to *this* table:
   propose the same message again.
 - **The controls are `app-accept` and `app-dismiss`**, in the same `app-*` family as the
   rest of this page and therefore inside the exact-set test below.
+
+## What you sent
+
+`applications` records *that* you applied. What went out — which resume, which cover letter,
+what you typed into the questions the form asked — is `application_submissions`, frozen on the
+write that creates the application and shown on `/posting`. Full design in docs/posting.md; what
+matters to *this* table:
+
+- **The freeze rides the existing `applied` write.** `_api_disposition`, `_api_application` and
+  `cli.cmd_apply` each call it right after `advance_application`, conditioned on the application
+  not existing *before*. No new write path, and mail accept never freezes — it can only move a
+  row that already exists.
+- **Write-once**, because a submission is a fact about a moment. The posting page's "Update what
+  I submitted" is the one exception and is scoped to a row still at `applied`.
+- **The card's title links to `/posting`**, with a small `↗` for the employer. That also gives a
+  manual entry with no URL a live link, where it used to render as plain text.
+
+---
 
 ## Rules that must not be "simplified"
 

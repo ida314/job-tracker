@@ -161,6 +161,27 @@ def stored_name(company: str, ats_job_id: str, suffix: str) -> str:
     return f"{_slug(company)}_{_slug(ats_job_id)}_{digest}{suffix}"
 
 
+def letter_upload_name(company: str, ats_job_id: str, suffix: str) -> str:
+    """The filename a posting's *uploaded* cover letter is written under.
+
+    `<company>_<job>_<digest8>_letter<suffix>`, in RESUMES_DIR beside the uploaded
+    resumes — deliberately NOT in `config.LETTERS_DIR`. Two reasons, and the second is the
+    one that bites:
+
+    * That directory is documented as generated state where "deleting it costs a rebuild,
+      not a file" (config.py). A letter you wrote is a file.
+    * `letter.letter_path` already owns `LETTERS_DIR/<letter_stem>.pdf`, so a `.pdf`
+      upload would land on top of the letter `coverletter build` writes — and
+      `Dockerfile.serve` sets `JOBTRACKER_RESUMES` but not `JOBTRACKER_LETTERS`, so in the
+      serve image that directory is inside the image layer and `docker pull` would take
+      the only copy with it.
+
+    The `_letter` infix is what keeps it off the resume override for the same posting,
+    which `stored_name` mints from the identical digest.
+    """
+    return f"{stored_name(company, ats_job_id, '')}".rstrip(".") + f"_letter{suffix}"
+
+
 def path_for(filename: str) -> Path:
     return config.RESUMES_DIR / filename
 

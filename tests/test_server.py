@@ -1370,8 +1370,19 @@ def test_the_upload_cap_applies_to_every_route_that_carries_a_file():
     """A second upload route left out of the set reads its body as {} and reports "no
     file" — a correct-looking error for entirely the wrong reason."""
     assert server._UPLOAD_ROUTES == {
-        "/api/resume", "/api/resume-tex", "/api/posting-resume", "/api/session/file",
+        "/api/resume", "/api/resume-tex", "/api/posting-resume",
+        "/api/posting-letter", "/api/session/file",
     }
+
+
+def test_a_clear_route_carries_no_file_and_stays_out_of_the_upload_set():
+    """The other half of the rule, and the half a widening set would quietly break.
+
+    `/clear` carries `{company, ats_job_id}` and nothing else. In the set it would inherit
+    a body cap of several megabytes — the comment on `_UPLOAD_ROUTES` read backwards, and
+    a bound this server states in one place precisely so it cannot drift."""
+    for route in ("/api/posting-resume/clear", "/api/posting-letter/clear"):
+        assert route not in server._UPLOAD_ROUTES, route
 
 
 # -- the gap split ------------------------------------------------------------------

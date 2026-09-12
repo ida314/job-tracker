@@ -53,11 +53,13 @@ from . import (
     keywords as kw_mod,
     letter as letter_mod,
     live,
+    questions as questions_mod,
     rank as rank_mod,
     resume as resume_mod,
     resumes,
     safewrite,
     store,
+    submissions,
     tuning,
 )
 from .criteria import _LIST_KEYS, load_criteria
@@ -72,8 +74,12 @@ MAX_BODY = 64 * 1024  # a decision payload is a few hundred bytes
 # The body cap for routes that carry a file. It is a *set*, not one path: a second upload
 # route added without joining this set silently reads its body as `{}` and reports "no
 # file" — a correct-looking error for entirely the wrong reason.
+# `/api/posting-letter` carries a file and joins the set. Its `/clear` sibling does NOT,
+# for the same reason `/api/posting-resume/clear` does not: it carries `{company, job}`
+# and nothing else, and joining would hand a body cap of several megabytes to a route
+# whose payload is two short strings.
 _UPLOAD_ROUTES = {"/api/resume", "/api/resume-tex", "/api/posting-resume",
-                  "/api/session/file"}
+                  "/api/posting-letter", "/api/session/file"}
 MAX_UPLOAD = resumes.MAX_UPLOAD
 
 # How many tailored resumes one press of Finish may rebuild. Each is a TeX subprocess on
@@ -322,7 +328,7 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path,
 
     p = [
         "<!doctype html><meta charset=utf-8><title>Settings</title>",
-        f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_SETTINGS_CSS}</style>",
+        f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_SETTINGS_CSS}{_POSTING_CSS}</style>",
         "<body><div class=wrap>"
         f"<h1>Settings {dashboard_mod.version_chip()}</h1>", _NAV,
         f"<p class=note>Answer bank: <code>{html.escape(str(answers_path))}</code>"
@@ -425,8 +431,54 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path,
             "are kept; only the value changes.</p>"
         )
 
+    p.extend(_questions_card(conn))
+
     p.append(f"<script>{_JS}</script></div></body></html>")
     return "\n".join(p)
+
+
+def _questions_card(conn: sqlite3.Connection) -> list:
+    """The reusable question list every posting page starts from.
+
+    A checklist, not an answer bank. Nothing reads it to fill a form and nothing sends it
+    anywhere — it is copied onto a posting page for you to accept or change, and only
+    becomes that posting's own when you save it there. That is why the default lives here
+    and the answer lives in `posting_answers`: the same question gets a different answer
+    at a company you have a referral into.
+
+    Deliberately not `answers.yaml`'s `answers:` block, which belongs to the prefill half
+    and is switched off (`config.PREFILL_ENABLED`) — as is the DOM scraping that fills
+    `prefill_gaps`, so a list derived from either would be empty forever.
+    """
+    rows = store.template_questions(conn)
+    out = ['<h2>Application questions <span class=count>'
+           f'{len(rows)}</span></h2>',
+           '<p class=note>Copied onto every posting page as a starting point. The answer '
+           'here is a default — what you actually put is saved against the posting.</p>',
+           '<div class="card qsec" data-template="1">']
+    for row in rows:
+        qid = html.escape(row["qid"], quote=True)
+        out.append(f'<div class="q" data-qid="{qid}">')
+        out.append(
+            '<input class="qq" type="text" aria-label="Question" '
+            f'value="{html.escape(row["question"], quote=True)}">'
+        )
+        out.append(
+            '<textarea class="qa" rows="2" aria-label="Default answer" '
+            f'placeholder="a default answer, if it is always the same">'
+            f'{html.escape(row["answer"])}</textarea>'
+        )
+        out.append('<div class="qacts"><button class="qt-save">Save</button>'
+                   '<button class="qt-del danger">&times;</button></div></div>')
+    out.append(
+        '<div class="q qnew"><input class="qq" type="text" aria-label="New question" '
+        'placeholder="a question forms keep asking">'
+        '<textarea class="qa" rows="2" aria-label="Default answer" '
+        'placeholder="a default answer, if it is always the same"></textarea>'
+        '<div class="qacts"><button class="qt-add">+ add a question</button></div></div>'
+    )
+    out.append("</div>")
+    return out
 
 
 def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
@@ -504,6 +556,48 @@ def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
 
 
 
+_POSTING_CSS = """
+.pmeta{margin:.1rem 0 .9rem;display:flex;flex-wrap:wrap;gap:.4rem .55rem;align-items:center}
+.pmeta .quiet{color:var(--muted);font-style:italic}
+.applybar{margin:.2rem 0 1.2rem}
+.applybar .apply{display:inline-block;padding:.45rem .9rem;border-radius:7px;
+        border:1px solid var(--line);background:var(--card);color:inherit;
+        text-decoration:none;font-weight:600}
+.pblock{border:1px solid var(--line);border-radius:10px;padding:.85rem 1rem;
+        margin:.9rem 0;background:var(--card)}
+.pblock h2{margin:0 0 .6rem;font-size:.95rem}
+.pblock .terms,.pblock .why{font-size:.85rem;color:var(--muted);margin:.15rem 0}
+.jd{white-space:pre-wrap;font-size:.83rem;line-height:1.5;max-height:26rem;
+        overflow-y:auto;margin-top:.5rem;color:var(--fg)}
+.doc,.sdoc{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;
+        padding:.4rem 0;border-top:1px solid var(--line)}
+.doc:first-of-type,.sdoc:first-of-type{border-top:0}
+.dlabel{min-width:6.5rem;font-weight:600;font-size:.85rem}
+.dname{font-family:ui-monospace,monospace;font-size:.8rem}
+.dkind{font-size:.75rem;color:var(--muted)}
+.dnone{font-size:.8rem;color:var(--muted);font-style:italic}
+.ddl{text-decoration:none;border:1px solid var(--line);border-radius:5px;
+        padding:.05rem .4rem;color:inherit}
+.pfile{font-size:.75rem;max-width:13rem}
+.q{display:grid;grid-template-columns:1fr;gap:.3rem;padding:.55rem 0;
+        border-top:1px solid var(--line)}
+.q:first-of-type{border-top:0}
+.q.seeded{opacity:.85}
+.qq,.qa{font:inherit;font-size:.85rem;padding:.35rem;border:1px solid var(--line);
+        border-radius:6px;background:var(--bg);color:var(--fg);width:100%;
+        box-sizing:border-box}
+.qa{resize:vertical}
+.qacts{display:flex;gap:.4rem;align-items:center}
+.qseed{font-size:.72rem;color:var(--muted);font-style:italic;margin-right:auto}
+.sub{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--line);border-radius:8px}
+.shead{font-size:.85rem;margin-bottom:.35rem}
+.sqa{display:grid;grid-template-columns:1fr;gap:.15rem;margin-top:.4rem}
+.sq{font-size:.8rem;font-weight:600}
+.sa{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin-bottom:.4rem}
+.qsec .danger,.aprow .danger{color:var(--warn)}
+@media (max-width:620px){.dlabel{min-width:auto}}
+"""
+
 _COMPANIES_CSS = """
 .cocard{border:1px solid var(--line);border-radius:10px;padding:1rem;margin:1rem 0;
         background:var(--card)}
@@ -531,6 +625,432 @@ _COMPANIES_CSS = """
 # order is the answer to "which of these can I actually check automatically?".
 _ATS_CHOICES = ("greenhouse", "ashby", "lever", "aggregator",
                 "workday", "gem", "bespoke", "unknown")
+
+
+def render_posting(conn, company: str, ats_job_id: str, companies, criteria,
+                   answers, today: str):
+    """One posting, everything about it, and everything you will send. `(html, found)`.
+
+    The page you open *instead of* the employer's form. Every posting link under `serve`
+    lands here; the employer is one clearly-labelled anchor away, after the documents and
+    the questions are in order.
+
+    Connection-in / string-out and a **pure read**, like `render_applications` and
+    `render_tuning`. That purity is load-bearing in a way it is not on those two: this
+    page merges the question template into the posting's own answers on the way out, and
+    a merge that wrote would turn opening a page into a claim about what you submitted.
+    `questions.merge` is why it does not.
+
+    Four sources, read in order and **never joined** (a join drops manual entries, which
+    is docs/applications.md's rule for `all_applications`):
+
+    1. `applications` — the only source a manual entry has at all.
+    2. `postings` + its verdict and judgment — absent for a manual entry.
+    3. the two documents, keyed on the pair, valid either way.
+    4. `posting_answers`, and the submission if one was frozen.
+
+    `found` is False only when all of them are empty; the caller sends 404 with the page,
+    because a detail page for a pair that does not exist is not an empty page.
+    """
+    by_name = {c.name: c for c in (companies or [])}
+    app = store.get_application(conn, company, ats_job_id)
+    posting = store.posting_detail(conn, company, ats_job_id)
+
+    p = [
+        "<!doctype html><meta charset=utf-8>",
+        f"<title>{html.escape(posting['title'] if posting else (app['title'] if app else 'Posting'))}</title>",
+        f"<style>{dashboard_mod._CSS}{_EXTRA_CSS}{_APPS_CSS}{_POSTING_CSS}</style>",
+        "<body><div class=wrap>",
+    ]
+    if posting is None and app is None:
+        p.append(f"<h1>Not found {dashboard_mod.version_chip()}</h1>")
+        p.append(_NAV)
+        p.append(
+            '<div class=empty>No posting and no application for '
+            f"<code>{html.escape(company)}</code> / "
+            f"<code>{html.escape(ats_job_id)}</code>.</div>"
+        )
+        p.append(f"<script>{_JS}</script></div></body></html>")
+        return "\n".join(p), False
+
+    title = (posting or app)["title"]
+    url = (posting["url"] if posting else None) or (app["url"] if app else "")
+    location = (posting["location"] if posting else None) or (app["location"] if app else "")
+
+    p.append(f"<h1>{html.escape(title)} {dashboard_mod.version_chip()}</h1>")
+    # The nav goes on every served page. A detail page with no way back is the one place
+    # its absence would be felt.
+    p.append(_NAV)
+    p.extend(_posting_header(posting, app, company, location, criteria, by_name, today))
+    p.extend(_posting_apply_link(url))
+    p.extend(_posting_judgment(posting))
+    p.extend(_posting_documents(conn, company, ats_job_id, answers))
+    p.extend(_posting_questions(conn, company, ats_job_id))
+    p.extend(_posting_application(conn, company, ats_job_id, title, app, today))
+    p.extend(_posting_description(posting))
+
+    p.append(f"<script>{_JS}</script></div></body></html>")
+    return "\n".join(p), True
+
+
+def _posting_header(posting, app, company, location, criteria, by_name, today) -> list:
+    """The one-line identity: tier, company, location, age, score."""
+    bits = []
+    tier = dashboard_mod._tier_of(company, by_name)
+    var = dashboard_mod._band_var(tier)
+    bits.append(
+        f'<span class="tier" style="background:var({var});color:var({var}-ink)">'
+        f'T{html.escape(str(tier))}</span>'
+    )
+    bits.append(f"<span>{html.escape(company)}</span>")
+    if location:
+        # The same one definition of NYC the tables use, from criteria.yaml.
+        pin = ('<span class="pin">NYC</span> '
+               if criteria is not None and location_rank(location, criteria) == 0 else "")
+        bits.append(f"<span>{pin}{html.escape(location)}</span>")
+    if posting is not None:
+        days = rank_mod.days_since(posting["posted_on"], today)
+        bits.append(f'<span>{"posted " + dashboard_mod._ago(days) if days is not None else "posted date unknown"}</span>')
+        if posting["score"] is not None:
+            bits.append(f'<span class="score">score {posting["score"]:.1f}</span>')
+        if posting["closed_at"]:
+            bits.append('<span class="quiet">this req has closed</span>')
+    else:
+        # `is_manual` rather than a prefix match, so the one definition of "hand-entered"
+        # stays in store.py.
+        kind = ("added by hand — no posting record"
+                if app is not None and store.is_manual(app["ats_job_id"])
+                else "no posting record — the req has been pruned")
+        bits.append(f'<span class="quiet">{kind}</span>')
+    return [f'<div class="meta pmeta">{" · ".join(bits)}</div>']
+
+
+def _posting_apply_link(url: str) -> list:
+    """The employer's own form. The one thing on this page that leaves it."""
+    href = dashboard_mod._safe_url(url)
+    if href == "#":
+        return ['<p class="note">No application link was recorded for this one.</p>']
+    return [
+        f'<p class="applybar"><a class="apply" href="{href}" target="_blank" '
+        'rel="noopener noreferrer">Open the application &#8599;</a></p>'
+    ]
+
+
+def _posting_judgment(posting) -> list:
+    """What `judge` made of it. Absent, not zero, when nothing has judged it."""
+    if posting is None or not posting["judged_at"]:
+        return []
+    out = ['<section class="pblock"><h2>Why this ranked</h2>']
+    if posting["why"]:
+        out.append(f'<div class="why">{html.escape(posting["why"])}</div>')
+    out.append(
+        f'<div class="terms">fit {html.escape(posting["backend_fit"] or "?")} · '
+        f'growth {html.escape(posting["growth"] or "?")} · '
+        f'entry risk {html.escape(posting["entry_risk"] or "?")}</div>'
+    )
+    if posting["verdict"]:
+        out.append(
+            f'<div class="terms">verdict {html.escape(posting["verdict"])} '
+            f'— {html.escape(posting["reason"] or "")}</div>'
+        )
+    out.append("</section>")
+    return out
+
+
+def _posting_description(posting) -> list:
+    """The job description as `check` cached it. Last, because it is the longest thing
+    here and the two things you came to do are above it."""
+    if posting is None or not posting["description"]:
+        return []
+    return [
+        '<section class="pblock"><details><summary>Job description</summary>'
+        f'<div class="jd">{html.escape(posting["description"])}</div>'
+        "</details></section>"
+    ]
+
+
+def _posting_documents(conn, company: str, ats_job_id: str, answers) -> list:
+    """The two documents, each naming **the one that would actually go out**.
+
+    Read through `submissions.effective_*`, the same call the freeze makes, so the page
+    and the archive cannot disagree about which file this is — the split `resumes.py` was
+    extracted to prevent, at the one moment it would matter.
+
+    There is no attach control here and there must not be one. Uploading a document you
+    chose is a decision you typed; promoting the model's tailored resume is
+    `tailor build --attach`, after you have read the diff. CLAUDE.md: "Nothing anywhere
+    accepts an edit on a click."
+    """
+    c = html.escape(company, quote=True)
+    j = html.escape(ats_job_id, quote=True)
+    qc, qj = dashboard_mod._q(company), dashboard_mod._q(ats_job_id)
+    out = ['<section class="pblock"><h2>Documents</h2>']
+
+    resume_path, resume_kind = submissions.effective_resume(
+        conn, answers, company, ats_job_id
+    )
+    override = store.get_posting_resume(conn, company, ats_job_id)
+    out.append('<div class="doc">')
+    out.append('<span class="dlabel">Resume</span>')
+    if resume_path is None:
+        out.append('<span class="dnone">nothing to send — no upload, and the answer '
+                   'bank names no resume</span>')
+    else:
+        word = ("uploaded for this posting" if resume_kind == "override"
+                else "your default, from the answer bank")
+        out.append(f'<span class="dname">{html.escape(resume_path.name)}</span>'
+                   f'<span class="dkind">{word}</span>')
+    if resume_kind == "override":
+        out.append(
+            f'<a class="ddl" href="/api/document?company={qc}&amp;job={qj}&amp;kind=resume" '
+            'download>&darr;</a>'
+        )
+    out.append(
+        '<input type="file" class="pfile" data-kind="resume" accept=".pdf,.docx" '
+        'aria-label="Upload a resume for this posting">'
+        f'<button class="p-upload" data-kind="resume" data-company="{c}" '
+        f'data-job="{j}">Upload an override</button>'
+    )
+    if override is not None:
+        out.append(
+            f'<button class="p-clear" data-kind="resume" data-company="{c}" '
+            f'data-job="{j}">Use the default</button>'
+        )
+    out.append("</div>")
+
+    letter_path, letter_kind = submissions.effective_letter(
+        conn, answers, company, ats_job_id
+    )
+    luploaded = store.get_posting_letter(conn, company, ats_job_id)
+    out.append('<div class="doc">')
+    out.append('<span class="dlabel">Cover letter</span>')
+    if letter_path is None:
+        out.append('<span class="dnone">nothing to send — none uploaded and none '
+                   'written for this posting</span>')
+    else:
+        word = {"override": "uploaded for this posting",
+                "generated": "written for this posting",
+                "default": "your default, from the answer bank"}[letter_kind]
+        out.append(f'<span class="dname">{html.escape(letter_path.name)}</span>'
+                   f'<span class="dkind">{word}</span>')
+    if letter_kind == "override":
+        out.append(
+            f'<a class="ddl" href="/api/document?company={qc}&amp;job={qj}&amp;kind=letter" '
+            'download>&#9993;</a>'
+        )
+    elif letter_kind == "generated":
+        # The existing route, which serves what `coverletter build` compiled.
+        out.append(
+            f'<a class="ddl" href="/api/coverletter?company={qc}&amp;job={qj}" '
+            'download>&#9993;</a>'
+        )
+    out.append(
+        '<input type="file" class="pfile" data-kind="letter" accept=".pdf,.docx" '
+        'aria-label="Upload a cover letter for this posting">'
+        f'<button class="p-upload" data-kind="letter" data-company="{c}" '
+        f'data-job="{j}">Upload an override</button>'
+    )
+    if luploaded is not None:
+        out.append(
+            f'<button class="p-clear" data-kind="letter" data-company="{c}" '
+            f'data-job="{j}">Use the written one</button>'
+        )
+    out.append("</div>")
+    out.append("</section>")
+    return out
+
+
+def _posting_questions(conn, company: str, ats_job_id: str) -> list:
+    """The extra questions this form asks, and what you put.
+
+    Template rows the posting has no answer for render here **unsaved**, carrying
+    `data-seed="1"`. That flag is not decoration: an unsaved row's default has not been
+    submitted and `questions.answered` will not record it, so the page has to say which
+    rows are which rather than showing you a filled-in form that is not filled in.
+    """
+    merged = questions_mod.merge(
+        store.posting_answers(conn, company, ats_job_id),
+        store.template_questions(conn),
+    )
+    c = html.escape(company, quote=True)
+    j = html.escape(ats_job_id, quote=True)
+    out = [f'<section class="pblock qsec" data-company="{c}" data-job="{j}">',
+           "<h2>Questions</h2>"]
+    if not merged:
+        out.append(
+            '<p class="note">Nothing yet. Add the questions this form asks, or keep a '
+            'list you reuse on <a href="/settings">Settings</a>.</p>'
+        )
+    for row in merged:
+        qid = html.escape(row["qid"], quote=True)
+        seed = ' data-seed="1"' if not row["saved"] else ""
+        cls = "q seeded" if not row["saved"] else "q"
+        out.append(f'<div class="{cls}" data-qid="{qid}"{seed}>')
+        out.append(
+            '<input class="qq" type="text" aria-label="Question" '
+            f'value="{html.escape(row["question"], quote=True)}">'
+        )
+        out.append(
+            '<textarea class="qa" rows="2" aria-label="Answer" '
+            f'placeholder="your answer">{html.escape(row["answer"])}</textarea>'
+        )
+        out.append('<div class="qacts">')
+        if not row["saved"]:
+            out.append('<span class="qseed" title="From your template — not saved to '
+                       'this posting, and not recorded as submitted, until you save it">'
+                       "from your template</span>")
+        out.append('<button class="q-save">Save</button>')
+        if row["saved"]:
+            out.append('<button class="q-del danger">&times;</button>')
+        out.append("</div></div>")
+    out.append(
+        '<div class="q qnew"><input class="qq" type="text" aria-label="New question" '
+        'placeholder="a question this form asks">'
+        '<textarea class="qa" rows="2" aria-label="New answer" '
+        'placeholder="your answer"></textarea>'
+        '<div class="qacts"><button class="q-add">+ add a question</button></div></div>'
+    )
+    out.append("</section>")
+    return out
+
+
+def _posting_application(conn, company: str, ats_job_id: str, title: str,
+                         app, today: str) -> list:
+    """Either the button that records the application, or the application itself.
+
+    Before: one control, which POSTs the same `/api/disposition` the actions cell does —
+    no new write path, and the freeze rides along with it.
+
+    After: the stage and reminder controls `/applications` already carries, plus what was
+    frozen. The controls are deliberately the same classes as that page's, because the
+    handlers are the same branches in the same `_JS` — this page emits that script too.
+    """
+    c = html.escape(company, quote=True)
+    j = html.escape(ats_job_id, quote=True)
+    out = [f'<section class="pblock aprow" data-company="{c}" data-job="{j}">']
+
+    if app is None:
+        out.append("<h2>Have you applied?</h2>")
+        out.append(
+            '<p class="note">Recording it keeps what is above — the documents that '
+            'would go out right now, and the answers you saved.</p>'
+        )
+        out.append('<div class="acts"><button class="p-applied">I applied</button></div>')
+        out.append("</section>")
+        return out
+
+    out.append("<h2>Your application</h2>")
+    events = store.events_by_application(conn).get((company, ats_job_id), [])
+    meta = []
+    repeats = apps_mod.round_counts(events).get(app["status"], 0)
+    times = f" &times;{repeats}" if repeats > 1 else ""
+    meta.append(
+        f'<span class="st st-{html.escape(app["status"], quote=True)}">'
+        f'{html.escape(app["status"])}{times}</span>'
+    )
+    applied_days = apps_mod.days_since(app["applied_at"], today)
+    if applied_days is not None:
+        meta.append(f"applied {dashboard_mod._ago(applied_days)}")
+    state = apps_mod.action_state(app, today)
+    if state:
+        meta.append(dashboard_mod._due_label(app, today, state))
+    out.append(f'<div class="meta">{" · ".join(meta)}</div>')
+
+    if len(events) > 1:
+        out.append(f"<details><summary>History ({len(events)})</summary><div class='tl'>")
+        for event in events:
+            out.append(
+                f'<span class="d">{html.escape(apps_mod.day_of(event["at"]) or "")}</span>'
+                f'<span class="s">{html.escape(event["status"])}</span>'
+                f'<span class="n">{html.escape(event["note"] or "")}</span>'
+            )
+        out.append("</div></details>")
+
+    out.extend(_submitted_block(conn, company, ats_job_id, app))
+
+    # The same two writes `/applications` makes, and the same two controls, because
+    # moving a stage and changing a reminder are different things (docs/applications.md).
+    out.append("<div class=appform>")
+    out.append("<label>Stage" + _status_select("appstatus", app["status"]) + "</label>")
+    out.append(
+        '<label>What happened<input class=appnote type=text placeholder="round 2 — '
+        'system design"></label>'
+    )
+    out.append('<div class=acts><button class=app-save>Log stage</button></div>')
+    out.append(
+        '<label>Follow up on<input class=appnext type=date value="'
+        f'{html.escape(app["next_action"] or "", quote=True)}"></label>'
+    )
+    out.append(
+        '<label>On what<input class=appnextnote type=text value="'
+        f'{html.escape(app["next_action_note"] or "", quote=True)}" '
+        'placeholder="follow up"></label>'
+    )
+    out.append('<div class=acts><button class=app-meta>Set reminder</button></div>')
+    out.append("</div>")
+    out.append("</section>")
+    return out
+
+
+def _submitted_block(conn, company: str, ats_job_id: str, app) -> list:
+    """What was frozen when this application was recorded.
+
+    The archived documents are served from `SUBMISSIONS_DIR`, not from the working copies:
+    that is the whole reason they were copied, and linking the live file here would undo
+    it on the next `tailor build`.
+
+    "Update what I submitted" is the only control anywhere that passes `replace=True`. It
+    exists for one flow — `+ tracker` on a table row records an application before you
+    have opened this page, so the snapshot it froze is of a page you had not filled in.
+    It is scoped to an application still at `applied`: once an employer has replied, what
+    you sent is history and rewriting it is not a correction.
+    """
+    qc, qj = dashboard_mod._q(company), dashboard_mod._q(ats_job_id)
+    row = store.get_submission(conn, company, ats_job_id)
+    out = ['<div class="sub">']
+    if row is None:
+        out.append('<div class="dnone">Nothing was recorded about what you sent.</div>')
+    else:
+        day = apps_mod.day_of(row["submitted_at"]) or ""
+        out.append(f'<div class="shead">Submitted <strong>{html.escape(day)}</strong></div>')
+        for kind, label, glyph in (("resume", "Resume", "&darr;"),
+                                   ("letter", "Cover letter", "&#9993;")):
+            name, word = row[kind], row[f"{kind}_kind"]
+            if not name:
+                out.append(f'<div class="sdoc"><span class="dlabel">{label}</span>'
+                           '<span class="dnone">none went out</span></div>')
+                continue
+            out.append(
+                f'<div class="sdoc"><span class="dlabel">{label}</span>'
+                f'<span class="dname">{html.escape(name)}</span>'
+                f'<span class="dkind">{html.escape(word or "")}</span>'
+                f'<a class="ddl" href="/api/document?company={qc}&amp;job={qj}'
+                f'&amp;kind=submitted-{kind}" download>{glyph}</a></div>'
+            )
+        frozen = store.submitted_answers(row)
+        if frozen:
+            out.append(f"<details><summary>What you put ({len(frozen)})</summary>"
+                       '<div class="sqa">')
+            for entry in frozen:
+                out.append(
+                    f'<div class="sq">{html.escape(str(entry.get("question") or ""))}</div>'
+                    f'<div class="sa">{html.escape(str(entry.get("answer") or ""))}</div>'
+                )
+            out.append("</div></details>")
+        else:
+            out.append('<div class="dnone">No answers were saved when this was '
+                       "recorded.</div>")
+
+    if app["status"] == "applied":
+        c = html.escape(company, quote=True)
+        j = html.escape(ats_job_id, quote=True)
+        out.append(
+            f'<div class="acts"><button class="p-resubmit" data-company="{c}" '
+            f'data-job="{j}" title="Replace this record with the documents and answers '
+            'as they stand now">Update what I submitted</button></div>'
+        )
+    out.append("</div>")
+    return out
 
 
 def render_companies(conn: sqlite3.Connection, companies, error: str = "") -> str:
@@ -1559,11 +2079,18 @@ def _application_card(app, events_by, today: str, by_name) -> list:
     p = [f'<article class="{cls}" data-company="{c}" data-job="{j}">']
 
     title = html.escape(app["title"])
-    href = dashboard_mod._safe_url(app["url"])
+    # The title goes to the posting page — where what you sent is recorded — and the
+    # employer keeps a small anchor of its own beside it. This page only exists under
+    # `serve`, so the internal link always works; it also gives a manual entry with no
+    # URL a live link, where before it rendered as plain text.
     heading = (
-        f'<a href="{href}" target="_blank" rel="noopener">{title}</a>'
-        if href != "#" else title
+        f'<a href="/posting?company={dashboard_mod._q(app["company"])}'
+        f'&amp;job={dashboard_mod._q(app["ats_job_id"])}">{title}</a>'
     )
+    href = dashboard_mod._safe_url(app["url"])
+    if href != "#":
+        heading += (f' <a class="out" href="{href}" target="_blank" rel="noopener" '
+                    'title="Open the employer&#39;s posting">&#8599;</a>')
     p.append(f'<h3>{heading} <span class="co">· {html.escape(app["company"])}</span></h3>')
 
     meta = []
@@ -2341,6 +2868,23 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._send(page)
+            elif path == "/posting":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                company = (query.get("company") or [""])[0]
+                job_id = (query.get("job") or [""])[0]
+                conn = self._conn()
+                try:
+                    page, found = render_posting(
+                        conn, company, job_id, self._companies(),
+                        self._criteria_quietly(), self._answers(), _today(),
+                    )
+                finally:
+                    conn.close()
+                # 404 in the status line AND in the page: a detail page for a pair that
+                # does not exist is not a page that happens to be empty.
+                self._send(page, 200 if found else 404)
+            elif path == "/api/document":
+                self._send_document()
             elif path == "/api/session":
                 # `idle=1` is the Pause button: keep polling for the phase and the
                 # counts, stop claiming somebody is looking at the picture.
@@ -2407,6 +2951,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_posting_resume(payload))
             elif path == "/api/posting-resume/clear":
                 self._send_json(self._api_posting_resume_clear(payload))
+            elif path == "/api/posting-letter":
+                self._send_json(self._api_posting_letter(payload))
+            elif path == "/api/posting-letter/clear":
+                self._send_json(self._api_posting_letter_clear(payload))
+            elif path == "/api/posting-answer":
+                self._send_json(self._api_posting_answer(payload))
+            elif path == "/api/question":
+                self._send_json(self._api_question(payload))
+            elif path == "/api/submission":
+                self._send_json(self._api_submission(payload))
             elif path == "/api/tailor-build":
                 self._send_json(self._api_tailor_build(payload))
             elif path == "/api/coverletter-build":
@@ -2493,6 +3047,19 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001
             log.warning("could not load companies.yaml; tier chips will be omitted")
             return []
+
+    def _criteria_quietly(self):
+        """criteria.yaml, for the NYC pin. `_companies`' sibling and the same policy.
+
+        A posting page must open when the rules file is mid-edit. Losing the pin is a
+        cosmetic degradation; refusing the page that tells you what you sent is not.
+        `/tuning` and `/readyz` still surface a broken criteria file loudly.
+        """
+        try:
+            return load_criteria(self.server.criteria_path)
+        except Exception:  # noqa: BLE001
+            log.warning("could not load criteria.yaml; the location pin will be omitted")
+            return None
 
     def _render_dashboard(self) -> str:
         """The existing dashboard, regenerated live. Unchanged code, unchanged output."""
@@ -2610,6 +3177,14 @@ class Handler(BaseHTTPRequestHandler):
                 from .cli import applications_total
 
                 applications_total.add(1)
+                # Freeze what went out, in the same breath. Write-once, so pressing this
+                # twice — or having already recorded it from the posting page — finds the
+                # row standing and leaves its files alone. `+ tracker` from a table row
+                # you never opened freezes an empty one, which the posting page's
+                # "Update what I submitted" is there to correct.
+                submissions.freeze(
+                    conn, company, job_id, now, self._answers()
+                )
                 detail = "applied"
             elif action == "skipped":
                 store.set_deferral(conn, company, job_id, "skipped", now, note=note)
@@ -2699,11 +3274,18 @@ class Handler(BaseHTTPRequestHandler):
                 source = "manual"
 
             now = datetime.now().isoformat(timespec="seconds")
+            # Read before the write: this endpoint both creates and advances, and only a
+            # creation is a submission. Conditioned on the row's absence rather than on
+            # the status, because recording something straight into `interview` is still
+            # the first time you told the system about it.
+            first = store.get_application(conn, company, job_id) is None
             store.advance_application(
                 conn, company, job_id, title, status, now, note=note,
                 url=url, location=location, source=source,
                 next_action=next_action, next_action_note=next_action_note,
             )
+            if first:
+                submissions.freeze(conn, company, job_id, now, self._answers())
             conn.commit()
             from .cli import applications_total
 
@@ -2846,6 +3428,18 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         return {"ok": True, "detail": "dismissed"}
+
+    def _answers(self):
+        """The answer bank, or None. Never raises.
+
+        `_keywords`' sibling, with the opposite error policy on purpose: the two readers
+        here want the bank only for the two file paths on it (`resume`, `cover_letter`),
+        and a malformed bank must not stop you recording an application. The page that
+        exists to show you the bank — `/settings` — still reports the error, through
+        `_load_answers_quietly` directly.
+        """
+        bank, _ = _load_answers_quietly(Path(self.server.answers_path))
+        return bank
 
     def _keywords(self) -> tuple:
         """`(Keywords, error)` — the lists, and why they could not be read.
@@ -3467,6 +4061,192 @@ class Handler(BaseHTTPRequestHandler):
         reads tolerate that (`load_companies(None)` defaults) while a write cannot."""
         return Path(self.server.companies_path or config.COMPANIES_YAML)
 
+    # -- the posting page ------------------------------------------------------------
+    def _known_posting(self, conn, company: str, job_id: str):
+        """The title for a posting the page may write against, or None.
+
+        A pair is addressable when `postings` has it **or** `applications` does — the
+        second is what makes a manual entry, which has no posting row at all, a first-class
+        subject here. Every write below goes through this, so none of them can be used to
+        mint rows for a job that does not exist.
+        """
+        row = conn.execute(
+            "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
+            (company, job_id),
+        ).fetchone()
+        if row is not None:
+            return row["title"]
+        app = store.get_application(conn, company, job_id)
+        return app["title"] if app is not None else None
+
+    def _api_posting_answer(self, payload: dict) -> dict:
+        """Save or delete one of a posting's extra questions.
+
+        `op: "save"` upserts, `op: "delete"` removes. One route rather than two, the shape
+        `/api/keyword` already uses, because they are the same row and the same refusals.
+
+        The `question` text is stored **as the page rendered it**, not looked up from the
+        template. A row seeded from the template and then saved is this posting's own from
+        that moment: editing the template later must not rewrite an answer you already
+        gave, and re-deriving the wording here is exactly how it would.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        op = str(payload.get("op") or "save")
+        qid = str(payload.get("qid") or "").strip()
+        question = str(payload.get("question") or "").strip()
+        answer = str(payload.get("answer") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+        if op not in ("save", "delete"):
+            return {"ok": False, "error": "op must be save or delete"}
+
+        conn = self._conn()
+        try:
+            if self._known_posting(conn, company, job_id) is None:
+                return {"ok": False, "error": "no such posting"}
+            if op == "delete":
+                if not qid:
+                    return {"ok": False, "error": "qid is required"}
+                store.delete_posting_answer(conn, company, job_id, qid)
+                conn.commit()
+                return {"ok": True, "detail": "removed"}
+            if not question:
+                return {"ok": False, "error": "a question needs some text"}
+            # No qid means the page is saving a row it minted client-side for a question
+            # you just typed. Minting here, against the ids already on this posting, is
+            # what keeps two questions that slug alike off one row.
+            if not qid:
+                qid = questions_mod.mint_qid(
+                    question, store.taken_answer_qids(conn, company, job_id)
+                )
+            store.set_posting_answer(
+                conn, company, job_id, qid, question, answer, _today()
+            )
+            conn.commit()
+            return {"ok": True, "detail": "saved", "qid": qid}
+        finally:
+            conn.close()
+
+    def _api_question(self, payload: dict) -> dict:
+        """Save or delete one question on the reusable template. `/settings` writes it.
+
+        Deleting a template question deliberately leaves every `posting_answers` row alone:
+        a question you stopped being asked is not a question you never answered, and
+        sweeping them would rewrite the record of what you submitted.
+        """
+        op = str(payload.get("op") or "save")
+        qid = str(payload.get("qid") or "").strip()
+        question = str(payload.get("question") or "").strip()
+        answer = str(payload.get("answer") or "")
+        if op not in ("save", "delete"):
+            return {"ok": False, "error": "op must be save or delete"}
+
+        conn = self._conn()
+        try:
+            if op == "delete":
+                if not qid:
+                    return {"ok": False, "error": "qid is required"}
+                store.delete_template_question(conn, qid)
+                conn.commit()
+                return {"ok": True, "detail": "removed"}
+            if not question:
+                return {"ok": False, "error": "a question needs some text"}
+            if not qid:
+                taken = {r["qid"] for r in store.template_questions(conn)}
+                qid = questions_mod.mint_qid(question, taken)
+            store.set_template_question(conn, qid, question, answer, _today())
+            conn.commit()
+            return {"ok": True, "detail": "saved", "qid": qid}
+        finally:
+            conn.close()
+
+    def _api_posting_letter(self, payload: dict) -> dict:
+        """Upload a cover letter for one posting, overriding the one `coverletter` wrote.
+
+        Into `RESUMES_DIR` under a name this server minted, never `LETTERS_DIR`: that
+        directory is rebuildable generated state, `letter_path` already owns the `.pdf` in
+        it, and the serve image does not mount it. See `resumes.letter_upload_name`.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+        conn = self._conn()
+        try:
+            if self._known_posting(conn, company, job_id) is None:
+                return {"ok": False, "error": "no such posting"}
+            try:
+                blob, suffix = resumes.validate_upload(
+                    payload.get("filename"), payload.get("content_b64")
+                )
+            except resumes.RefusedUpload as exc:
+                return {"ok": False, "error": str(exc)}
+            name = resumes.letter_upload_name(company, job_id, suffix)
+            resumes.write_atomic(resumes.path_for(name), blob)
+            store.set_posting_letter(conn, company, job_id, name, len(blob), _today())
+            conn.commit()
+            log.info("cover letter for %s %s saved as %s (%d bytes)",
+                     company, job_id, name, len(blob))
+            return {"ok": True, "filename": name, "bytes": len(blob)}
+        finally:
+            conn.close()
+
+    def _api_posting_letter_clear(self, payload: dict) -> dict:
+        """Go back to the letter `coverletter build` writes for this posting."""
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+        conn = self._conn()
+        try:
+            row = store.get_posting_letter(conn, company, job_id)
+            if row is None:
+                return {"ok": False, "error": "this posting has no letter of its own"}
+            store.clear_posting_letter(conn, company, job_id)
+            conn.commit()
+            path = resumes.path_for(row["filename"])
+            # After the row, `_api_posting_resume_clear`'s rule: an orphaned file is
+            # inert, a row pointing at a deleted file logs on every lookup.
+            try:
+                path.unlink()
+            except OSError:
+                log.warning("could not remove %s", path)
+            return {"ok": True, "detail": "removed"}
+        finally:
+            conn.close()
+
+    def _api_submission(self, payload: dict) -> dict:
+        """Re-record what you submitted for one posting. The only `replace=True` caller.
+
+        This exists for one flow: `+ tracker` on a table row records an application before
+        you have opened the posting page, so the write-once snapshot it froze is of a page
+        you had not filled in yet. Everything else reaches `application_submissions`
+        through the freeze on the `applied` write.
+
+        It refuses when there is no application, because a submission with nothing to
+        belong to is a record of something that did not happen.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+        conn = self._conn()
+        try:
+            if store.get_application(conn, company, job_id) is None:
+                return {"ok": False,
+                        "error": "record the application first — there is nothing to "
+                                 "attach this to"}
+            out = submissions.freeze(
+                conn, company, job_id,
+                datetime.now().isoformat(timespec="seconds"),
+                self._answers(), replace=True,
+            )
+            conn.commit()
+            return {"ok": True, "detail": "recorded", "summary": out}
+        finally:
+            conn.close()
+
     def _api_company(self, payload: dict) -> dict:
         """Add one company to companies.yaml, verifying the board first.
 
@@ -3809,6 +4589,72 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         self._send_bytes(blob, "application/pdf", filename=path.name)
+
+    def _send_posting_file(self, path, root, missing: str, wrong: str) -> None:
+        """Hand over one per-posting document, containment-checked against `root`.
+
+        Factored out of `_send_tailored` / `_send_coverletter`'s shape rather than copied a
+        third and fourth time: every download here is the same five steps, and four copies
+        of a containment check is how one of them comes to be missing it.
+        """
+        if path is None:
+            self._send_json({"ok": False, "error": missing}, 404)
+            return
+        try:
+            inside = path.resolve().parent == root.resolve()
+        except OSError:
+            inside = False
+        if not inside:
+            self._send_json({"ok": False, "error": wrong}, 400)
+            return
+        try:
+            blob = path.read_bytes()
+        except OSError:
+            self._send_json({"ok": False, "error": missing}, 404)
+            return
+        self._send_bytes(blob, _content_type(path), filename=path.name)
+
+    def _send_document(self) -> None:
+        """`/api/document?company=&job=&kind=` — one posting's documents, all four kinds.
+
+        One route rather than four near-identical ones. `kind` is matched against a closed
+        set and nothing from the query string ever reaches a path: the names come from
+        `resumes.stored_name` and `submissions.archive_dir`, both of which slug to
+        `[a-z0-9_]`, and `_send_posting_file` containment-checks what they return anyway.
+
+        `submitted-*` is the archive and is the reason this route exists at all: those two
+        files are the only documents here that nothing can rebuild.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        company = (query.get("company") or [""])[0]
+        job_id = (query.get("job") or [""])[0]
+        kind = (query.get("kind") or [""])[0]
+        if not company or not job_id:
+            self._send_json({"ok": False, "error": "company and job are required"}, 400)
+            return
+        if kind not in ("resume", "letter", "submitted-resume", "submitted-letter"):
+            self._send_json({"ok": False, "error": "unknown document"}, 400)
+            return
+
+        conn = self._conn()
+        try:
+            if kind == "resume":
+                row = store.get_posting_resume(conn, company, job_id)
+                path = resumes.path_for(row["filename"]) if row else None
+                root, missing = config.RESUMES_DIR, "no resume was uploaded for this job"
+            elif kind == "letter":
+                row = store.get_posting_letter(conn, company, job_id)
+                path = resumes.path_for(row["filename"]) if row else None
+                root, missing = config.RESUMES_DIR, "no cover letter was uploaded for this job"
+            else:
+                row = store.get_submission(conn, company, job_id)
+                which = kind.split("-", 1)[1]
+                path = submissions.archived_path(row, which)
+                root = submissions.archive_dir(company, job_id)
+                missing = f"nothing was recorded as the {which} you submitted"
+        finally:
+            conn.close()
+        self._send_posting_file(path, root, missing, "not a document for this job")
 
     def _tailored_source(self, company: str, job_id: str) -> tuple[dict | None, dict | None]:
         """The LaTeX `tailor build` would compile for one posting: `(source, None)`, or
@@ -4481,6 +5327,20 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         return {"ok": True, "before": before, "after": after, "postings": len(rows)}
+
+
+def _content_type(path) -> str:
+    """The media type for a document this repo stored.
+
+    A closed map, not `mimetypes`: `resumes.RESUME_TYPES` is the allowlist an upload had to
+    pass, so anything reaching a download route is one of these two. Guessing would widen
+    at the download end a set the upload end deliberately narrowed.
+    """
+    return {
+        ".pdf": "application/pdf",
+        ".docx": ("application/vnd.openxmlformats-officedocument"
+                  ".wordprocessingml.document"),
+    }.get(path.suffix.lower(), "application/octet-stream")
 
 
 def _today() -> str:
@@ -5675,9 +6535,125 @@ document.addEventListener('click', async (e) => {
     location.reload();
     return;
   }
+  // -- the question template, on /settings ---------------------------------------
+  const qtsave = e.target.closest('button.qt-save, button.qt-add');
+  if (qtsave) {
+    const row = qtsave.closest('.q');
+    const question = row.querySelector('input.qq').value.trim();
+    if (!question) { alert('A question needs some text.'); return; }
+    const res = await post('/api/question', {
+      op: 'save', qid: row.dataset.qid || '', question: question,
+      answer: row.querySelector('textarea.qa').value});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const qtdel = e.target.closest('button.qt-del');
+  if (qtdel) {
+    const row = qtdel.closest('.q');
+    // Named rather than a bare "are you sure": answers already given to this question
+    // are deliberately left alone, and that is the thing worth knowing before clicking.
+    if (!confirm('Take this out of the template? Answers you already saved on ' +
+                 'postings are kept.')) return;
+    const res = await post('/api/question', {op: 'delete', qid: row.dataset.qid});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  // -- the posting page --------------------------------------------------------
+  const qsave = e.target.closest('button.q-save, button.q-add');
+  if (qsave) {
+    const sec = qsave.closest('.qsec');
+    const row = qsave.closest('.q');
+    const question = row.querySelector('input.qq').value.trim();
+    if (!question) { alert('A question needs some text.'); return; }
+    const res = await post('/api/posting-answer', {
+      company: sec.dataset.company, ats_job_id: sec.dataset.job,
+      op: 'save',
+      // Absent on a brand-new row and on one seeded from the template: the server mints
+      // it against the ids already on this posting, so two questions that slug alike
+      // cannot land on one row.
+      qid: row.dataset.qid || '',
+      // The wording as rendered, never re-derived from the template. A row saved here is
+      // this posting's own from now on, and editing the template later must not rewrite
+      // an answer you already gave.
+      question: question,
+      answer: row.querySelector('textarea.qa').value});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const qdel = e.target.closest('button.q-del');
+  if (qdel) {
+    const sec = qdel.closest('.qsec');
+    const row = qdel.closest('.q');
+    const res = await post('/api/posting-answer', {
+      company: sec.dataset.company, ats_job_id: sec.dataset.job,
+      op: 'delete', qid: row.dataset.qid});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const pup = e.target.closest('button.p-upload');
+  if (pup) {
+    const kind = pup.dataset.kind;
+    const row = pup.closest('.doc');
+    const input = row.querySelector('input.pfile[data-kind="' + kind + '"]');
+    const file = input && input.files[0];
+    if (!file) { alert('Choose a file first.'); return; }
+    pup.disabled = true;
+    const b64 = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result.split(',')[1]);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+    const url = kind === 'letter' ? '/api/posting-letter' : '/api/posting-resume';
+    const res = await post(url, {company: pup.dataset.company,
+                                 ats_job_id: pup.dataset.job,
+                                 filename: file.name, content_b64: b64});
+    pup.disabled = false;
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const pclr = e.target.closest('button.p-clear');
+  if (pclr) {
+    const url = pclr.dataset.kind === 'letter'
+      ? '/api/posting-letter/clear' : '/api/posting-resume/clear';
+    const res = await post(url, {company: pclr.dataset.company,
+                                 ats_job_id: pclr.dataset.job});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const papp = e.target.closest('button.p-applied');
+  if (papp) {
+    const sec = papp.closest('.aprow');
+    // The same endpoint the actions cell's `+ tracker` posts. No new write path, and the
+    // freeze rides along with it on the server side.
+    const res = await post('/api/disposition', {
+      company: sec.dataset.company, ats_job_id: sec.dataset.job, action: 'applied'});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const pre = e.target.closest('button.p-resubmit');
+  if (pre) {
+    if (!confirm('Replace the record of what you sent with the documents and answers ' +
+                 'as they stand now?')) return;
+    const res = await post('/api/submission', {company: pre.dataset.company,
+                                               ats_job_id: pre.dataset.job});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
   const stage = e.target.closest('button.app-save');
   if (stage) {
-    const card = stage.closest('.app');
+    // `.app` on /applications, `.aprow` on the posting page: one handler, two
+    // containers, because both render the same two controls and a second copy
+    // of this branch is how they would come to log a stage differently.
+    const card = stage.closest('.app, .aprow');
     const res = await post('/api/application', {
       company: card.dataset.company, ats_job_id: card.dataset.job,
       status: card.querySelector('select.appstatus').value,
@@ -5688,7 +6664,10 @@ document.addEventListener('click', async (e) => {
   }
   const meta = e.target.closest('button.app-meta');
   if (meta) {
-    const card = meta.closest('.app');
+    // `.app` on /applications, `.aprow` on the posting page: one handler, two
+    // containers, because both render the same two controls and a second copy
+    // of this branch is how they would come to log a stage differently.
+    const card = meta.closest('.app, .aprow');
     const res = await post('/api/application/meta', {
       company: card.dataset.company, ats_job_id: card.dataset.job,
       next_action: card.querySelector('input.appnext').value,

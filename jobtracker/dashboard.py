@@ -1152,7 +1152,7 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
             )
             parts.append(
                 f'<li><span class="rn">{n}</span>'
-                f'<a href="{_safe_url(row["url"])}" target="_blank" rel="noopener">'
+                f'<a {_posting_attrs(row, interactive)}>'
                 f'{html.escape(row["title"])}</a>'
                 f'<span class="meta">{" · ".join(bits)}</span>{act}</li>'
             )
@@ -1175,7 +1175,7 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
     parts.append('<article class="pick">')
     parts.append(f'<div class="rank">{i}</div>')
     parts.append(
-        f'<h3><a href="{_safe_url(row["url"])}" target="_blank" rel="noopener">'
+        f'<h3><a {_posting_attrs(row, interactive)}>'
         f'{html.escape(row["title"])}</a></h3>'
     )
     parts.append(
@@ -1199,9 +1199,15 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
     _docs_line(parts, row, interactive, suggestions, held, built, letters, letters_built)
 
     parts.append('<div class="act">')
+    # Under `serve` this leads to the posting page, which is where the documents and the
+    # questions are — so it says Prepare, not Apply. In the static file there is no such
+    # page, and the employer's own form is the only thing it could mean.
+    #
+    # It stays an anchor and carries no `data-act`, which is what keeps
+    # `.pick [data-act]` selecting exactly the three disposition buttons.
     parts.append(
-        f'<a class="apply" href="{_safe_url(row["url"])}" target="_blank" '
-        f'rel="noopener">Apply</a>'
+        f'<a class="apply" {_posting_attrs(row, interactive)}>'
+        f'{"Prepare &rarr;" if interactive else "Apply"}</a>'
     )
     if interactive:
         c = html.escape(row["company"], quote=True)
@@ -1601,6 +1607,37 @@ def _q(value: str) -> str:
     return html.escape(urllib.parse.quote(str(value), safe=""), quote=True)
 
 
+def _posting_href(row, interactive: bool) -> str:
+    """Where a posting's title goes: the posting page under `serve`, the employer's own
+    URL in the static file.
+
+    The static dashboard is a self-contained artifact you can mail and open offline —
+    `/posting` there is a link to nothing, which is the same defect as a button with no
+    handler and the reason `interactive` exists at all.
+
+    Through `_q`, never an f-string: a company named `A&B "C"` would otherwise close the
+    attribute it is written into. That is the specific job `_q` was written for.
+    """
+    if not interactive:
+        return _safe_url(row["url"])
+    return (f'/posting?company={_q(row["company"])}'
+            f'&amp;job={_q(row["ats_job_id"])}')
+
+
+def _posting_attrs(row, interactive: bool) -> str:
+    """The whole `href`/`target`/`rel` set for one posting link.
+
+    One helper rather than an href plus a conditional attribute at four call sites: the
+    internal link is same-origin and must NOT open a new tab, while the external one must
+    carry `rel="noopener"`. Splitting those two facts apart is how one site ends up
+    opening the employer in-place or the posting page in a second tab.
+    """
+    href = _posting_href(row, interactive)
+    if interactive:
+        return f'href="{href}"'
+    return f'href="{href}" target="_blank" rel="noopener noreferrer"'
+
+
 def _tailor_line(parts, row, suggestions=None, held=None) -> None:
     """What `tailor` proposes changing in your resume for this posting.
 
@@ -1938,8 +1975,8 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
                 f'data-loc="{html.escape(loc_key)}" '
                 f'data-search="{html.escape(search)}">'
             )
-            parts.append(f'<td><a href="{_safe_url(r["url"])}" target="_blank" '
-                         f'rel="noopener noreferrer">{html.escape(r["title"])}</a></td>')
+            parts.append(f'<td><a {_posting_attrs(r, interactive)}>'
+                         f'{html.escape(r["title"])}</a></td>')
             # The NYC pin is a marker on the single most-preferred band, not a per-row
             # colored scale — four location colors beside seven tier chips would be noise.
             pin = '<span class="pin">NYC</span> ' if rank == 0 else ""

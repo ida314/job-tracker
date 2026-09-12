@@ -470,6 +470,90 @@ CREATE TABLE IF NOT EXISTS repair_proposals (
     verified_at    TEXT NOT NULL,
     applied_at     TEXT                    -- NULL = still awaiting a human
 );
+
+-- The questions you keep being asked, maintained once on /settings and copied into every
+-- posting page as a starting point. `answer` is the DEFAULT, not an answer: an ATS asks
+-- for work authorization at every company and the reply is the same every time.
+--
+-- In state.db rather than a new curated YAML, and `overrides` is the precedent: a human
+-- ruling, written from exactly one surface, that needs no comments to explain itself. The
+-- line-oriented text surgery keywords.yaml and companies.yaml need exists to preserve
+-- prose nobody would write here.
+--
+-- `qid` is minted from the question text once and NEVER re-derived (see mint_qid), which
+-- is what lets you fix a question's wording without orphaning every answer given to it.
+CREATE TABLE IF NOT EXISTS question_template (
+    qid        TEXT PRIMARY KEY,
+    question   TEXT NOT NULL,
+    answer     TEXT NOT NULL DEFAULT '',
+    ordinal    INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
+-- What one posting's form asked beyond a resume and a letter, and what you put. A working
+-- draft: `application_submissions` is what you actually sent, and the two diverge the
+-- moment you edit this after applying.
+--
+-- Template questions are NOT copied in here when the page renders — a GET never writes
+-- (server.py's invariant), so the page merges this table with `question_template` at
+-- render time and a row appears here when you save one. See questions.merge.
+CREATE TABLE IF NOT EXISTS posting_answers (
+    company    TEXT NOT NULL,
+    ats_job_id TEXT NOT NULL,
+    qid        TEXT NOT NULL,
+    question   TEXT NOT NULL,
+    answer     TEXT NOT NULL DEFAULT '',
+    ordinal    INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id, qid)
+);
+
+-- A cover letter you uploaded for one posting, overriding the one `coverletter` wrote.
+-- Shape-identical to `posting_resumes` above and deliberately a second table rather than
+-- a `kind` column on it: one table per document means neither is ever asked which one it
+-- holds, and SQLite cannot widen that table's primary key in place anyway.
+--
+-- `filename` is minted here (letter.letter_upload_stem), never the client's string, and
+-- it carries an `_upload` suffix because `letter_path` already owns
+-- LETTERS_DIR/<letter_stem>.pdf — a .pdf upload would otherwise overwrite the letter the
+-- model wrote. A row whose file has gone missing reads as "no override" and logs, the
+-- rule `resumes.override_for` follows.
+CREATE TABLE IF NOT EXISTS posting_letters (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    bytes       INTEGER NOT NULL DEFAULT 0,
+    uploaded_at TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
+
+-- What you actually submitted, frozen when the application was first recorded.
+--
+-- Write-once, which is the whole point: a submission is a fact about a moment, and a
+-- second `applied` must not rewrite it. The one exception is the page's explicit "Update
+-- what I submitted", which exists because `+ tracker` on a table row records an
+-- application before you ever opened the posting page.
+--
+-- `resume` and `letter` name files under config.SUBMISSIONS_DIR holding the BYTES that
+-- went out, not the working documents. `tailor build` rewrites a posting's PDF at a
+-- deterministic path, so a name pointing into TAILORED_DIR would resolve forever and
+-- quietly come to mean a document you never sent. `*_kind` records which document it was
+-- ('override' | 'default' | 'generated'), since the file itself no longer says.
+--
+-- `answers` is JSON: [{qid, question, answer}] — denormalized from `posting_answers` for
+-- the reason `decisions.title` is, and a stronger one. Joining would let editing a draft
+-- rewrite history, which is exactly what this table exists to prevent.
+CREATE TABLE IF NOT EXISTS application_submissions (
+    company      TEXT NOT NULL,
+    ats_job_id   TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    resume       TEXT,                     -- archived filename, NULL = none went out
+    resume_kind  TEXT NOT NULL DEFAULT '', -- override | default
+    letter       TEXT,
+    letter_kind  TEXT NOT NULL DEFAULT '', -- override | generated
+    answers      TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (company, ats_job_id)
+);
 """
 
 # Columns added after the initial schema shipped. CREATE TABLE IF NOT EXISTS cannot
@@ -1042,8 +1126,8 @@ def plugin_posting_counts(conn: sqlite3.Connection, company: str) -> dict:
 # throws away only what a run produced and could produce again.
 _PURGE_BY_COMPANY = [
     "postings", "verdicts", "rankings", "deferrals", "prefill_plans",
-    "posting_resumes", "task_attempts", "form_fields", "board_health",
-    "manual_checks",
+    "posting_resumes", "posting_letters", "task_attempts", "form_fields",
+    "board_health", "manual_checks",
     # Machine-authored and re-derivable: the next `work` proposes them again from the
     # description and the resume. Your ruling on one is not in here — accepting a
     # suggestion attaches a file, and that lives in `posting_resumes`.
@@ -1066,7 +1150,15 @@ _PURGE_BY_COMPANY = [
 #   applications / application_events — you applied. That stays true whatever happens to
 #                 the posting row it came from, which is exactly why `all_applications`
 #                 reads the table directly instead of joining `postings`.
-_PURGE_KEEPS = ("decisions", "overrides", "applications", "application_events")
+#   posting_answers — prose you typed, not anything a run produced. It is the one table
+#                 here nothing can write again, and the questions an employer asks do not
+#                 stop having been asked because a feed was switched off.
+#   application_submissions — the record of what you sent, keyed to an application that
+#                 is itself kept. Purging it would leave the application standing with the
+#                 evidence behind it gone, which is the one state this table exists to
+#                 make impossible. The archived FILES are likewise never swept.
+_PURGE_KEEPS = ("decisions", "overrides", "applications", "application_events",
+                "posting_answers", "application_submissions")
 
 
 def purge_blockers(conn: sqlite3.Connection, company: str) -> list[dict]:
@@ -1076,11 +1168,15 @@ def purge_blockers(conn: sqlite3.Connection, company: str) -> list[dict]:
         (company,),
     ).fetchall()
     blockers = [dict(r) for r in rows]
-    for r in conn.execute(
-        "SELECT ats_job_id FROM posting_resumes WHERE company=?", (company,)
-    ):
-        if not any(b["ats_job_id"] == r["ats_job_id"] for b in blockers):
-            blockers.append({"ats_job_id": r["ats_job_id"], "title": "", "status": "resume attached"})
+    for table, label in (("posting_resumes", "resume attached"),
+                         ("posting_letters", "letter attached")):
+        for r in conn.execute(
+            f"SELECT ats_job_id FROM {table} WHERE company=?", (company,)
+        ):
+            if not any(b["ats_job_id"] == r["ats_job_id"] for b in blockers):
+                blockers.append(
+                    {"ats_job_id": r["ats_job_id"], "title": "", "status": label}
+                )
     return blockers
 
 
@@ -1521,6 +1617,42 @@ def get_application(
     return conn.execute(
         f"SELECT {_APPLICATION_COLUMNS} "
         "FROM applications WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+
+
+def posting_detail(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    """One posting with its verdict, its judgment and its deferral, in a single row.
+
+    The posting page's spine. LEFT JOINs throughout because every one of those is
+    genuinely optional: a posting `check` has seen but `judge` has not reached has no
+    `rankings` row, and scoring a page around that absence is the point — an unjudged
+    posting scores None, never 0.0.
+
+    One query rather than four, the reason `events_by_application` gives: a page that
+    reads its own subject N times is a page that grows a fifth read the next time
+    somebody adds a column.
+
+    Returns None for a posting that was never fetched — a manual application, which has
+    no `postings` row at all (see `manual_job_id`). The caller renders from
+    `applications` instead; it does not 404.
+    """
+    return conn.execute(
+        """
+        SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
+               p.posted_at, p.posted_on, p.first_seen, p.last_seen, p.closed_at,
+               p.closed_reason, p.duplicate_of_url, p.description,
+               v.verdict, v.reason, v.decided_by, v.decided_at,
+               r.backend_fit, r.growth, r.entry_risk, r.why, r.score, r.judged_at,
+               d.kind AS deferral_kind, d.until AS deferral_until
+        FROM postings p
+        LEFT JOIN verdicts v ON v.company = p.company AND v.ats_job_id = p.ats_job_id
+        LEFT JOIN rankings r ON r.company = p.company AND r.ats_job_id = p.ats_job_id
+        LEFT JOIN deferrals d ON d.company = p.company AND d.ats_job_id = p.ats_job_id
+        WHERE p.company=? AND p.ats_job_id=?
+        """,
         (company, ats_job_id),
     ).fetchone()
 
@@ -2708,6 +2840,269 @@ def posting_resumes(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.R
     return {
         (r["company"], r["ats_job_id"]): r
         for r in conn.execute("SELECT * FROM posting_resumes")
+    }
+
+
+# -- the cover letter you uploaded instead ------------------------------------------
+# Shape-for-shape the four functions above. Two tables rather than a `kind` column: see
+# the comment on `posting_letters` in _SCHEMA.
+def set_posting_letter(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    filename: str,
+    size: int,
+    now: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO posting_letters (company, ats_job_id, filename, bytes, uploaded_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            filename=excluded.filename, bytes=excluded.bytes,
+            uploaded_at=excluded.uploaded_at
+        """,
+        (company, ats_job_id, filename, size, now),
+    )
+
+
+def get_posting_letter(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM posting_letters WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+
+
+def clear_posting_letter(conn: sqlite3.Connection, company: str, ats_job_id: str) -> None:
+    conn.execute(
+        "DELETE FROM posting_letters WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    )
+
+
+def posting_letters(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Row]:
+    """Every uploaded letter, keyed for a cheap lookup while rendering."""
+    return {
+        (r["company"], r["ats_job_id"]): r
+        for r in conn.execute("SELECT * FROM posting_letters")
+    }
+
+
+# -- the questions a form asks, and what you put ------------------------------------
+def template_questions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """The reusable question list, in the order it renders. /settings' one read."""
+    return list(
+        conn.execute(
+            "SELECT qid, question, answer, ordinal, updated_at FROM question_template "
+            "ORDER BY ordinal, qid"
+        )
+    )
+
+
+def set_template_question(
+    conn: sqlite3.Connection, qid: str, question: str, answer: str, now: str,
+    ordinal: Optional[int] = None,
+) -> None:
+    """Upsert one template question.
+
+    `ordinal` is None on an edit — the row keeps the place it already had. Passing the
+    next free ordinal is the caller's job on an insert, and `next_template_ordinal`
+    below is where that number comes from.
+    """
+    if ordinal is None:
+        row = conn.execute(
+            "SELECT ordinal FROM question_template WHERE qid=?", (qid,)
+        ).fetchone()
+        ordinal = row["ordinal"] if row else next_template_ordinal(conn)
+    conn.execute(
+        """
+        INSERT INTO question_template (qid, question, answer, ordinal, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(qid) DO UPDATE SET
+            question=excluded.question, answer=excluded.answer,
+            ordinal=excluded.ordinal, updated_at=excluded.updated_at
+        """,
+        (qid, question, answer, ordinal, now),
+    )
+
+
+def next_template_ordinal(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT MAX(ordinal) AS m FROM question_template").fetchone()
+    return ((row["m"] if row and row["m"] is not None else -1) + 1)
+
+
+def delete_template_question(conn: sqlite3.Connection, qid: str) -> None:
+    """Remove one template question.
+
+    Deliberately does NOT touch `posting_answers`: those are answers you gave, and a
+    question you stopped being asked is not a question you never answered. Dropping them
+    would rewrite the record of what you submitted, which is the one thing this whole
+    surface exists to keep.
+    """
+    conn.execute("DELETE FROM question_template WHERE qid=?", (qid,))
+
+
+def posting_answers(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> list[sqlite3.Row]:
+    """One posting's saved answers, in render order."""
+    return list(
+        conn.execute(
+            "SELECT qid, question, answer, ordinal, updated_at FROM posting_answers "
+            "WHERE company=? AND ats_job_id=? ORDER BY ordinal, qid",
+            (company, ats_job_id),
+        )
+    )
+
+
+def set_posting_answer(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, qid: str,
+    question: str, answer: str, now: str, ordinal: Optional[int] = None,
+) -> None:
+    """Upsert one posting's answer to one question.
+
+    The first save of a question the page merged in from the template is an INSERT here,
+    which is what "the template seeds, it does not own" means: from then on this posting's
+    copy is independent and editing the template never rewrites an answer you gave.
+    """
+    if ordinal is None:
+        row = conn.execute(
+            "SELECT ordinal FROM posting_answers WHERE company=? AND ats_job_id=? AND qid=?",
+            (company, ats_job_id, qid),
+        ).fetchone()
+        ordinal = (
+            row["ordinal"] if row
+            else next_posting_answer_ordinal(conn, company, ats_job_id)
+        )
+    conn.execute(
+        """
+        INSERT INTO posting_answers
+            (company, ats_job_id, qid, question, answer, ordinal, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id, qid) DO UPDATE SET
+            question=excluded.question, answer=excluded.answer,
+            ordinal=excluded.ordinal, updated_at=excluded.updated_at
+        """,
+        (company, ats_job_id, qid, question, answer, ordinal, now),
+    )
+
+
+def next_posting_answer_ordinal(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> int:
+    row = conn.execute(
+        "SELECT MAX(ordinal) AS m FROM posting_answers WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+    return ((row["m"] if row and row["m"] is not None else -1) + 1)
+
+
+def delete_posting_answer(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, qid: str
+) -> None:
+    conn.execute(
+        "DELETE FROM posting_answers WHERE company=? AND ats_job_id=? AND qid=?",
+        (company, ats_job_id, qid),
+    )
+
+
+def taken_answer_qids(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> set[str]:
+    """Every qid already in use on this posting — what `questions.mint_qid` disambiguates
+    against, so two ad-hoc questions that slug alike do not collide onto one row."""
+    return {
+        r["qid"] for r in conn.execute(
+            "SELECT qid FROM posting_answers WHERE company=? AND ats_job_id=?",
+            (company, ats_job_id),
+        )
+    }
+
+
+# -- what you actually submitted ----------------------------------------------------
+def freeze_submission(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, now: str, *,
+    resume: Optional[str] = None, resume_kind: str = "",
+    letter: Optional[str] = None, letter_kind: str = "",
+    answers: str = "[]", replace: bool = False,
+) -> bool:
+    """Record what went out. True if this write landed.
+
+    **Write-once unless `replace`.** A submission is a fact about a moment, so a second
+    `applied` — pressing `+ tracker` twice, or the CLI re-running — must find the row
+    already there and leave it alone. `ON CONFLICT DO NOTHING` rather than a SELECT first,
+    so two writers racing cannot both decide they are the first.
+
+    `replace=True` has exactly one caller, the posting page's explicit "Update what I
+    submitted", which exists because `+ tracker` on a table row records an application
+    before you have opened the page at all.
+    """
+    if replace:
+        cur = conn.execute(
+            """
+            INSERT INTO application_submissions
+                (company, ats_job_id, submitted_at, resume, resume_kind,
+                 letter, letter_kind, answers)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(company, ats_job_id) DO UPDATE SET
+                resume=excluded.resume, resume_kind=excluded.resume_kind,
+                letter=excluded.letter, letter_kind=excluded.letter_kind,
+                answers=excluded.answers
+            """,
+            (company, ats_job_id, now, resume, resume_kind, letter, letter_kind, answers),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO application_submissions
+                (company, ats_job_id, submitted_at, resume, resume_kind,
+                 letter, letter_kind, answers)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(company, ats_job_id) DO NOTHING
+            """,
+            (company, ats_job_id, now, resume, resume_kind, letter, letter_kind, answers),
+        )
+    return bool(cur.rowcount)
+
+
+def get_submission(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM application_submissions WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+
+
+def submitted_answers(row) -> list[dict]:
+    """The frozen Q&A on a submission row, as dicts.
+
+    Every failure is an empty list, `flags_of`'s rule: a blob that does not parse can only
+    have come from a database somebody edited by hand, and neither that nor a row written
+    before the column existed is worth raising out of a render for.
+    """
+    if row is None:
+        return []
+    try:
+        raw = row["answers"]
+    except (IndexError, KeyError):
+        return []
+    try:
+        parsed = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [a for a in parsed if isinstance(a, dict) and a.get("question")]
+
+
+def submissions_by_posting(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Row]:
+    """Every submission, keyed for a cheap render-time lookup."""
+    return {
+        (r["company"], r["ats_job_id"]): r
+        for r in conn.execute("SELECT * FROM application_submissions")
     }
 
 
