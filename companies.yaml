@@ -889,7 +889,7 @@
   ats: aggregator
   check_method: aggregator
   board_url: https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md
-  notes: HTML <table> README of new-grad roles; ~2k rows, mostly closed (🔒, skipped). Verified 2026-07-25.
+  notes: HTML <table> README of new-grad roles in five sections (SWE, PM, Data/AI/ML, Quant, Hardware), each followed by a collapsed all-🔒 "Inactive roles" table; ~2.4k rows, 460 open (closed are skipped). Verified 2026-07-25, re-verified 2026-09-12.
   expected_board_name: null
 - name: Ouckah / CVrve New-Grad list
   ats: aggregator

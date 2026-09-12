@@ -593,7 +593,7 @@ Planned expansion, in descending value-per-hour:
 | Slug-repair agent (§8) | **Complete** — `docs/repair.md`; regex-first, model as fallback |
 | Inbox reading (§8.4) | **Complete** — `docs/mail.md`; local Maildir, read-only, proposes only |
 | Question matching (was §8.4) | **Removed 2026-08-25** — see §8.1; the bound held and the answers were wrong anyway. `jobtracker prefill` is rules-only |
-| Aggregator sources (§9) | Deferred — still never fetched |
+| Aggregator sources (§9) | **Complete** — `sources/aggregator.py`; Simplify wired, Ouckah/CVrve unwired pending a URL |
 
 The verified slug data is the asset worth preserving from version 1. The audit that
 produced it — fetching every board, confirming identity against the company name, and
