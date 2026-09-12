@@ -408,3 +408,53 @@ def test_re_proposing_reopens_a_ruling_made_about_different_wording():
     store.record_suggestions(conn, "Acme", "1", "[]", "hash-2", "2026-09-02")
     assert store.get_suggestions(conn, "Acme", "1")["resolution"] == "pending"
     conn.close()
+
+
+def test_attaching_writes_where_every_reader_looks(tmp_path, monkeypatch):
+    """Regression. `--attach` wrote the PDF to TAILORED_DIR and recorded its bare name,
+    but every reader resolves `posting_resumes.filename` through
+    `resumes.path_for` = RESUMES_DIR/<name>. So `override_for` logged "recorded but
+    missing" and fell back to the bank's, while `dashboard._resume_line` read the *row*
+    and printed "resume for this posting: <name>" — the page naming one document and the
+    pipeline attaching another, with nothing failing and no test touching it.
+    """
+    from jobtracker import config, resume as resume_mod, resumes
+
+    monkeypatch.setattr(config, "RESUMES_DIR", tmp_path / "resumes")
+    monkeypatch.setattr(config, "TAILORED_DIR", tmp_path / "tailored")
+    conn = store.connect(":memory:")
+    blob = b"%PDF-1.4 tailored and attached"
+
+    # What `cmd_tailor` does under --attach: build into TAILORED_DIR, then attach.
+    out = resume_mod.tailored_path("Acme", "1")
+    resume_mod.write_pdf(out, blob)
+    name = resumes.stored_name("Acme", "1", out.suffix)
+    resumes.write_atomic(resumes.path_for(name), blob)
+    store.set_posting_resume(conn, "Acme", "1", name, len(blob), "2026-09-12")
+    conn.commit()
+
+    resolved = resumes.override_for(conn, "Acme", "1")
+    assert resolved is not None, "an attached resume must be openable by its readers"
+    assert resolved.read_bytes() == blob
+    conn.close()
+
+
+def test_the_attach_branch_writes_through_path_for(tmp_path):
+    """The behavioural test above passes for a `cmd_tailor` that never wrote into
+    RESUMES_DIR at all, because it does that write itself. This one reads the branch.
+
+    Source-level because the alternative is standing up a real TeX compile: what went
+    wrong was one line naming the wrong directory, and that is visible here.
+    """
+    import inspect
+
+    from jobtracker import cli
+
+    src = inspect.getsource(cli.cmd_tailor)
+    branch = src[src.index("if args.attach:"):]
+    assert "resumes.path_for" in branch, (
+        "the attached file must be written where resumes.path_for looks for it"
+    )
+    assert "out.name" not in branch, (
+        "recording the TAILORED_DIR filename is the bug this test exists for"
+    )

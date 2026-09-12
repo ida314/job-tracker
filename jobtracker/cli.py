@@ -66,6 +66,7 @@ from opentelemetry import metrics
 
 from . import applications as apps_mod, build_version, config, health as health_mod, report as report_mod, safewrite, store, telemetry, tuning
 from . import letter as letter_mod
+from . import resumes
 from .criteria import load_criteria
 # companies.yaml has one writer module now — `serve`'s add form needs the same appender
 # `add-company` does, and two implementations of "append a curated entry" is how they
@@ -1622,8 +1623,23 @@ def cmd_tailor(args: argparse.Namespace) -> int:
             built += 1
             print(f"  {head}: {applied} edit(s) -> {out}")
             if args.attach:
+                # Into RESUMES_DIR, not just TAILORED_DIR. `posting_resumes.filename` is
+                # resolved by every reader through `resumes.path_for`, which is
+                # RESUMES_DIR/<name> — so recording the tailored file's name alone left an
+                # override nothing could open: `override_for` logged "recorded but
+                # missing" and fell back to the bank's, while the pick card read the row
+                # and printed "resume for this posting: <name>". The page named one
+                # document and the pipeline attached another, and nothing failed.
+                #
+                # Both names are the same string (`tailored_stem` IS
+                # `stored_name(company, job, "")`), so this is one extra write and no new
+                # derivation — `path_for` stays the single answer to "where is it?".
+                attached = resumes.stored_name(
+                    row["company"], row["ats_job_id"], out.suffix
+                )
+                resumes.write_atomic(resumes.path_for(attached), blob)
                 store.set_posting_resume(
-                    conn, row["company"], row["ats_job_id"], out.name, len(blob), today
+                    conn, row["company"], row["ats_job_id"], attached, len(blob), today
                 )
                 store.resolve_suggestions(
                     conn, row["company"], row["ats_job_id"], "accepted", today
