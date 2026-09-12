@@ -154,6 +154,20 @@ KEYWORDS_YAML = Path(os.environ.get("JOBTRACKER_KEYWORDS", ROOT / "keywords.yaml
 # uploads — nothing here is authored by hand and deleting it costs a rebuild, not a file.
 TAILORED_DIR = Path(os.environ.get("JOBTRACKER_TAILORED", ROOT / "data" / "tailored"))
 
+# What you actually sent, archived at the moment you recorded the application. Generated
+# state like the two directories above, but unlike them it is never rebuilt: a submission
+# is a fact about a moment, and deleting this costs the only copy of the documents that
+# went out under your name.
+#
+# The bytes rather than a filename, and that is the whole reason this directory exists.
+# `tailor build` rewrites a posting's PDF at a deterministic path, so a stored *name*
+# would go on resolving forever while quietly coming to mean a document you never sent.
+# Containerized runs MUST point this into the mounted volume, same rule as
+# JOBTRACKER_RESUMES — an archive written into a layer is gone on the next pull.
+SUBMISSIONS_DIR = Path(
+    os.environ.get("JOBTRACKER_SUBMISSIONS", ROOT / "data" / "submissions")
+)
+
 # Your job-search mailbox, read only. Empty means not configured, which is a normal
 # state: `mail` says so and the `inbox` task reports itself unavailable rather than idle.
 # Never written, never marked read, never moved — your mail client owns that directory.

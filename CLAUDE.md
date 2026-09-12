@@ -298,6 +298,70 @@ static dashboard. `docs/applications.md`.
 - **`applied_at`/`updated_at` are timestamps; `next_action` is a day.** Every comparison goes
   through `applications.day_of`; `days_since` returns None, never 0, and an unreadable
   `updated_at` sorts last.
+- **What you *sent* is a separate table** (`application_submissions`), frozen on the write that
+  creates the application and read back on the posting page. See *The posting page* below; the
+  card's title links there, with a small `↗` keeping the employer one click away.
+
+---
+
+## The posting page
+
+`/posting?company=&job=` under `serve`, `jobtracker/questions.py`, `jobtracker/submissions.py`.
+`docs/posting.md`. Where you go *before* the employer's form: the posting, the two documents,
+the questions it asks beyond them, and — after applying — what you actually sent.
+
+- **Every posting title under `serve` links here; the static file keeps its external links.**
+  `dashboard._posting_href` / `_posting_attrs` are the one place that decision is made, and
+  the attrs helper carries `target`/`rel` with the href — the internal link must **not** open
+  a new tab, the external one must keep `rel="noopener"`. The pick's button reads `Prepare →`
+  under `serve` and `Apply` in the file. It stays an anchor with **no `data-act`**.
+- **`/posting` is not in `_NAV`; the page still renders `_NAV`.** A destination you reach from
+  a posting is not a tab, and a detail page with no way back is where that would be felt.
+- **It never joins `postings`.** A manual application has no posting row, and it is the one you
+  most want a record of. Read `applications` first, `store.posting_detail` second, and 404 only
+  when both are empty.
+- **The question template seeds; it does not own.** `questions.merge` renders
+  `question_template` beside `posting_answers` **without writing** — a GET that materialized
+  rows would turn opening a page into a claim you had answered something. Saving one copies it
+  to this posting, with **the wording as rendered**: re-deriving it would let a later template
+  edit rewrite an answer you already gave.
+- **`qid` is minted once and never re-derived.** The opposite of `manual_job_id`, whose
+  determinism is the feature. Minting once is what lets you fix a question's wording without
+  orphaning its answers.
+- **A template default you never saved, and a saved answer with no text, are not recorded as
+  submitted** (`questions.answered`). The first is "nothing may put a value in a field the user
+  did not give for it"; the second would read afterwards as "I left this blank".
+- **The page and the freeze ask the same function which document is in effect**
+  (`submissions.effective_resume` / `effective_letter`). Resume: upload → the bank's. Letter:
+  upload → the written one **while `letter.is_current`** → the bank's. **The tailored PDF is
+  not a term** — `tailor build --attach` writes it into `posting_resumes`, and that is the only
+  way it becomes this posting's resume. No attach control on this page, ever.
+- **An uploaded letter goes in `RESUMES_DIR`** (`resumes.letter_upload_name`), never
+  `LETTERS_DIR`: that directory is rebuildable generated state, `letter_path` already owns the
+  `.pdf` in it, and `Dockerfile.serve` does not set `JOBTRACKER_LETTERS`.
+- **The archive stores bytes, not names.** `tailor build` rewrites a posting's PDF at a
+  deterministic path, so a name resolves forever while coming to mean a document you never
+  sent. `JOBTRACKER_SUBMISSIONS` is the one directory here nothing can rebuild — it **must**
+  point into `/data`, same rule as `JOBTRACKER_RESUMES`.
+- **The freeze rides the `applied` write; it is not a new write path.** Three callers, each
+  conditioned on the application not existing *before* the write — `_api_disposition`,
+  `_api_application`, `cli.cmd_apply`. Mail accept never freezes: it can only move a row that
+  exists.
+- **Write-once**, and the row is claimed before anything is copied, so two racing writers
+  cannot both decide they are first. **"Update what I submitted" is the only `replace=True`
+  caller**, and only while the application is still at `applied` — once someone replied, what
+  you sent is history.
+- **A failed copy is a log and a gap, never an exception.** This runs inside the click that
+  records an application; a refused "I applied" is work you have to redo.
+- **`/api/posting-letter` is in `_UPLOAD_ROUTES`, `/api/posting-letter/clear` is not** — the
+  clear route carries two strings and would inherit a multi-megabyte body cap. Both halves are
+  tested.
+- **`GET /api/document` serves all four documents through one containment check**
+  (`_send_posting_file`). `app-save`/`app-meta` select `.app, .aprow` so `/applications` and
+  this page cannot log a stage differently.
+- **The log records counts, never content** — `answers=2`, not the answers.
+- **`purge` keeps `posting_answers` and `application_submissions`**; `posting_letters` mirrors
+  `posting_resumes` and is named by `purge_blockers`.
 
 ---
 
@@ -718,7 +782,10 @@ The first model role that composes prose, so the bound is not the shape of the a
   acts. The writer is line-oriented text surgery — the file is mostly the comments explaining the
   two lists, and `yaml.safe_dump` deletes all of them.
 - **Nothing anywhere accepts an edit on a click.** Attaching is `tailor build --attach`, after
-  reading the diff at `/apply`. **Building and downloading are not accepting** and are allowed from
+  reading the diff at `/apply`. **`--attach` writes the PDF into `RESUMES_DIR` as well as
+  `TAILORED_DIR`** — `posting_resumes.filename` is resolved by every reader through
+  `resumes.path_for`, so recording the tailored file's bare name left an override nothing could
+  open while the pick card printed its name off the row. **Building and downloading are not accepting** and are allowed from
   the actions cell and, under `serve`, from a Today card's documents line (`_docs_line`), which
   renders the actions cell's own `↓`/`✉` through `_tailor_control`/`_letter_control` with **no
   `data-act`** — that is what keeps `.pick [data-act]` meaning the three disposition buttons. The

@@ -67,6 +67,7 @@ from opentelemetry import metrics
 from . import applications as apps_mod, build_version, config, health as health_mod, report as report_mod, safewrite, store, telemetry, tuning
 from . import letter as letter_mod
 from . import resumes
+from . import submissions
 from .criteria import load_criteria
 # companies.yaml has one writer module now — `serve`'s add form needs the same appender
 # `add-company` does, and two implementations of "append a curated entry" is how they
@@ -2273,11 +2274,23 @@ def cmd_apply(args: argparse.Namespace) -> int:
         location = args.location or row["location"]
         source = "tracked"
 
+    # Before the write: only the first record of an application is a submission. The
+    # same condition `server._api_application` uses, and for the same reason — this
+    # command both creates and advances, and `--status interview` twice is two rounds,
+    # not two applications.
+    first = store.get_application(conn, company, job_id) is None
+    now = _now()
     store.advance_application(
-        conn, company, job_id, title, args.status, _now(), note=args.note,
+        conn, company, job_id, title, args.status, now, note=args.note,
         url=url, location=location, source=source,
         next_action=next_action, next_action_note=args.next_action_note or None,
     )
+    if first:
+        # The terminal records what went out exactly as the page does. Two writers of
+        # "I applied" that disagree about whether anything was kept is the split
+        # `resumes.py` was extracted to prevent.
+        answers, _ = _load_answers(config.ANSWERS_YAML)
+        submissions.freeze(conn, company, job_id, now, answers)
     conn.commit()
     # status is a 7-value bounded set — safe as a metric attribute (CLAUDE.md).
     applications_total.add(1, {"status": args.status})

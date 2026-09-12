@@ -86,7 +86,8 @@ ENV JOBTRACKER_DB=/data/state.db \
     JOBTRACKER_BROWSER_PROFILE=/data/browser \
     JOBTRACKER_RESUMES=/data/resumes \
     JOBTRACKER_RESUME_TEX=/data/resume.tex \
-    JOBTRACKER_TAILORED=/data/tailored
+    JOBTRACKER_TAILORED=/data/tailored \
+    JOBTRACKER_SUBMISSIONS=/data/submissions
 
 # Where Chromium draws. There is no screen in here; the X server is a sibling container
 # sharing /tmp/.X11-unix. Playwright's headful launch fails on the worker thread without
