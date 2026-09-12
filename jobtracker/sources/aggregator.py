@@ -42,6 +42,9 @@ _HREF = re.compile(r'href="([^"]+)"', re.IGNORECASE)
 _SIMPLIFY_ID = re.compile(r"simplify\.jobs/p/([0-9a-f-]+)", re.IGNORECASE)
 _BR = re.compile(r"</?br\s*/?>", re.IGNORECASE)
 _TAG = re.compile(r"<[^>]+>")
+# A multi-location cell collapses behind `<details><summary>4 locations</summary>…`. The
+# summary is a disclosure label, not a place; left in, it prefixes the stored location.
+_SUMMARY = re.compile(r"<summary\b[^>]*>.*?</summary>", re.IGNORECASE | re.DOTALL)
 # Decorative markers the lists append to a role/company cell; not part of the text.
 _MARKERS = ("🔒", "🎓", "🛂", "🔥", "🆕", "⭐")
 
@@ -111,7 +114,7 @@ class Aggregator(Source):
                     ats_job_id=ats_job_id,
                     title=f"{employer} — {role}",
                     url=apply_url,
-                    location=_text(location_cell),
+                    location=_text(_SUMMARY.sub("", location_cell)),
                     posted_at=age_cell or None,
                 )
             )

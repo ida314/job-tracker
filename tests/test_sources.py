@@ -123,6 +123,49 @@ def test_aggregator_parses_open_rows_and_carries_employer():
     assert p1.ats_job_id != p0.ats_job_id  # no Simplify UUID → hashed, still distinct
 
 
+# The README's shape as of 2026-09-12: rows outside any <tbody>, a multi-location cell
+# collapsed behind a <details> summary, and each section followed by a collapsed
+# "Inactive roles" table whose rows are all closed.
+_AGGREGATOR_HTML_2026_09 = """
+<table style="width: 100%;">
+<thead>
+<tr><th>Company</th><th>Role</th><th>Location</th><th>Application</th><th>Age</th></tr>
+</thead>
+<tr>
+<td><strong><a href="https://simplify.jobs/c/Klaviyo">Klaviyo</a></strong></td>
+<td>Software Engineer 1</td>
+<td><details><summary><strong>3 locations</strong></summary>Boston, MA</br>NYC</br>Denver, CO</details></td>
+<td><div align="center"><a href="https://job-boards.greenhouse.io/klaviyocampus/jobs/7989324003?utm_source=Simplify&ref=Simplify"><img alt="Apply"></a> <a href="https://simplify.jobs/p/5077be7d-bf97-4e0b-8fad-8674bf28d206?utm_source=GHList"><img alt="Simplify"></a></div></td>
+<td>0d</td>
+</tr>
+</table>
+<details>
+<summary>🗃️ Inactive roles (1)</summary>
+<table style="width: 100%;">
+<tbody>
+<tr>
+<td><strong><a href="https://simplify.jobs/c/RTX">RTX</a></strong></td>
+<td>Software Engineer 1</td>
+<td>Tewksbury, MA</br>Concord, MA</td>
+<td>🔒</td>
+<td>7mo</td>
+</tr>
+</tbody>
+</table>
+</details>
+"""
+
+
+def test_aggregator_location_drops_the_details_summary_label():
+    """"3 locations" is a disclosure label, not a place, and must not prefix the location."""
+    postings = get_source("aggregator").parse_jobs("Simplify", _AGGREGATOR_HTML_2026_09)
+    assert len(postings) == 1  # the inactive table's 🔒 row is dropped; no <tbody> is fine
+    p = postings[0]
+    assert p.title == "Klaviyo — Software Engineer 1"
+    assert p.location == "Boston, MA; NYC; Denver, CO"
+    assert p.ats_job_id == "5077be7d-bf97-4e0b-8fad-8674bf28d206"
+
+
 def test_aggregator_tolerates_garbage():
     src = get_source("aggregator")
     assert src.parse_jobs("X", None) == []
