@@ -380,3 +380,73 @@ def test_no_application_status_returns_a_posting_to_the_queue():
         store.advance_application(conn, "Acme", "1", "SWE", status, "2026-08-02T09:00:00")
         assert rank.top_n(store.ranked_matches(conn), 3, "2026-08-02") == [], status
         conn.close()
+
+
+# -- one row per req ----------------------------------------------------------------
+#
+# Postings live on two pages now, and the same job legitimately appears on both: once
+# from the employer's own board, once from a job board pointing at it. That is right on
+# the pages, where each row says where it came from, and wrong in the picks — three picks
+# that are two jobs is a worse answer than three picks that are three.
+def test_the_same_job_from_two_sources_is_one_pick_and_the_board_row_wins():
+    """The company-board row wins even when the feed row scores higher: it is the one
+    carrying health, identity, a description and a form, and the feed row points at it."""
+    rows = [
+        _row(company="Simplify New-Grad-Positions", ats_job_id="s1", score=90.0,
+             origin="simplify", dedupe_key="lever:acme:xyz"),
+        _row(company="Acme", ats_job_id="xyz", score=80.0,
+             origin=None, dedupe_key="lever:acme:xyz"),
+        _row(company="Other", ats_job_id="2", score=70.0, origin=None, dedupe_key="k2"),
+    ]
+    assert [r["company"] for r in rank.available(rows, "2026-08-02")] == ["Acme", "Other"]
+
+
+def test_two_job_boards_carrying_one_req_collapse_to_the_better_scoring_row():
+    rows = [
+        _row(company="Simplify", ats_job_id="a", score=90.0,
+             origin="simplify", dedupe_key="k"),
+        _row(company="Discord: #jobs", ats_job_id="b", score=60.0,
+             origin="discord", dedupe_key="k"),
+    ]
+    assert [r["ats_job_id"] for r in rank.available(rows, "2026-08-02")] == ["a"]
+
+
+def test_rows_with_no_key_are_never_collapsed_into_each_other():
+    """NULL is "not derived yet", never "the same req as every other underived row"."""
+    rows = [_row(ats_job_id="1", score=90.0, dedupe_key=None),
+            _row(ats_job_id="2", score=80.0, dedupe_key=None)]
+    assert len(rank.available(rows, "2026-08-02")) == 2
+
+
+def test_a_row_that_predates_the_column_still_ranks():
+    """No `dedupe_key` key at all — the row shape every caller had before dedupe, and
+    the one `_row()` builds by default."""
+    assert len(rank.available([_row(ats_job_id="1", score=90.0)], "2026-08-02")) == 1
+
+
+def test_a_job_board_copy_of_something_you_applied_to_leaves_the_picks():
+    """You apply once. A board row and a job board's copy are two rows describing one
+    application, so flagging only the row you happened to click would put the same job
+    back in tomorrow's top 3 under another name."""
+    conn = store.connect(":memory:")
+    url = "https://jobs.lever.co/acme/xyz"
+    store.sync_postings(conn, "Acme", [Posting("Acme", "xyz", "SWE", url)], "2026-08-01",
+                        identity=("lever", "acme"))
+    store.append_postings(
+        conn, "Simplify New-Grad-Positions",
+        [Posting("Simplify New-Grad-Positions", "s1", "Acme — SWE", url, description="d")],
+        "2026-08-01", origin="simplify",
+    )
+    for company, jid in (("Acme", "xyz"), ("Simplify New-Grad-Positions", "s1")):
+        store.record_verdict(
+            conn, Verdict(company, jid, Decision.MATCH, "r", "rules"), "2026-08-01")
+        store.set_score(conn, company, jid, 80.0, "2026-08-01")
+
+    # Applied through the company board. The job board's row was never touched.
+    store.record_application(conn, "Acme", "xyz", "SWE", "applied", "2026-08-02", url=url)
+
+    rows = store.ranked_matches(conn)
+    assert {r["company"]: r["applied_status"] for r in rows} == {
+        "Acme": "applied", "Simplify New-Grad-Positions": "applied"}
+    assert rank.available(rows, "2026-08-02") == []
+    conn.close()

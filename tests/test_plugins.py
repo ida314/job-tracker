@@ -348,8 +348,8 @@ def test_re_reading_the_same_messages_imports_nothing_twice():
     """An interrupted run leaves the cursor unwritten, so tomorrow re-reads the window."""
     conn = store.connect(":memory:")
     post = Posting("Feed", "1", "SWE", "https://x/1", description="body")
-    first, _ = store.append_postings(conn, "Feed", [post], "2026-08-01")
-    again, _ = store.append_postings(conn, "Feed", [post], "2026-08-02")
+    first = store.append_postings(conn, "Feed", [post], "2026-08-01")
+    again = store.append_postings(conn, "Feed", [post], "2026-08-02")
     assert len(first) == 1 and again == []
     assert conn.execute("SELECT COUNT(*) FROM postings").fetchone()[0] == 1
 
@@ -379,16 +379,28 @@ def test_a_re_append_can_never_blank_a_stored_description():
     assert store.get_description(conn, "Feed", "1") == "body"
 
 
-def test_a_duplicate_of_something_already_tracked_is_never_imported():
+def test_a_duplicate_of_something_already_tracked_is_imported_and_keyed_to_it():
+    """The inverse of what this used to assert, and the point of splitting the pages.
+
+    A job board's copy of a req the employer's own board also carries is not noise to
+    refuse at the door — it is the row you would read on that board, and it is how the
+    job boards page stays a complete view of what the board published. Both rows are
+    kept, and the shared key is what lets the page say so.
+    """
     conn = store.connect(":memory:")
     url = "https://jobs.lever.co/acme/xyz"
     store.sync_postings(conn, "Acme", [Posting("Acme", "xyz", "SWE", url)], "2026-08-01",
                         identity=("lever", "acme"))
-    inserted, suppressed = store.append_postings(
-        conn, "Feed", [Posting("Feed", "9", "Acme — SWE", url)], "2026-08-02"
+    inserted = store.append_postings(
+        conn, "Feed", [Posting("Feed", "9", "Acme — SWE", url)], "2026-08-02",
+        origin="simplify",
     )
-    assert inserted == [] and len(suppressed) == 1
-    assert conn.execute("SELECT COUNT(*) FROM postings WHERE company='Feed'").fetchone()[0] == 0
+    assert [p.ats_job_id for p in inserted] == ["9"]
+    keys = [r[0] for r in conn.execute(
+        "SELECT dedupe_key FROM postings ORDER BY company")]
+    assert keys == ["lever:acme:xyz", "lever:acme:xyz"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postings WHERE closed_at IS NULL").fetchone()[0] == 2
 
 
 def test_a_feed_posting_closes_by_age_and_never_by_absence():

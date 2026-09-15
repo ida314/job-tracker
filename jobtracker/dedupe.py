@@ -2,8 +2,14 @@
 
 A job reaches this tracker by several roads. Stripe's own Greenhouse board publishes it;
 the Simplify new-grad README lists it; a Discord channel announces it. Those are three
-rows in `postings` describing one application you can only submit once, and the third one
-is noise on a page whose whole job is to be short.
+rows in `postings` describing one application you can only submit once.
+
+Knowing that is what lets the pages *say* so. Postings are split in two — company career
+pages and job boards — and a row on one is never closed, hidden or refused for having a
+twin on the other: a shared key renders as an "on company page" chip, a key matching an
+application renders as "applied", and `rank.one_row_per_req` shows one pick per req
+rather than the same job twice. Nothing here closes anything. This module derives the
+key, and answers one question about collisions (`conflicting_api_rows`).
 
 The key is derived from the URL, because the URL is the one thing every road agrees on.
 Not from the URL *string*, though — that is where this gets interesting, and it is why
@@ -33,18 +39,18 @@ import re
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
-# Feed rows are redundant by construction; a board row is the authority. This ordering is
-# the whole safety story of system-wide dedupe — see `preferred`.
-# Lower wins. The gap at 1 is where an unknown check_method sits: it loses to a real
-# board, still outranks every feed, and — see `_is_feed` — is never closed by a peer.
+# Where a row came from. Lower is the more authoritative source: a board row carries
+# health, identity, a description and a form, while a feed row is a pointer to it.
+#
+# Nothing is closed on the strength of this any more. It survives for one question —
+# `_is_feed` — which decides whether two rows sharing a key are a collision worth
+# reporting or just the same job reached twice.
 SOURCE_RANK = {"api": 0, "aggregator": 2, "plugin": 3}
-# An unknown check_method is NOT ranked below a feed. It ranks *above* one and is
-# protected from peer-closure exactly like an api row, because a company missing from
-# companies.yaml is far more likely to be a board we lost track of than a feed — and the
-# damage runs one way. Measured: 2,805 open postings sit on 13 shared fallback keys
-# (795 Databricks, 527 Stripe, 400 MongoDB), every one of them safe today only because
-# their rows are ranked `api`. Rank them last and a single dropped entry closes 795 live
-# jobs in one pass.
+# An unknown check_method is NOT a feed. A company missing from companies.yaml is far
+# more likely to be a board we lost track of, and reading it as a feed would silence a
+# real collision rather than report it. Measured: 2,805 open postings sit on 13 shared
+# fallback keys (795 Databricks, 527 Stripe, 400 MongoDB) — exactly the shape that
+# misreading would hide.
 _UNRANKED = 1
 
 # Query parameters that carry identity rather than tracking, and must therefore survive
@@ -187,58 +193,13 @@ def rank_for(check_method: str) -> int:
     return SOURCE_RANK.get((check_method or "").strip().lower(), _UNRANKED)
 
 
-def _sort_key(row) -> tuple:
-    # first_seen ascending, then the primary key, so the winner is stable across runs and
-    # does not depend on the order SQLite happened to return rows in.
-    return (
-        rank_for(row["check_method"]),
-        row["first_seen"] or "",
-        row["company"] or "",
-        row["ats_job_id"] or "",
-    )
-
-
-def preferred(rows: list) -> tuple[Optional[object], list]:
-    """Pick the row that survives a shared key, and the ones that do not.
-
-    Rows are mappings carrying at least `check_method`, `first_seen`, `company` and
-    `ats_job_id`. Returns `(winner, losers)`; `losers` is empty whenever nothing should
-    be closed, which includes every case this function declines to rule on.
-
-    Two rules, and the second is the entire safety argument for turning this on across
-    every source rather than only the plugin:
-
-      1. **An api row is never closed in favour of a feed row.** A board row carries
-         health, identity, a description and a prefillable form; a feed row is a pointer
-         to it. Ranking is strict, so this holds by construction rather than by care.
-
-      2. **Two rows of equal rank are closed only when neither is api.** Two api rows
-         sharing a key is a *finding*, not a duplicate — almost certainly a key that is
-         too coarse — and the honest response is to report it and touch nothing. This
-         matters because the fallback key is a normalized URL, and a board that links
-         every req to one careers-search page (Stripe's does) would hand dozens of live
-         postings one key. Without this rule a single stingy board silently closes a page
-         of real jobs, which is the most expensive failure this feature can have. With
-         it, the blast radius of any key bug is confined to feed rows, which are the
-         redundant ones by construction.
-    """
-    if len(rows) < 2:
-        return (rows[0] if rows else None), []
-    ordered = sorted(rows, key=_sort_key)
-    winner, rest = ordered[0], ordered[1:]
-    if not _is_feed(winner):
-        # Rule 2: never close a peer of something that is not a feed. Feed rows behind it
-        # are still redundant and are still closed.
-        return winner, [r for r in rest if _is_feed(r)]
-    return winner, rest
-
-
 def _is_feed(row) -> bool:
     """Is this row redundant by construction — an aggregator or plugin import?
 
-    The question `preferred` actually turns on, and it is deliberately not "is this api?".
-    A row whose company nobody curates any more is not a feed, and treating it as one
-    would make forgetting an entry in companies.yaml a way to close live postings.
+    The question `conflicting_api_rows` turns on, and it is deliberately not "is this
+    api?". A row whose company nobody curates any more is not a feed, and treating it as
+    one would make forgetting an entry in companies.yaml a way to hide a collision
+    between two live reqs.
     """
     return rank_for(row["check_method"]) in (SOURCE_RANK["aggregator"], SOURCE_RANK["plugin"])
 
@@ -246,10 +207,11 @@ def _is_feed(row) -> bool:
 def conflicting_api_rows(rows: list) -> list:
     """The non-feed rows sharing one key, when there is more than one. Empty otherwise.
 
-    Separate from `preferred` because it is a different kind of answer: `preferred` says
-    what to close, this says what to complain about. `cmd_check` logs it at WARNING, and
-    that log line is the only way a key too coarse to tell two live reqs apart ever
-    becomes visible — nothing is closed, so nothing else would show it.
+Two *board* rows on one key is a finding, not a duplicate:
+    almost certainly a key too coarse to tell two live reqs apart. Two rows from different
+    kinds of source is the ordinary case the two pages exist to render, and is not
+    reported. `cmd_check` logs this at WARNING, and — since nothing is closed anywhere —
+    that log line is the only way such a key ever becomes visible.
     """
     boards = [r for r in rows if not _is_feed(r)]
     return boards if len(boards) > 1 else []

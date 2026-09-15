@@ -513,30 +513,41 @@ def test_a_url_that_moves_takes_its_key_with_it():
         "url:b.example/jobs/1"
 
 
-def test_a_row_closed_as_a_duplicate_is_not_reopened_by_its_own_feed():
-    """Without this guard the whole feature oscillates: the aggregator still lists the
-    duplicate tomorrow, so the closure made at 01:05 is undone at 01:00 and remade at
-    01:05, every night, forever."""
+def test_a_feed_row_that_mirrors_a_board_row_is_kept_open_beside_it():
+    """The old behaviour closed the feed row. Both pages now show their own copy, so the
+    only thing the shared key does here is exist — it is read at render time, to say "on
+    company page" on one row and "applied" on the other."""
     conn = _conn()
     url = "https://jobs.lever.co/acme/xyz"
-    # `ats_job_id` is the uuid in the hosted URL — verified against the live database,
-    # where all 3,487 ats-hosted rows agree and none disagree. The feed row reaches the
-    # same key from the URL alone.
     store.sync_postings(conn, "Stripe", [Posting("Stripe", "xyz", "SWE", url)], "2026-07-01",
                         identity=("lever", "acme"))
     store.sync_postings(conn, "Simplify", [Posting("Simplify", "2", "SWE", url)], "2026-07-01")
-    closed, _ = store.close_duplicates(
-        conn, {"Stripe": "api", "Simplify": "aggregator"}, "2026-07-01"
-    )
-    assert [c["company"] for c in closed] == ["Simplify"]
 
-    # The feed lists it again tomorrow. It must stay closed.
-    store.sync_postings(conn, "Simplify", [Posting("Simplify", "2", "SWE", url)], "2026-07-02")
-    row = conn.execute(
-        "SELECT closed_at, closed_reason FROM postings WHERE company='Simplify'"
-    ).fetchone()
-    assert row["closed_at"] == "2026-07-01"
-    assert row["closed_reason"] == "duplicate"
+    rows = list(conn.execute(
+        "SELECT company, closed_at, closed_reason, dedupe_key FROM postings ORDER BY company"))
+    assert [r["closed_at"] for r in rows] == [None, None]
+    assert [r["closed_reason"] for r in rows] == [None, None]
+    assert len({r["dedupe_key"] for r in rows}) == 1
+
+
+def test_duplicate_closures_from_the_old_behaviour_are_reopened_once():
+    """A migration, and it has to be one: those rows were closed by a rule that no longer
+    exists, and nothing else would ever reopen them — `sync_postings` only reopens a
+    closure that came from absence, which is exactly what this was not."""
+    conn = _conn()
+    url = "https://jobs.lever.co/acme/xyz"
+    store.sync_postings(conn, "Simplify", [Posting("Simplify", "2", "SWE", url)], "2026-07-01")
+    conn.execute(
+        "UPDATE postings SET closed_at='2026-07-01', closed_reason='duplicate', "
+        "duplicate_of_url=?", (url,)
+    )
+
+    assert store._apply_data_migrations(conn) >= 1
+
+    row = conn.execute("SELECT * FROM postings").fetchone()
+    assert row["closed_at"] is None
+    assert row["closed_reason"] is None and row["duplicate_of_url"] is None
+    assert store._apply_data_migrations(conn) == 0  # self-draining
 
 
 def test_a_posting_closed_by_absence_still_reopens_when_it_comes_back():
@@ -550,34 +561,27 @@ def test_a_posting_closed_by_absence_still_reopens_when_it_comes_back():
     assert row["closed_at"] is None and row["closed_reason"] is None
 
 
-def test_closing_a_duplicate_records_why_and_what_it_duplicates():
-    """DESIGN.md 3.5 — every automated verdict is stored with its reason. "It vanished"
-    is not an answer; "closed because this URL is the same req" is."""
-    conn = _conn()
-    url = "https://jobs.lever.co/acme/xyz"
-    store.sync_postings(conn, "Stripe", [Posting("Stripe", "xyz", "SWE", url)], "2026-07-01",
-                        identity=("lever", "acme"))
-    store.sync_postings(conn, "Discord: #jobs", [Posting("Discord: #jobs", "9", "SWE", url)],
-                        "2026-07-01")
-    store.close_duplicates(conn, {"Stripe": "api", "Discord: #jobs": "plugin"}, "2026-07-02")
-    row = conn.execute(
-        "SELECT closed_reason, duplicate_of_url FROM postings WHERE company='Discord: #jobs'"
-    ).fetchone()
-    assert row["closed_reason"] == "duplicate"
-    assert row["duplicate_of_url"] == url
-
-
-def test_two_api_rows_sharing_a_key_are_reported_and_neither_is_closed():
+def test_two_board_rows_sharing_a_key_are_reported_and_neither_is_touched():
     conn = _conn()
     url = "https://acme.example/careers/search"
     store.sync_postings(conn, "Acme", [Posting("Acme", "1", "A", url),
                                        Posting("Acme", "2", "B", url)], "2026-07-01")
-    closed, conflicts = store.close_duplicates(conn, {"Acme": "api"}, "2026-07-02")
-    assert closed == []
+    conflicts = store.board_key_conflicts(conn, {"Acme": "api"})
     assert len(conflicts) == 1 and len(conflicts[0]) == 2
     assert conn.execute(
         "SELECT COUNT(*) FROM postings WHERE closed_at IS NULL"
     ).fetchone()[0] == 2
+
+
+def test_a_board_row_and_a_feed_row_on_one_key_are_not_reported():
+    """The ordinary case, and the one the two pages are built around."""
+    conn = _conn()
+    url = "https://jobs.lever.co/acme/xyz"
+    store.sync_postings(conn, "Stripe", [Posting("Stripe", "xyz", "SWE", url)], "2026-07-01",
+                        identity=("lever", "acme"))
+    store.sync_postings(conn, "Simplify", [Posting("Simplify", "2", "SWE", url)], "2026-07-01")
+    assert store.board_key_conflicts(
+        conn, {"Stripe": "api", "Simplify": "aggregator"}) == []
 
 
 def test_the_backfill_is_self_draining_and_a_second_run_is_a_no_op():
@@ -600,20 +604,19 @@ def test_the_backfill_prefers_curated_identity_when_it_has_it():
         "greenhouse:stripe:4567"
 
 
-def test_a_company_nobody_curates_is_reported_not_closed():
-    """Dropping an entry from companies.yaml must not become a way to close live rows.
+def test_a_company_nobody_curates_is_reported_rather_than_read_as_a_feed():
+    """Dropping an entry from companies.yaml must not quietly reclassify its rows.
 
     Found by running the real pass against a deliberately empty companies.yaml: every
     company lost both its identity key and its rank, and 795 Databricks postings sharing
-    one careers URL closed each other. The fix is that only a *feed* can be closed by a
-    peer, and an uncurated company is not a feed."""
+    one careers URL closed each other. Nothing closes now, but the same misreading would
+    hide a genuine collision between two live reqs."""
     conn = _conn()
     url = "https://jobs.lever.co/acme/xyz"
     store.sync_postings(conn, "Tracked", [Posting("Tracked", "xyz", "SWE", url)], "2026-07-01",
                         identity=("lever", "acme"))
     store.sync_postings(conn, "Forgotten", [Posting("Forgotten", "2", "SWE", url)], "2026-07-01")
-    closed, conflicts = store.close_duplicates(conn, {"Tracked": "api"}, "2026-07-02")
-    assert closed == []
+    conflicts = store.board_key_conflicts(conn, {"Tracked": "api"})
     assert len(conflicts) == 1
     assert conn.execute(
         "SELECT COUNT(*) FROM postings WHERE closed_at IS NULL"
@@ -632,8 +635,7 @@ def test_a_board_that_links_every_req_to_one_careers_page_does_not_collapse():
     store.sync_postings(conn, "Betterment", postings, "2026-07-01")
     keys = {r[0] for r in conn.execute("SELECT dedupe_key FROM postings")}
     assert len(keys) == 3
-    closed, _ = store.close_duplicates(conn, {"Betterment": "api"}, "2026-07-02")
-    assert closed == []
+    assert store.board_key_conflicts(conn, {"Betterment": "api"}) == []
 
 
 # -- two pages: where a row came from, and whether you already applied ---------------

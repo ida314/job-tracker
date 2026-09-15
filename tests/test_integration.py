@@ -295,7 +295,15 @@ def test_a_failed_read_leaves_the_cursor_and_degrades_the_run():
     ).fetchone()[0] == "fetch_failed"
 
 
-def test_an_announcement_of_a_job_already_tracked_is_never_imported():
+def test_an_announcement_of_a_job_already_tracked_is_imported_and_keyed_to_it():
+    """This used to assert the announcement was refused at the door. It is now kept.
+
+    The two pages are two views of one corpus: the Discord row belongs on the job boards
+    page because that is what the channel published, and the Artera row belongs on the
+    company pages because that is what the board holds. Neither is noise, and neither
+    closes the other — they carry the same `dedupe_key`, which is what the pages read to
+    say "on company page" and "applied".
+    """
     conn = store.connect(":memory:")
     store.sync_postings(
         conn, "Artera",
@@ -305,10 +313,13 @@ def test_an_announcement_of_a_job_already_tracked_is_never_imported():
     )
     _plugin_run(conn, _StubFetcher([[_discord_message(1300000000000000001, _SAMPLE)]]),
                 _enabled_discord())
-    assert conn.execute(
-        "SELECT COUNT(*) FROM postings WHERE company LIKE 'Discord%'"
-    ).fetchone()[0] == 0
-    assert conn.execute("SELECT closed_at FROM postings").fetchone()[0] is None
+
+    rows = list(conn.execute(
+        "SELECT company, origin, dedupe_key, closed_at FROM postings ORDER BY company"))
+    assert [r["company"] for r in rows] == ["Artera", "Discord: #jobs"]
+    assert [r["origin"] for r in rows] == [None, "discord"]
+    assert len({r["dedupe_key"] for r in rows}) == 1
+    assert all(r["closed_at"] is None for r in rows)
 
 
 def test_with_no_plugins_configured_the_run_reads_no_feed_at_all(tmp_path):

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 from pathlib import Path
@@ -18,6 +19,11 @@ from typing import Optional
 
 from . import dedupe
 from .models import BoardHealth, HealthStatus, Posting, Verdict
+
+# This module is otherwise silent — it stores what it is told and reports through return
+# values. The one exception is a migration that changes what the pages show: that has to
+# be said out loud, or a legitimate one-time cleanup reads as a regression at 2am.
+log = logging.getLogger("jobtracker.store")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS postings (
@@ -690,11 +696,29 @@ _LEGACY_ORIGINS = (
 )
 
 
-def _apply_data_migrations(conn: sqlite3.Connection) -> None:
+def _apply_data_migrations(conn: sqlite3.Connection) -> int:
+    """Returns the number of postings reopened — see the duplicate sweep below."""
     for origin, predicate in _LEGACY_ORIGINS:
         conn.execute(
             f"UPDATE postings SET origin=? WHERE origin IS NULL AND {predicate}",
             (origin,),
+        )
+
+    # Duplicate closures are gone: a job board's copy of a req is kept and flagged, not
+    # closed. Nothing else would ever reopen these rows — `sync_postings` reopens only a
+    # closure that came from absence, which is exactly what this was not — so they would
+    # stay invisible forever, closed by a rule the code no longer contains.
+    reopened = conn.execute(
+        "UPDATE postings SET closed_at=NULL, closed_reason=NULL, duplicate_of_url=NULL "
+        "WHERE closed_reason='duplicate'"
+    ).rowcount
+    if reopened:
+        # Said out loud for the reason the closure sweep said its own count: this shifts
+        # every total on the dashboard at once, and a silent cleanup reads as a bug.
+        log.info(
+            "reopened %d posting(s) closed as duplicates by a rule that no longer "
+            "exists; both pages now show their own copy",
+            reopened,
         )
     # Derived in Python because a dedupe key is not a SQL expression. Bounded by the
     # number of applications — tens, not thousands — and self-draining: it only ever
@@ -710,6 +734,7 @@ def _apply_data_migrations(conn: sqlite3.Connection) -> None:
                 (key, row["company"], row["ats_job_id"]),
             )
     conn.commit()
+    return reopened
 
 
 def _apply_index_migrations(conn: sqlite3.Connection) -> None:
@@ -976,29 +1001,27 @@ def backfill_dedupe_key(conn: sqlite3.Connection, identities: dict | None = None
     return filled
 
 
-def close_duplicates(
-    conn: sqlite3.Connection, check_methods: dict, now: str
-) -> tuple[list[dict], list[list]]:
-    """Close every open posting that is a redundant copy of another open posting.
+def board_key_conflicts(conn: sqlite3.Connection, check_methods: dict) -> list[list]:
+    """Groups of open *board* rows sharing one dedupe key. A pure read — it closes nothing.
 
-    Returns `(closed, conflicts)`. `closed` is one dict per closure carrying the loser
-    and the winner's URL; `conflicts` is the groups where two `api` rows shared a key,
-    which is a finding to report rather than a duplicate to collapse.
+    What is left of system-wide dedupe now that a duplicate is flagged rather than closed.
+    Two company-board rows on one key is not a duplicate to collapse, it is a **finding**:
+    almost certainly a key too coarse to tell two live reqs apart. The fallback key is a
+    normalized URL, and a board that links every req to one careers-search page (Stripe's
+    does) would hand dozens of live postings one key. `cmd_check` logs this at WARNING, and
+    that line is the only way such a key ever becomes visible.
 
-    **Run this once per check, after every board has synced, never inside the board
-    loop.** The winner of a shared key can be fetched later in the same run than the
-    loser, and boards are fetched in companies.yaml order — so deciding inside the loop
-    would make which row survives depend on the ordering of a curated file. One pass
-    over the whole open set is order-independent by construction, and `dedupe.preferred`
-    is order-free too so the guarantee does not stop at this function's boundary.
+    Feed rows are excluded by `dedupe.conflicting_api_rows`, which asks "is this row
+    redundant by construction?" rather than "is this api?" — a company nobody curates any
+    more is not a feed, and treating it as one would make forgetting an entry in
+    companies.yaml a way to hide a real collision.
 
-    `check_methods` maps company name -> check_method, which is what ranks the rows. A
-    company that is not in it ranks last and can therefore only ever lose, which is the
-    safe direction for a name nobody curates any more.
+    `check_methods` maps company name -> check_method. A company absent from it is not a
+    feed, so it is reported rather than passed over.
     """
     rows = conn.execute(
         "SELECT company, ats_job_id, url, first_seen, dedupe_key FROM postings "
-        "WHERE closed_at IS NULL AND dedupe_key IS NOT NULL"
+        "WHERE closed_at IS NULL AND dedupe_key IS NOT NULL AND dedupe_key != ''"
     ).fetchall()
 
     groups: dict[str, list[dict]] = {}
@@ -1007,29 +1030,14 @@ def close_duplicates(
         item["check_method"] = check_methods.get(row["company"], "")
         groups.setdefault(row["dedupe_key"], []).append(item)
 
-    closed: list[dict] = []
     conflicts: list[list] = []
-    for key, group in groups.items():
+    for group in groups.values():
         if len(group) < 2:
             continue
         clash = dedupe.conflicting_api_rows(group)
         if clash:
             conflicts.append(clash)
-        winner, losers = dedupe.preferred(group)
-        for loser in losers:
-            conn.execute(
-                "UPDATE postings SET closed_at=?, closed_reason='duplicate', "
-                "duplicate_of_url=? WHERE company=? AND ats_job_id=?",
-                (now, winner["url"], loser["company"], loser["ats_job_id"]),
-            )
-            closed.append({
-                "company": loser["company"],
-                "ats_job_id": loser["ats_job_id"],
-                "title_of": winner["company"],
-                "duplicate_of_url": winner["url"],
-                "dedupe_key": key,
-            })
-    return closed, conflicts
+    return conflicts
 
 
 # -- import plugins ----------------------------------------------------------------
@@ -1065,7 +1073,7 @@ def append_postings(
     now: str,
     identity: Optional[tuple[str, str]] = None,
     origin: Optional[str] = None,
-) -> tuple[list[Posting], list[Posting]]:
+) -> list[Posting]:
     """Add what a feed just announced. Never close anything by absence.
 
     The mirror image of `sync_postings`, and that function's docstring is the reason this
@@ -1078,10 +1086,12 @@ def append_postings(
     A message is an announcement, not a listing. It never closes; it only ages — which is
     what `close_stale_postings` is for.
 
-    Returns `(inserted, suppressed)`. Suppressed rows are duplicates of something already
-    tracked and were never written at all: nothing enters `postings`, so nothing enters
-    `verdicts`, the report or the ranking. Refusing at the door is cheaper and quieter
-    than importing and then closing, and the feeds are where the redundancy comes from.
+    Returns the rows it inserted. It does **not** refuse a posting that duplicates one
+    already tracked. The job boards page and the company pages are two views of one
+    corpus, and a job the employer's own board also carries is still the row you would
+    read on a board. Duplication is answered where it is *read* instead: a shared
+    `dedupe_key` renders as an "on company page" chip, and a key matching an application
+    renders as "applied". Nothing here closes, hides or declines a row for being a copy.
 
     Two writes here that `sync_postings` does not make, both load-bearing:
 
@@ -1100,18 +1110,7 @@ def append_postings(
             "SELECT ats_job_id FROM postings WHERE company=?", (company,)
         )
     }
-    # One query rather than one per posting: a feed's whole backlog against the open set.
-    taken = {
-        row["dedupe_key"]: row
-        for row in conn.execute(
-            "SELECT dedupe_key, url, company FROM postings "
-            "WHERE closed_at IS NULL AND dedupe_key IS NOT NULL AND company != ?",
-            (company,),
-        )
-    }
-
     inserted: list[Posting] = []
-    suppressed: list[Posting] = []
     for p in postings:
         key = _key_for(p, identity)
         if p.ats_job_id in existing:
@@ -1121,9 +1120,6 @@ def append_postings(
                 "WHERE company=? AND ats_job_id=?",
                 (now, key, origin, p.employer, company, p.ats_job_id),
             )
-            continue
-        if key and key in taken:
-            suppressed.append(p)
             continue
         conn.execute(
             "INSERT INTO postings (company, ats_job_id, title, location, url, "
@@ -1135,10 +1131,8 @@ def append_postings(
              p.posted_on, now, now, p.description, key, origin, p.employer),
         )
         existing.add(p.ats_job_id)
-        if key:
-            taken[key] = {"url": p.url, "company": company}
         inserted.append(p)
-    return inserted, suppressed
+    return inserted
 
 
 def close_stale_postings(
@@ -1327,7 +1321,16 @@ def open_postings_by_verdict(conn: sqlite3.Connection, decision: str) -> list[sq
         conn.execute(
             """
             SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
-                   p.first_seen, v.reason
+                   p.first_seen, p.posted_on, p.origin, p.employer, p.dedupe_key,
+                   v.reason,
+                   COALESCE(
+                     (SELECT ai.status FROM applications ai
+                       WHERE ai.company=p.company AND ai.ats_job_id=p.ats_job_id),
+                     (SELECT ak.status FROM applications ak
+                       WHERE p.dedupe_key IS NOT NULL AND p.dedupe_key != ''
+                         AND ak.dedupe_key = p.dedupe_key
+                       ORDER BY ak.updated_at DESC LIMIT 1)
+                   ) AS applied_status
             FROM postings p JOIN verdicts v
               ON p.company=v.company AND p.ats_job_id=v.ats_job_id
             WHERE v.verdict=? AND p.closed_at IS NULL
@@ -1836,9 +1839,14 @@ def ranked_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return list(conn.execute(
         """
         SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
-               p.posted_on, p.first_seen,
+               p.posted_on, p.first_seen, p.origin, p.employer, p.dedupe_key,
                r.backend_fit, r.growth, r.entry_risk, r.why, r.score, r.prose_hash,
-               a.status AS applied_status,
+               COALESCE(a.status, (
+                 SELECT ak.status FROM applications ak
+                  WHERE p.dedupe_key IS NOT NULL AND p.dedupe_key != ''
+                    AND ak.dedupe_key = p.dedupe_key
+                  ORDER BY ak.updated_at DESC LIMIT 1
+               )) AS applied_status,
                d.kind AS deferral_kind, d.until AS deferral_until
         FROM postings p
         JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id

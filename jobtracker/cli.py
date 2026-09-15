@@ -386,17 +386,10 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
                 degraded.append(f"{company.name}={health.status.value}")
             continue
 
-        inserted, suppressed = store.append_postings(
+        inserted = store.append_postings(
             conn, company.name, fetch.postings, today, origin=plugin.name
         )
         stats["new_postings"] += len(inserted)
-        for dup in suppressed:
-            log.info("plugin %s: skipped %s — already tracked", plugin.name, dup.title[:60])
-        if suppressed:
-            log.info(
-                "plugin %s: %d announcement(s) were reqs already tracked and were not imported",
-                plugin.name, len(suppressed),
-            )
 
         # Every downstream query is postings JOIN verdicts, so a posting with no verdict
         # is in the table and absent from the product.
@@ -759,42 +752,30 @@ def cmd_check(args: argparse.Namespace) -> int:
     if filled:
         log.info("normalized posted_at -> posted_on for %d stored posting(s)", filled)
 
-    # One identity for one req, however it arrived (dedupe.py). Two passes, and the
-    # ordering matters: keys first for rows that predate the column, then one closure
-    # sweep over the whole open set.
+    # One identity for one req, however it arrived (dedupe.py). Keys first, for rows that
+    # predate the column, then one read over the whole open set.
     #
-    # The sweep is deliberately NOT inside the board loop above. A shared key's winner
-    # can be fetched later in the same run than its loser, and boards are fetched in
-    # companies.yaml order — so deciding per board would make which row survives depend
-    # on the ordering of a curated file.
+    # Nothing is closed here. A job reached by two roads is two rows on two pages, each
+    # saying where it came from, and the duplication is answered where it is read: a
+    # shared key renders as a chip, and a key matching an application renders as
+    # "applied". What is left to do in the run is report a key too coarse to be one.
     keyed = store.backfill_dedupe_key(
         conn, {c.name: (c.ats, c.slug) for c in companies if c.slug}
     )
     if keyed:
         log.info("derived dedupe keys for %d stored posting(s)", keyed)
 
-    closed_dupes, conflicts = store.close_duplicates(
-        conn, {c.name: c.check_method for c in companies}, today
+    conflicts = store.board_key_conflicts(
+        conn, {c.name: c.check_method for c in companies}
     )
     for group in conflicts:
-        # Two api rows sharing a key is a finding, not a duplicate — almost certainly a
-        # key too coarse to tell two live reqs apart. Neither row was touched.
+        # Two board rows sharing a key is a finding, not a duplicate — almost certainly a
+        # key too coarse to tell two live reqs apart. Nothing is closed anywhere any more,
+        # so this log line is the only way such a key becomes visible.
         log.warning(
-            "dedupe: %d api postings share one key and none were closed: %s",
+            "dedupe: %d board postings share one key: %s",
             len(group),
             ", ".join(f"{r['company']}/{r['ats_job_id']}" for r in group),
-        )
-    for dup in closed_dupes:
-        log.info(
-            "dedupe: closed %s/%s — same req as %s",
-            dup["company"], dup["ats_job_id"], dup["title_of"],
-        )
-    if closed_dupes:
-        # Said out loud because the first run shifts every count on the dashboard at
-        # once, and a legitimate cleanup that says nothing reads as a regression at 2am.
-        log.info(
-            "dedupe: %d posting(s) closed as duplicates of a row already tracked",
-            len(closed_dupes),
         )
 
     store.record_run(conn, started, _now(), stats)
