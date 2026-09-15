@@ -634,3 +634,103 @@ def test_a_board_that_links_every_req_to_one_careers_page_does_not_collapse():
     assert len(keys) == 3
     closed, _ = store.close_duplicates(conn, {"Betterment": "api"}, "2026-07-02")
     assert closed == []
+
+
+# -- two pages: where a row came from, and whether you already applied ---------------
+def test_a_legacy_feed_row_learns_its_origin_on_the_next_connect():
+    """`origin` is the split between the two postings pages, and every row that predates
+    it was identified by its group name — the coupling the column exists to remove. The
+    backfill holds the last copy of that knowledge, so it has to actually fire.
+    """
+    conn = _conn()
+    store.append_postings(
+        conn, "Simplify New-Grad-Positions",
+        [Posting("Simplify New-Grad-Positions", "a", "X — SWE", "https://x/a")],
+        "2026-09-01",
+    )
+    store.append_postings(
+        conn, "Discord: #jobs",
+        [Posting("Discord: #jobs", "b", "Y — SWE", "https://y/b")], "2026-09-01",
+    )
+    store.sync_postings(conn, "Acme", [_p("1")], "2026-09-01")
+    conn.execute("UPDATE postings SET origin=NULL")  # the world before the column
+
+    store._apply_data_migrations(conn)
+
+    got = {r["company"]: r["origin"]
+           for r in conn.execute("SELECT company, origin FROM postings")}
+    assert got["Simplify New-Grad-Positions"] == "simplify"
+    assert got["Discord: #jobs"] == "discord"
+    assert got["Acme"] is None  # a curated board is the absence, never a value
+
+
+def test_a_feed_row_records_the_board_that_imported_it_and_the_employer_it_named():
+    conn = _conn()
+    store.append_postings(
+        conn, "Simplify New-Grad-Positions",
+        [Posting("Simplify New-Grad-Positions", "a", "Klaviyo — Software Engineer 1",
+                 "https://x/a", employer="Klaviyo")],
+        "2026-09-01", origin="simplify",
+    )
+    row = conn.execute("SELECT origin, employer FROM postings").fetchone()
+    assert (row["origin"], row["employer"]) == ("simplify", "Klaviyo")
+
+
+def test_a_later_read_fills_in_what_an_earlier_one_could_not_say_and_blanks_nothing():
+    """Rows imported before either column existed are re-seen every night, and COALESCE
+    is what lets that fill them in — while a feed that names no employer, like Discord's
+    generic format, never blanks one that another read supplied."""
+    conn = _conn()
+    bare = Posting("Simplify New-Grad-Positions", "a", "Klaviyo — SWE", "https://x/a")
+    store.append_postings(conn, "Simplify New-Grad-Positions", [bare], "2026-09-01")
+
+    named = Posting("Simplify New-Grad-Positions", "a", "Klaviyo — SWE", "https://x/a",
+                    employer="Klaviyo")
+    store.append_postings(conn, "Simplify New-Grad-Positions", [named], "2026-09-02",
+                          origin="simplify")
+    row = conn.execute("SELECT origin, employer FROM postings").fetchone()
+    assert (row["origin"], row["employer"]) == ("simplify", "Klaviyo")
+
+    store.append_postings(conn, "Simplify New-Grad-Positions", [bare], "2026-09-03")
+    row = conn.execute("SELECT origin, employer FROM postings").fetchone()
+    assert (row["origin"], row["employer"]) == ("simplify", "Klaviyo")
+
+
+def test_an_application_carries_the_key_of_the_link_you_applied_at():
+    """"Have I applied to this?" is a question about a req, not about one row: the same
+    job arrives from a board and from two feeds, and you apply to it once."""
+    conn = _conn()
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-09-01",
+                             url="https://jobs.lever.co/artera-2/eae")
+    assert conn.execute("SELECT dedupe_key FROM applications").fetchone()[0] == \
+        "lever:artera-2:eae"
+
+
+def test_the_application_key_follows_its_url_including_being_cleared():
+    """Same rule as `url` itself — None leaves it alone, "" clears it. A key outliving
+    the URL it came from would keep flagging rows as applied on a link you removed."""
+    conn = _conn()
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-09-01",
+                             url="https://jobs.lever.co/artera-2/eae")
+    store.record_application(conn, "Acme", "1", "SWE", "interview", "2026-09-02")
+    assert conn.execute("SELECT dedupe_key FROM applications").fetchone()[0] == \
+        "lever:artera-2:eae"
+
+    store.record_application(conn, "Acme", "1", "SWE", "interview", "2026-09-03", url="")
+    assert conn.execute("SELECT dedupe_key FROM applications").fetchone()[0] == ""
+
+
+def test_a_url_no_key_can_be_derived_from_stores_an_empty_key_not_a_stale_one():
+    conn = _conn()
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-09-01",
+                             url="https://jobs.lever.co/artera-2/eae")
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-09-02",
+                             url="mailto:jobs@acme.example")
+    assert conn.execute("SELECT dedupe_key FROM applications").fetchone()[0] == ""
+
+
+def test_the_application_key_is_indexed_because_every_rendered_row_asks_it():
+    conn = _conn()
+    indexes = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_applications_dedupe_key" in indexes

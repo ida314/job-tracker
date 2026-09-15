@@ -87,6 +87,13 @@ class Posting:
     posted_at: Optional[str] = None
     description: str = ""
     posted_on: Optional[str] = None
+    # The employer, where the source names one. `company` is the *group* a posting was
+    # imported under — a board's own name, or a feed's — so on a job board it says
+    # "Simplify", not who is hiring. Titles keep carrying "Employer — Role" because the
+    # criteria tokens, `decisions.title` and the eval corpus all read that shape; this
+    # holds the same fact as a field, for the pages that render it as one. None where the
+    # source never said.
+    employer: Optional[str] = None
 
 
 @dataclass(frozen=True)

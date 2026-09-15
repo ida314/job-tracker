@@ -635,6 +635,23 @@ _ADDED_COLUMNS = [
     # `matches_needing_tailoring`, so changing either list re-asks every posting.
     # '' is a row proposed before there were keyword lists at all.
     ("resume_suggestions", "keywords_hash", "TEXT NOT NULL DEFAULT ''"),
+    # Which job board imported this row: 'simplify', 'discord', 'ycombinator'. NULL means
+    # a curated company board, and that is the whole split behind the two postings pages —
+    # `origin IS NULL` is Company pages, anything else is Job boards. Stored rather than
+    # derived from the company name, because a feed's group name is built from its own
+    # settings (a Discord channel label) and renaming one would silently re-classify every
+    # row it ever imported.
+    ("postings", "origin", "TEXT"),
+    # The employer a feed names, where it names one. Titles keep the "Employer — Role"
+    # shape that criteria tokens, `decisions.title` and the eval corpus all read; this is
+    # the same fact in a column, so a page can render the employer as a field instead of
+    # splitting a string. NULL where the feed never said — Discord's `generic` format
+    # deliberately never guesses one.
+    ("postings", "employer", "TEXT"),
+    # The application's dedupe key, derived from `url` when it is written. It is what lets
+    # "have I applied to this?" be a question about a *req* rather than about one row: the
+    # same job arrives from a board and from two feeds, and you apply to it once.
+    ("applications", "dedupe_key", "TEXT"),
 ]
 
 
@@ -646,6 +663,9 @@ _ADDED_COLUMNS = [
 _ADDED_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_postings_dedupe_key "
     "ON postings(dedupe_key) WHERE dedupe_key IS NOT NULL",
+    # Read once per posting row rendered on either page, to answer "applied already?".
+    "CREATE INDEX IF NOT EXISTS idx_applications_dedupe_key "
+    "ON applications(dedupe_key) WHERE dedupe_key IS NOT NULL",
 ]
 
 
@@ -654,6 +674,42 @@ def _apply_column_migrations(conn: sqlite3.Connection) -> None:
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+# Values the column migrations cannot supply: what a row would have carried had the
+# column always existed. Both statements below are no-ops from the second run, and both
+# run on every `connect` rather than inside `check` — `serve` opens this database too,
+# and a migration only the nightly run applied would leave the page rendering a
+# half-migrated world until that run happened.
+_LEGACY_ORIGINS = (
+    # The two feeds that predate `postings.origin`, each identified by its group name —
+    # precisely the coupling the column exists to remove. These two literals are the last
+    # place that knowledge lives.
+    ("simplify", "company = 'Simplify New-Grad-Positions'"),
+    ("discord", "company LIKE 'Discord: #%'"),
+)
+
+
+def _apply_data_migrations(conn: sqlite3.Connection) -> None:
+    for origin, predicate in _LEGACY_ORIGINS:
+        conn.execute(
+            f"UPDATE postings SET origin=? WHERE origin IS NULL AND {predicate}",
+            (origin,),
+        )
+    # Derived in Python because a dedupe key is not a SQL expression. Bounded by the
+    # number of applications — tens, not thousands — and self-draining: it only ever
+    # reads rows that have a URL and no key yet.
+    for row in list(conn.execute(
+        "SELECT company, ats_job_id, url FROM applications "
+        "WHERE dedupe_key IS NULL AND url IS NOT NULL AND url != ''"
+    )):
+        key = dedupe.dedupe_key(row["url"])
+        if key:
+            conn.execute(
+                "UPDATE applications SET dedupe_key=? WHERE company=? AND ats_job_id=?",
+                (key, row["company"], row["ats_job_id"]),
+            )
+    conn.commit()
 
 
 def _apply_index_migrations(conn: sqlite3.Connection) -> None:
@@ -668,6 +724,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     _apply_column_migrations(conn)
     _apply_index_migrations(conn)  # after the columns they index — see _ADDED_INDEXES
+    _apply_data_migrations(conn)  # after both, and self-draining
     conn.commit()
     return conn
 
@@ -1007,6 +1064,7 @@ def append_postings(
     postings: list[Posting],
     now: str,
     identity: Optional[tuple[str, str]] = None,
+    origin: Optional[str] = None,
 ) -> tuple[list[Posting], list[Posting]]:
     """Add what a feed just announced. Never close anything by absence.
 
@@ -1058,9 +1116,10 @@ def append_postings(
         key = _key_for(p, identity)
         if p.ats_job_id in existing:
             conn.execute(
-                "UPDATE postings SET last_seen=?, dedupe_key=? "
+                "UPDATE postings SET last_seen=?, dedupe_key=?, "
+                "origin=COALESCE(?, origin), employer=COALESCE(?, employer) "
                 "WHERE company=? AND ats_job_id=?",
-                (now, key, company, p.ats_job_id),
+                (now, key, origin, p.employer, company, p.ats_job_id),
             )
             continue
         if key and key in taken:
@@ -1069,10 +1128,11 @@ def append_postings(
         conn.execute(
             "INSERT INTO postings (company, ats_job_id, title, location, url, "
             "posted_at, posted_on, first_seen, last_seen, closed_at, description, "
-            "dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) "
+            "dedupe_key, origin, employer) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?) "
             "ON CONFLICT(company, ats_job_id) DO NOTHING",
             (company, p.ats_job_id, p.title, p.location, p.url, p.posted_at,
-             p.posted_on, now, now, p.description, key),
+             p.posted_on, now, now, p.description, key, origin, p.employer),
         )
         existing.add(p.ats_job_id)
         if key:
@@ -1524,16 +1584,22 @@ def record_application(
         raise ValueError(
             f"status must be one of {APPLICATION_STATUSES}, got {status!r}"
         )
+    # The key follows the URL exactly, including how it is cleared: None leaves both
+    # alone, and "" clears both. A URL that yields no key stores '' rather than leaving
+    # yesterday's key attached to today's link — every reader excludes '' for that
+    # reason, because an empty key would otherwise match every other empty one.
+    app_key = None if url is None else (dedupe.dedupe_key(url) or "")
     conn.execute(
         """
         INSERT INTO applications
             (company, ats_job_id, title, status, note, applied_at, updated_at,
-             url, location, source, next_action, next_action_note)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             url, location, source, next_action, next_action_note, dedupe_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(company, ats_job_id) DO UPDATE SET
             title=excluded.title, status=excluded.status,
             note=excluded.note, updated_at=excluded.updated_at,
             url=COALESCE(excluded.url, applications.url),
+            dedupe_key=COALESCE(excluded.dedupe_key, applications.dedupe_key),
             location=COALESCE(excluded.location, applications.location),
             source=COALESCE(excluded.source, applications.source),
             next_action=COALESCE(excluded.next_action, applications.next_action),
@@ -1541,7 +1607,7 @@ def record_application(
                                       applications.next_action_note)
         """,
         (company, ats_job_id, title, status, note, now, now,
-         url, location, source, next_action, next_action_note),
+         url, location, source, next_action, next_action_note, app_key),
     )
 
 

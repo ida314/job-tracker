@@ -387,7 +387,7 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
             continue
 
         inserted, suppressed = store.append_postings(
-            conn, company.name, fetch.postings, today
+            conn, company.name, fetch.postings, today, origin=plugin.name
         )
         stats["new_postings"] += len(inserted)
         for dup in suppressed:
