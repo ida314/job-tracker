@@ -1016,18 +1016,27 @@ def board_key_conflicts(conn: sqlite3.Connection, check_methods: dict) -> list[l
     more is not a feed, and treating it as one would make forgetting an entry in
     companies.yaml a way to hide a real collision.
 
-    `check_methods` maps company name -> check_method. A company absent from it is not a
-    feed, so it is reported rather than passed over.
+    **A job board's rows are recognised by `origin`, not by the name map.** A plugin group
+    is deliberately never in companies.yaml, so looking it up there returns "unknown" — and
+    unknown is not a feed, by the rule above. The first real run made the cost obvious: a
+    listings board whose employer links to one careers page had seven live reqs on one key,
+    reported nightly at WARNING as though two curated boards had collided. `origin` is the
+    stored answer to exactly that question, so it is what decides here.
+
+    `check_methods` maps company name -> check_method, for the rows that have no origin.
+    A company absent from it is still reported rather than passed over.
     """
     rows = conn.execute(
-        "SELECT company, ats_job_id, url, first_seen, dedupe_key FROM postings "
+        "SELECT company, ats_job_id, url, first_seen, dedupe_key, origin FROM postings "
         "WHERE closed_at IS NULL AND dedupe_key IS NOT NULL AND dedupe_key != ''"
     ).fetchall()
 
     groups: dict[str, list[dict]] = {}
     for row in rows:
         item = dict(row)
-        item["check_method"] = check_methods.get(row["company"], "")
+        item["check_method"] = (
+            "plugin" if row["origin"] else check_methods.get(row["company"], "")
+        )
         groups.setdefault(row["dedupe_key"], []).append(item)
 
     conflicts: list[list] = []

@@ -573,6 +573,25 @@ def test_two_board_rows_sharing_a_key_are_reported_and_neither_is_touched():
     ).fetchone()[0] == 2
 
 
+def test_a_job_boards_rows_are_known_by_origin_not_by_the_companies_map():
+    """A plugin group is deliberately never in companies.yaml, so looking one up there
+    returns "unknown" — and unknown is not a feed, by the rule above. The first real run
+    showed the cost: a listings board whose employers link to one careers page had seven
+    live reqs on one key, and every night would have reported them at WARNING as though
+    two curated boards had collided. `origin` is the stored answer to that question.
+    """
+    conn = _conn()
+    url = "https://acme.example/careers/search"
+    store.append_postings(
+        conn, "Simplify New-Grad-Positions",
+        [Posting("Simplify New-Grad-Positions", "a", "A — SWE", url),
+         Posting("Simplify New-Grad-Positions", "b", "B — SWE", url)],
+        "2026-09-15", origin="simplify",
+    )
+    # The map has no entry for the group, exactly as `cmd_check` builds it.
+    assert store.board_key_conflicts(conn, {"Acme": "api"}) == []
+
+
 def test_a_board_row_and_a_feed_row_on_one_key_are_not_reported():
     """The ordinary case, and the one the two pages are built around."""
     conn = _conn()
