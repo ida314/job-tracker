@@ -72,107 +72,6 @@ def test_parsers_tolerate_garbage():
         assert src.parse_jobs("X", {"jobs": "nope"} if ats != "lever" else []) == []
 
 
-# A hand-built fixture mirroring the SimplifyJobs README <table>: a header row, an open
-# role carrying a Simplify UUID, a ↳ continuation that inherits the employer, a 🔒 closed
-# row (must be dropped), and a multi-location row.
-_AGGREGATOR_HTML = """
-<table>
-<tr><th>Company</th><th>Role</th><th>Location</th><th>Application</th><th>Age</th></tr>
-<tr>
-<td><strong><a href="https://simplify.jobs/c/NVIDIA">🔥 NVIDIA</a></strong></td>
-<td>Software Engineer, New Grad</td>
-<td>Santa Clara, CA</td>
-<td><div align="center"><a href="https://nvidia.com/apply/42"><img alt="Apply"></a> <a href="https://simplify.jobs/p/dcb78e15-a5c5-4a55-89dc-2420d65990d0"><img alt="Simplify"></a></div></td>
-<td>2d</td>
-</tr>
-<tr>
-<td>↳</td>
-<td>Backend Engineer New Grad 🎓</td>
-<td>Redmond, WA</br>Austin, TX</td>
-<td><div><a href="https://nvidia.com/apply/43"><img alt="Apply"></a></div></td>
-<td>2d</td>
-</tr>
-<tr>
-<td><strong><a href="https://simplify.jobs/c/Fidelity">Fidelity</a></strong></td>
-<td>Mainframe Software Engineer 1</td>
-<td>Columbus, GA</td>
-<td>🔒</td>
-<td>3d</td>
-</tr>
-</table>
-"""
-
-
-def test_aggregator_parses_open_rows_and_carries_employer():
-    src = get_source("aggregator")
-    postings = src.parse_jobs("Simplify New-Grad-Positions", _AGGREGATOR_HTML)
-
-    # The 🔒 Fidelity row is closed and dropped; two open roles remain.
-    assert len(postings) == 2
-
-    p0 = postings[0]
-    assert p0.company == "Simplify New-Grad-Positions"  # the feed, not the employer
-    assert p0.title == "NVIDIA — Software Engineer, New Grad"  # employer moved into title
-    assert p0.ats_job_id == "dcb78e15-a5c5-4a55-89dc-2420d65990d0"  # stable Simplify UUID
-    assert p0.url == "https://nvidia.com/apply/42"  # the Apply link, not the Simplify one
-    assert p0.location == "Santa Clara, CA"
-
-    p1 = postings[1]
-    assert p1.title == "NVIDIA — Backend Engineer New Grad"  # ↳ inherited the employer
-    assert p1.location == "Redmond, WA; Austin, TX"  # </br> split
-    assert p1.ats_job_id != p0.ats_job_id  # no Simplify UUID → hashed, still distinct
-
-
-# The README's shape as of 2026-09-12: rows outside any <tbody>, a multi-location cell
-# collapsed behind a <details> summary, and each section followed by a collapsed
-# "Inactive roles" table whose rows are all closed.
-_AGGREGATOR_HTML_2026_09 = """
-<table style="width: 100%;">
-<thead>
-<tr><th>Company</th><th>Role</th><th>Location</th><th>Application</th><th>Age</th></tr>
-</thead>
-<tr>
-<td><strong><a href="https://simplify.jobs/c/Klaviyo">Klaviyo</a></strong></td>
-<td>Software Engineer 1</td>
-<td><details><summary><strong>3 locations</strong></summary>Boston, MA</br>NYC</br>Denver, CO</details></td>
-<td><div align="center"><a href="https://job-boards.greenhouse.io/klaviyocampus/jobs/7989324003?utm_source=Simplify&ref=Simplify"><img alt="Apply"></a> <a href="https://simplify.jobs/p/5077be7d-bf97-4e0b-8fad-8674bf28d206?utm_source=GHList"><img alt="Simplify"></a></div></td>
-<td>0d</td>
-</tr>
-</table>
-<details>
-<summary>🗃️ Inactive roles (1)</summary>
-<table style="width: 100%;">
-<tbody>
-<tr>
-<td><strong><a href="https://simplify.jobs/c/RTX">RTX</a></strong></td>
-<td>Software Engineer 1</td>
-<td>Tewksbury, MA</br>Concord, MA</td>
-<td>🔒</td>
-<td>7mo</td>
-</tr>
-</tbody>
-</table>
-</details>
-"""
-
-
-def test_aggregator_location_drops_the_details_summary_label():
-    """"3 locations" is a disclosure label, not a place, and must not prefix the location."""
-    postings = get_source("aggregator").parse_jobs("Simplify", _AGGREGATOR_HTML_2026_09)
-    assert len(postings) == 1  # the inactive table's 🔒 row is dropped; no <tbody> is fine
-    p = postings[0]
-    assert p.title == "Klaviyo — Software Engineer 1"
-    assert p.location == "Boston, MA; NYC; Denver, CO"
-    assert p.ats_job_id == "5077be7d-bf97-4e0b-8fad-8674bf28d206"
-
-
-def test_aggregator_tolerates_garbage():
-    src = get_source("aggregator")
-    assert src.parse_jobs("X", None) == []
-    assert src.parse_jobs("X", "") == []
-    assert src.parse_jobs("X", "<table><tr><td>only one cell</td></tr></table>") == []
-
-
 # -- posted dates ------------------------------------------------------------------
 # Three sources, three mutually incomparable raw formats, one TEXT column. Before
 # normalization `ORDER BY posted_at` was silently wrong: the Lever epoch strings
@@ -185,7 +84,6 @@ def test_each_source_normalizes_its_own_format_to_an_iso_day():
     assert get_source("ashby").normalize_posted_at(
         "2026-08-01T01:57:58.337+00:00", today) == "2026-08-01"
     assert get_source("lever").normalize_posted_at("1785533737281", today) == "2026-07-31"
-    assert get_source("aggregator").normalize_posted_at("2d", today) == "2026-07-31"
 
 
 def test_lever_epoch_millis_would_otherwise_outsort_every_iso_string():
@@ -198,40 +96,13 @@ def test_lever_epoch_millis_would_otherwise_outsort_every_iso_string():
     assert src.normalize_posted_at(new, "2026-08-02") == "2026-07-31"
 
 
-def test_aggregator_relative_age_is_resolved_against_the_run_date():
-    """This source dates relatively, which is why `today` is threaded through at all.
-
-    A stored "2d" re-read a month later would silently mean something new, so it is
-    resolved once at parse time and stored absolutely.
-    """
-    src = get_source("aggregator")
-    assert src.normalize_posted_at("5h", "2026-08-02") == "2026-08-02"   # under a day
-    assert src.normalize_posted_at("2w", "2026-08-02") == "2026-07-19"
-    assert src.normalize_posted_at("3mo", "2026-08-02") == "2026-05-04"
-    assert src.normalize_posted_at("1y", "2026-08-02") == "2025-08-02"
-
-
 def test_unparseable_dates_are_none_not_today():
     """A missing date must never read as 'posted today' — that inverts the ranking."""
     today = "2026-08-02"
-    for ats in ("greenhouse", "ashby", "lever", "aggregator"):
+    for ats in ("greenhouse", "ashby", "lever"):
         src = get_source(ats)
         for raw in (None, "", "garbage", "not-a-date"):
             assert src.normalize_posted_at(raw, today) is None, (ats, raw)
-
-
-def test_aggregator_captures_the_age_column():
-    src = get_source("aggregator")
-    postings = src.parse_jobs("Simplify", _AGGREGATOR_HTML)
-    assert postings[0].posted_at == "2d"
-
-
-def test_aggregator_row_without_an_age_column_still_parses():
-    """These repos restyle their table every cycle; a missing column is not a failure."""
-    src = get_source("aggregator")
-    four_cols = _AGGREGATOR_HTML.replace("<td>2d</td>", "").replace("<td>3d</td>", "")
-    postings = src.parse_jobs("Simplify", four_cols)
-    assert postings and postings[0].posted_at is None
 
 
 def test_greenhouse_prefers_first_published_over_updated_at():

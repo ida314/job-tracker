@@ -149,15 +149,18 @@ def test_a_failed_description_leaves_the_row_retryable_and_raises_nothing():
 
 
 def test_a_source_with_no_detail_endpoint_is_not_retried_forever():
-    """The aggregator feeds have no per-posting page, so a fetch cannot exist.
+    """Some sources have no per-posting page at all, so a fetch cannot exist.
 
     Leaving description NULL meant every run re-attempted them and counted each as a
-    failure: 249 aggregator postings a night, with no request ever made. Recording ''
+    failure: 249 such postings a night, with no request ever made. Recording ''
     — the documented "fetched and genuinely empty" sentinel — retires them.
+
+    The listings feed that produced that number is a job board plugin now, and its rows
+    arrive with a description already stored. What still reaches this branch is any
+    company whose `ats` has no adapter, which is the shape the guard was always about.
     """
     conn = store.connect(":memory:")
-    company = Company(name="Simplify", ats="aggregator", slug="",
-                      check_method="aggregator")
+    company = Company(name="Simplify", ats="unknown", slug="", check_method="manual")
     posting = Posting("Simplify", "abc", "NVIDIA — Backend Engineer, New Grad", "u")
     store.sync_postings(conn, "Simplify", [posting], "2026-08-02")
 

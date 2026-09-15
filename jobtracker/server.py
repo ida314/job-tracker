@@ -1108,9 +1108,9 @@ def _add_company_card() -> list:
     p.append("<label>ATS" + _select("newco", "ats", _ATS_CHOICES, "greenhouse") + "</label>")
     p.append(
         "<label>Check method"
-        + _select("newco", "check_method", ("api", "manual", "aggregator"), "api")
-        + '<p class=hint>An aggregator with no board URL is skipped rather than fetched — '
-          "that is how an unconfirmed feed is parked.</p></label>"
+        + _select("newco", "check_method", ("api", "manual"), "api")
+        + '<p class=hint>A community listings feed is not an entry here any more — it is '
+          "a job board, switched on under Settings.</p></label>"
     )
     p.append(
         "<label>Tier"
@@ -1152,8 +1152,8 @@ def _tracked_companies(conn: sqlite3.Connection, companies) -> list:
     groups: dict = {}
     for c in companies:
         groups.setdefault(c.tier, []).append(c)
-    # None last: the aggregator feeds sort after every tiered entry, on the page for the
-    # same reason they do in the file.
+    # None last: an untiered entry sorts after every tiered one, on the page for the
+    # same reason it does in the file.
     order = sorted((t for t in groups if t is not None)) + ([None] if None in groups else [])
 
     p = [f"<h2>Tracked <span class=count>{len(companies)}</span></h2>"]

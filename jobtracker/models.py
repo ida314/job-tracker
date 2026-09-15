@@ -51,8 +51,10 @@ class Company:
     check_method: str = "manual"  # api | manual | aggregator
     expected_board_name: Optional[str] = None
     careers_page: str = ""  # human-facing fallback + where slug-repair reads
-    board_url: str = ""  # aggregator feeds fetch this directly (a raw README URL), since
-    #                      they have no slug to template — see sources/aggregator.py.
+    board_url: str = ""  # Where this entry's listing lives, when it is a published
+    #                      file rather than an ATS board. Documentation on a `manual`
+    #                      entry: nothing fetches it. A listings feed that IS fetched is
+    #                      a job board plugin, and carries its own URL in plugins.yaml.
     notes: str = ""
 
     @property

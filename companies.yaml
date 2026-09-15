@@ -885,17 +885,6 @@
     so it fails the location filter; research-interest only. Note DVC's original company,
     Iterative, rebranded to DataChain — iterative.ai/careers now 302s to a 404.
   expected_board_name: null
-- name: Simplify New-Grad-Positions
-  ats: aggregator
-  check_method: aggregator
-  board_url: https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/README.md
-  notes: HTML <table> README of new-grad roles in five sections (SWE, PM, Data/AI/ML, Quant, Hardware), each followed by a collapsed all-🔒 "Inactive roles" table; ~2.4k rows, 460 open (closed are skipped). Verified 2026-07-25, re-verified 2026-09-12.
-  expected_board_name: null
-- name: Ouckah / CVrve New-Grad list
-  ats: aggregator
-  check_method: aggregator
-  notes: No board_url — the 2026/2027 new-grad repo URL is unconfirmed (2025 archived, 2026 404s), so this stays skipped until verified. Same table format as Simplify, so it works once a URL is set.
-  expected_board_name: null
 - name: YC Work at a Startup
   ats: aggregator
   check_method: manual

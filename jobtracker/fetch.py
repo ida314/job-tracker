@@ -167,11 +167,11 @@ class Fetcher:
         return self._request(url, method, want="json", body=body, headers=headers)
 
     def _request_text(self, url: str, method: str = "GET", headers: dict | None = None):
-        """Return (status_code, body_text, error). For non-JSON feeds (aggregator READMEs).
+        """Return (status_code, body_text, error). For a board that publishes a page.
 
-        Same retry/pacing/trace machinery as _request_json — an aggregator's GitHub host
-        gets the same per-host governor as any board, and a 404 on a renamed repo is a
-        FETCH_FAILED like any other, not a crash.
+        Same retry/pacing/trace machinery as _request_json — a job board's host gets the
+        same per-host governor as any ATS, and a 404 on a renamed path is a FETCH_FAILED
+        like any other, not a crash.
         """
         return self._request(url, method, want="text", headers=headers)
 
@@ -545,37 +545,6 @@ class Fetcher:
                     result.observed_board_name = source.parse_identity(id_raw)
             else:
                 result.observed_board_name = source.identity_from_jobs(raw)
-            return self._finish(span, result)
-
-    def fetch_aggregator(self, company: Company) -> FetchResult:
-        """Fetch one aggregator feed (a raw README URL) and parse it to postings.
-
-        Parallel to fetch_company but for `check_method: aggregator`: the URL is the
-        company's `board_url` (there is no slug to template), the body is text not JSON,
-        and there is no identity endpoint — a feed either parses to rows or it does not.
-        The result flows through the same health/sync/match loop as any board.
-        """
-        with tracer.start_as_current_span("fetch.aggregator") as span:
-            span.set_attribute("company.name", company.name)
-            span.set_attribute("company.ats", company.ats)
-
-            source = get_source(company.ats)
-            result = FetchResult(company=company.name, ats=company.ats, slug="")
-            if source is None:
-                result.error = f"no source adapter for ats={company.ats!r}"
-                return self._finish(span, result)
-            if not company.board_url:
-                result.error = "no board_url"
-                return self._finish(span, result)
-
-            status, text, error = self._request_text(company.board_url)
-            result.status_code = status
-            if error is not None:
-                result.error = error
-                return self._finish(span, result)
-
-            result.ok = True
-            result.postings = source.parse_jobs(company.name, text)
             return self._finish(span, result)
 
     @staticmethod

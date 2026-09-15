@@ -40,7 +40,7 @@ _YAML = """- name: Stripe
   expected_board_name: null
 - name: Some Feed
   ats: aggregator
-  check_method: aggregator
+  check_method: manual
   board_url: https://example.invalid/README.md
   expected_board_name: null
 """
@@ -104,7 +104,7 @@ def test_an_entry_joining_an_existing_tier_lands_at_the_end_of_it(text):
 def test_an_untiered_entry_lands_after_every_tiered_one(text):
     after = curation.insert_entry(
         text, _company(name="Another Feed", ats="aggregator",
-                       check_method="aggregator", board_url="https://x.invalid/R.md")
+                       check_method="manual", board_url="https://x.invalid/R.md")
     )
     assert _names(after)[-1] == "Another Feed"
 
@@ -126,11 +126,11 @@ def test_the_entry_keeps_the_canonical_field_order():
                     "careers_page", "notes", "expected_board_name"]
 
 
-def test_an_aggregator_carries_board_url_and_no_empty_slug():
-    """An aggregator has no slug, tier or careers_page — writing them as empty strings
-    would put four meaningless keys on every feed. Only truthy values are emitted."""
+def test_a_feed_entry_carries_board_url_and_no_empty_slug():
+    """A feed entry has no slug, tier or careers_page — writing them as empty strings
+    would put four meaningless keys on every one. Only truthy values are emitted."""
     block = curation.render_entry(
-        _company(name="Feed", ats="aggregator", check_method="aggregator",
+        _company(name="Feed", ats="aggregator", check_method="manual",
                  board_url="https://x.invalid/README.md")
     )
     assert "board_url:" in block
@@ -235,12 +235,24 @@ def test_a_duplicate_ats_slug_pair_is_rejected():
     assert any("already tracked as 'Stripe'" in e for e in errors), errors
 
 
-def test_an_aggregator_without_a_board_url_is_allowed():
-    """Not an oversight. A feed with no URL is skipped rather than fetched, and the
-    unconfirmed Ouckah/CVrve entry is parked in exactly that state on purpose."""
+def test_an_entry_without_a_board_url_is_allowed():
+    """Not an oversight. `board_url` is optional, and entries are parked without one on
+    purpose — a rule stricter than the file it validates gets deleted the first time it
+    fires."""
     assert curation.validate_new(
-        _company(name="Unwired Feed", ats="aggregator", check_method="aggregator"), []
+        _company(name="Unwired Feed", ats="aggregator", check_method="manual"), []
     ) == []
+
+
+def test_the_aggregator_check_method_is_refused_now_that_nothing_reads_one():
+    """Community listings are job boards — import plugins, switched on in plugins.yaml.
+    Accepting the old check method here would let the page write an entry that looks
+    tracked on /companies and is silently never fetched again."""
+    errors = curation.validate_new(
+        _company(name="Some Feed", ats="aggregator", check_method="aggregator",
+                 board_url="https://x.invalid/README.md"), []
+    )
+    assert any("check_method must be api or manual" in e for e in errors), errors
 
 
 def test_a_new_field_lands_in_schema_order_not_at_the_top():

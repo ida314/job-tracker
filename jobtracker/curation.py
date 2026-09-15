@@ -69,7 +69,11 @@ ATS_VALUES = frozenset(
         "unknown",
     }
 )
-CHECK_METHODS = frozenset({"api", "manual", "aggregator"})
+# `aggregator` is deliberately absent, though `ats: aggregator` survives above. A
+# community listings feed is a job board now — an import plugin, switched on in
+# plugins.yaml — and nothing fetches a `check_method: aggregator` entry any more. Leaving
+# it accepted here would let the page write an entry that is silently never read.
+CHECK_METHODS = frozenset({"api", "manual"})
 TIER_RANGE = range(1, 8)
 # Bounded so a runaway paste hits a real message. `server._read_json` returns `{}` for a
 # body over MAX_BODY, which would otherwise surface as "name is required" — a
@@ -119,7 +123,10 @@ def validate_new(company: Company, existing: Sequence[Company]) -> list[str]:
         errors.append(f"ats must be one of: {', '.join(sorted(ATS_VALUES))}")
 
     if company.check_method not in CHECK_METHODS:
-        errors.append("check_method must be api, manual or aggregator")
+        errors.append(
+            "check_method must be api or manual — a listings feed is a job board "
+            "plugin now, not a companies.yaml entry (docs/plugins.md)"
+        )
 
     if company.check_method == "api":
         if company.ats not in api_sources():
@@ -166,11 +173,9 @@ def validate_new(company: Company, existing: Sequence[Company]) -> list[str]:
                 )
                 break
 
-    # Deliberately NOT an error: an aggregator with no board_url is skipped rather than
-    # failing the run, and the unconfirmed Ouckah/CVrve feed is parked in exactly that
-    # state on purpose (`aggregator.py`, and CLAUDE.md's "Aggregator sources"). The page
-    # says so next to the field instead, because a rule stricter than the file it
-    # validates is a rule that will be deleted the first time it fires.
+    # Deliberately NOT an error: `board_url` is optional, and an entry parked without one
+    # is a real state on disk. A rule stricter than the file it validates is a rule that
+    # will be deleted the first time it fires.
 
     for field in ("careers_page", "board_url"):
         value = (getattr(company, field) or "").strip()

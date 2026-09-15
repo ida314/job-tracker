@@ -24,6 +24,7 @@ from .base import (  # noqa: F401
 )
 from .runner import collect  # noqa: F401
 from . import discord  # noqa: F401  (side effect: register())
+from . import simplify  # noqa: F401  (side effect: register())
 from . import roles  # noqa: F401
 from .roles import enabled_task_names  # noqa: F401
 

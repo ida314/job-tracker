@@ -181,7 +181,7 @@ def extract_candidates(page_html: str) -> list[Candidate]:
     """Board identifiers linked from a careers page, best guess first. Pure.
 
     Tolerates anything: a page that is JavaScript, an error document, or empty returns
-    `[]` rather than raising, the same rule `sources/aggregator.py` follows. An empty
+    `[]` rather than raising, the same rule the job board plugins follow. An empty
     list is a real answer — it is what sends the board to the model fallback.
     """
     if not page_html:
