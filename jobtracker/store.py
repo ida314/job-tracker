@@ -1158,6 +1158,40 @@ def close_stale_postings(
     return cur.rowcount
 
 
+def close_feed_postings(
+    conn: sqlite3.Connection, company: str, ats_job_ids, now: str
+) -> int:
+    """Close rows a board explicitly retracted. The honest half of closing a feed row.
+
+    `close_stale_postings` next door closes by age, because a channel announces a job and
+    never mentions it again — age is a statement about *our observation*, which is the
+    most a poll can honestly support. A snapshot board that publishes `active: false` is
+    telling us directly, and passing that through beats waiting ninety days for the same
+    answer.
+
+    Still not closure by absence: a row missing from the payload is left alone, because a
+    page that failed to load halfway is indistinguishable from a listing that shrank.
+    Only an id the board named is touched.
+
+    Chunked, because a listing that carries its whole history names far more closed ids
+    than this tracker holds rows — the filter is `company` plus the ids, and SQLite has a
+    variable limit.
+    """
+    ids = [str(i) for i in (ats_job_ids or []) if i]
+    if not ids:
+        return 0
+    closed = 0
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        closed += conn.execute(
+            f"UPDATE postings SET closed_at=?, closed_reason='feed_inactive' "
+            f"WHERE company=? AND closed_at IS NULL AND ats_job_id IN ({placeholders})",
+            (now, company, *chunk),
+        ).rowcount
+    return closed
+
+
 def plugin_posting_counts(conn: sqlite3.Connection, company: str) -> dict:
     """total / open / applied for one feed, for `plugins list`."""
     row = conn.execute(

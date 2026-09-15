@@ -138,11 +138,18 @@ def evaluate_plugin(
     a channel, a timeout — those are FETCH_FAILED, they streak in `consecutive_failures`,
     they show on the Boards tab and they degrade the run. Failure is not absence.
 
-    The one exception to "empty is fine" is a **first** read. A backfill that reaches back
-    days and returns nothing at all is not a quiet channel; on Discord it is very likely a
-    missing Read Message History permission, which answers 200 with `[]` rather than 403.
-    That is a real `greenhouse/hubspot` — reachable, authorized, and empty — so it is
-    reported rather than recorded as "no jobs".
+    Two exceptions to "empty is fine", and they are the same exception twice.
+
+    A **first** read that returns nothing at all is not a quiet channel: on Discord it is
+    very likely a missing Read Message History permission, which answers 200 with `[]`
+    rather than 403. That is a real `greenhouse/hubspot` — reachable, authorized, and
+    empty — so it is reported rather than recorded as "no jobs".
+
+    A **snapshot** board is empty-suspicious on *every* run, not just the first, because
+    it is the thing 7.1 was written about: a board that republishes its whole listing is
+    a complete statement, so zero rows means either the listing emptied or the shape
+    moved under us. The distinction this function protects is between a poll and a
+    statement, never between a plugin and a board.
     """
     prev_failures = prior.consecutive_failures if prior else 0
     prev_ok_at = prior.last_ok_at if prior else None
@@ -157,7 +164,22 @@ def evaluate_plugin(
             consecutive_failures=prev_failures + 1,
         )
 
-    if getattr(result, "first_read", False) and not getattr(result, "read", 0):
+    empty = not getattr(result, "read", 0)
+
+    if empty and getattr(result, "snapshot", False):
+        return BoardHealth(
+            company,
+            HealthStatus.SUSPECT_EMPTY,
+            consecutive_empty_runs=(prior.consecutive_empty_runs + 1) if prior else 1,
+            last_ok_at=prev_ok_at,
+            detail=(
+                "this board republishes its whole listing every run, and this run read "
+                "nothing at all — the listing emptied, or its shape moved"
+            ),
+            alerting=True,
+        )
+
+    if empty and getattr(result, "first_read", False):
         return BoardHealth(
             company,
             HealthStatus.SUSPECT_EMPTY,

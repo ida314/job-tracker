@@ -586,3 +586,154 @@ def test_a_cursor_is_described_by_the_plugin_that_minted_it():
     imported straight into the CLI. Invisible with one feed; a confidently wrong date
     for the second."""
     assert base.Plugin().describe_cursor("whatever-this-is") == "whatever-this-is"
+
+
+# -- snapshot boards ------------------------------------------------------------------
+#
+# The second shape of feed. A cursor walk reads an endless stream forward and remembers
+# where it stopped; a snapshot board republishes its whole listing every run, so there is
+# no window to lose and nothing to remember. Everything below is about the consequences.
+class _PageFetcher:
+    """Serves a fixed map of url -> payload, and records which fetch was used."""
+
+    def __init__(self, pages):
+        self.pages = dict(pages)
+        self.json_calls = []
+        self.text_calls = []
+
+    def fetch_json(self, url, headers=None):
+        self.json_calls.append(url)
+        return self._answer(url)
+
+    def fetch_text(self, url, headers=None):
+        self.text_calls.append(url)
+        return self._answer(url)
+
+    def _answer(self, url):
+        if url not in self.pages:
+            return (404, None, "HTTP 404")
+        return (200, self.pages[url], None)
+
+
+def _snapshot_plugin(fmt="json", urls=("https://b/1", "https://b/2")):
+    from jobtracker.models import Company, Posting
+    from jobtracker.plugins.base import Plugin
+
+    class _Board(Plugin):
+        name = "snapboard"
+        tag = "snap"
+        page_format = fmt
+
+        def company(self, settings):
+            return Company(name="Snap board", ats="plugin", slug="", tier=None,
+                           check_method="plugin")
+
+        def page_urls(self, settings, today):
+            return list(urls)
+
+        def page_ids(self, raw):
+            return [j["id"] for j in raw]
+
+        def closed_ids(self, raw):
+            return [j["id"] for j in raw if not j.get("active", True)]
+
+        def page_error(self, raw):
+            return None if isinstance(raw, list) else "payload is not a list"
+
+        def parse_page(self, group, raw, settings, today):
+            live = [j for j in raw if j.get("active", True)]
+            return ([Posting(group, j["id"], j["title"], j["url"]) for j in live], 0, 0)
+
+    return _Board()
+
+
+def test_a_snapshot_board_reads_every_page_once_and_keeps_no_cursor():
+    from jobtracker.plugins import collect
+
+    fetcher = _PageFetcher({
+        "https://b/1": [{"id": "1", "title": "A", "url": "https://x/1"}],
+        "https://b/2": [{"id": "2", "title": "B", "url": "https://x/2"}],
+    })
+    got = collect(_snapshot_plugin(), fetcher, {}, {}, "2026-09-15")
+
+    assert got.ok and got.snapshot is True
+    assert fetcher.json_calls == ["https://b/1", "https://b/2"]
+    assert [p.ats_job_id for p in got.postings] == ["1", "2"]
+    assert got.cursor == {}  # nothing to remember, so nothing is stored
+
+
+def test_pages_that_overlap_import_one_row_per_req():
+    """A snapshot board's pages overlap by construction — a role listing and a location
+    listing share jobs — and importing one twice would be two rows for one req inside a
+    single board."""
+    from jobtracker.plugins import collect
+
+    job = {"id": "1", "title": "A", "url": "https://x/1"}
+    fetcher = _PageFetcher({"https://b/1": [job], "https://b/2": [job]})
+    got = collect(_snapshot_plugin(), fetcher, {}, {}, "2026-09-15")
+    assert [p.ats_job_id for p in got.postings] == ["1"]
+    assert got.read == 2  # both pages were still read, and say so
+
+
+def test_a_page_that_fails_ends_the_read_rather_than_shrinking_the_listing():
+    """The trap this shape has that a poll does not: a short snapshot is exactly what a
+    board that emptied looks like, so a failure may never be folded in as fewer jobs."""
+    from jobtracker.plugins import collect
+
+    fetcher = _PageFetcher({"https://b/1": [{"id": "1", "title": "A", "url": "u"}]})
+    got = collect(_snapshot_plugin(), fetcher, {}, {}, "2026-09-15")
+    assert not got.ok and "404" in got.error
+    assert got.postings == []
+
+
+def test_a_payload_whose_shape_we_do_not_understand_is_a_failure_not_an_empty_board():
+    from jobtracker.plugins import collect
+
+    fetcher = _PageFetcher({"https://b/1": {"jobs": []}, "https://b/2": []})
+    got = collect(_snapshot_plugin(), fetcher, {}, {}, "2026-09-15")
+    assert not got.ok and got.error == "payload is not a list"
+
+
+def test_a_board_that_says_a_listing_closed_is_believed_and_absence_is_not():
+    from jobtracker.plugins import collect
+
+    fetcher = _PageFetcher({
+        "https://b/1": [{"id": "1", "title": "A", "url": "u", "active": True},
+                        {"id": "2", "title": "B", "url": "u", "active": False}],
+        "https://b/2": [],
+    })
+    got = collect(_snapshot_plugin(), fetcher, {}, {}, "2026-09-15")
+    assert [p.ats_job_id for p in got.postings] == ["1"]
+    assert got.closed_ids == ["2"]
+
+
+def test_a_board_published_as_a_page_is_read_as_text():
+    """The plugin stays the only thing that knows the shape of its own source."""
+    from jobtracker.plugins import collect
+
+    fetcher = _PageFetcher({"https://b/1": [], "https://b/2": []})
+    collect(_snapshot_plugin(fmt="text"), fetcher, {}, {}, "2026-09-15")
+    assert fetcher.text_calls == ["https://b/1", "https://b/2"]
+    assert fetcher.json_calls == []
+
+
+def test_a_retraction_closes_only_ids_the_board_named():
+    conn = store.connect(":memory:")
+    store.append_postings(
+        conn, "Snap board",
+        [Posting("Snap board", "1", "A", "https://x/1"),
+         Posting("Snap board", "2", "B", "https://x/2")],
+        "2026-09-15", origin="snapboard",
+    )
+    assert store.close_feed_postings(conn, "Snap board", ["2", "unknown"], "2026-09-16") == 1
+    rows = {r["ats_job_id"]: r for r in conn.execute("SELECT * FROM postings")}
+    assert rows["1"]["closed_at"] is None
+    assert rows["2"]["closed_reason"] == "feed_inactive"
+
+
+def test_every_import_plugin_carries_a_tag_for_the_row_it_renders():
+    """One list holds every board's rows, so each row has to say where it came from."""
+    from jobtracker import plugins as plugins_mod
+
+    for plugin in plugins_mod.plugins_of_kind(plugins_mod.KIND_IMPORT):
+        assert plugin.display_tag()
