@@ -635,9 +635,13 @@ _JS = """
 
 // Grouping and filtering in one block, because both decide whether a row is on screen.
 // Splitting them would give two owners to `hidden`, which is how they would drift.
-(function () {
+//
+// Run once per filter scope: a panel holding one filter bar and the tables it drives.
+// Controls are found inside the scope, never by id — the static file carries more than
+// one postings panel, and a global id would be two filter bars answering to one name.
+Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), function (scope) {
   var tables = Array.prototype.slice.call(
-    document.querySelectorAll('table[data-filterable]'));
+    scope.querySelectorAll('table[data-filterable]'));
   if (!tables.length) return;
 
   // A data row is one carrying data-search. Group heads do not, which is what keeps them
@@ -662,27 +666,41 @@ _JS = """
     });
   });
 
-  var q = document.getElementById('q');
-  var atsSel = document.getElementById('ats');
-  var locSel = document.getElementById('loc');   // absent when no criteria were passed
-  var chips = Array.prototype.slice.call(document.querySelectorAll('.chip[data-tier]'));
+  var q = scope.querySelector('[data-f="q"]');
+  var atsSel = scope.querySelector('[data-f="ats"]');   // absent on a panel with no ATS
+  var locSel = scope.querySelector('[data-f="loc"]');   // absent when no criteria were passed
+  var chips = Array.prototype.slice.call(scope.querySelectorAll('.chip[data-attr]'));
 
-  function activeTiers() {
-    var on = chips.filter(function (c) { return c.getAttribute('aria-pressed') === 'true'; });
-    return on.length ? on.map(function (c) { return c.dataset.tier; }) : null;  // null = all
+  // Chips group by the row attribute they read (tier, source). Within a group any pressed
+  // chip admits a row; across groups every group must. A group with nothing pressed is off.
+  function activeChips() {
+    var on = {}, any = false;
+    chips.forEach(function (c) {
+      if (c.getAttribute('aria-pressed') !== 'true') return;
+      (on[c.dataset.attr] = on[c.dataset.attr] || []).push(c.dataset.val);
+      any = true;
+    });
+    return any ? on : null;   // null = all
+  }
+
+  function chipsAdmit(row, on) {
+    if (!on) return true;
+    return Object.keys(on).every(function (k) {
+      return on[k].indexOf(row.dataset[k]) !== -1;
+    });
   }
 
   function apply() {
     var text = q ? (q.value || '').toLowerCase().trim() : '';
     var ats = atsSel ? atsSel.value : '';
-    var tiers = activeTiers();
+    var pressed = activeChips();
     // "" = anywhere; otherwise a '|'-separated set of rank names, so "US (incl. NYC)"
     // is expressed as "nyc|us" rather than needing its own comparison.
     var locs = locSel && locSel.value ? locSel.value.split('|') : null;
     // Any active filter forces the matching groups open. A collapsed page under a typed
     // search reads as "nothing found", which is the one thing this page may never say
     // while it is holding rows that match.
-    var filtering = !!(text || ats || locs || tiers);
+    var filtering = !!(text || ats || locs || pressed);
 
     tables.forEach(function (t) {
       var rows = rowsOf(t), shown = 0;
@@ -690,7 +708,7 @@ _JS = """
         var ok = (!text || row.dataset.search.indexOf(text) !== -1)
               && (!ats || row.dataset.ats === ats)
               && (!locs || locs.indexOf(row.dataset.loc) !== -1)
-              && (!tiers || tiers.indexOf(row.dataset.tier) !== -1);
+              && chipsAdmit(row, pressed);
         row.hidden = !ok;
         if (ok) shown++;
       });
@@ -728,7 +746,7 @@ _JS = """
   if (atsSel) atsSel.addEventListener('change', apply);
   if (locSel) locSel.addEventListener('change', apply);
   apply();
-})();
+});
 
 // The actions cell: put a posting in the tracker, and get its tailored resume. Present
 // only under `serve`, like every other control on this page — the static file renders no
@@ -1002,7 +1020,7 @@ def build_dashboard(
         )
     parts.append("</section>")
 
-    parts.append('<section data-panel-body="all" hidden>')
+    parts.append('<section data-panel-body="all" data-filter-scope hidden>')
     _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria)
     _tier_chart(parts, matches, by_name)
     _filters(parts, matches + uncertain, by_name, criteria)
@@ -1874,18 +1892,21 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
     tiers = sorted({_tier_of(r["company"], by_name) for r in rows}, key=lambda t: (t == "—", t))
     ats = sorted({by_name[r["company"]].ats for r in rows if r["company"] in by_name})
     parts.append('<div class="filters">')
+    # Controls are named by `data-f`, not by id, and the JS finds them inside the panel
+    # that holds them. Two postings panels ship in one file; ids would collide silently,
+    # leaving one bar driving the other's tables.
     parts.append(
-        '<input type="search" id="q" placeholder="Filter by title, company, location…" '
+        '<input type="search" data-f="q" placeholder="Filter by title, company, location…" '
         'aria-label="Filter postings">'
     )
-    parts.append('<select id="ats" aria-label="Filter by ATS"><option value="">All ATS</option>')
+    parts.append('<select data-f="ats" aria-label="Filter by ATS"><option value="">All ATS</option>')
     for a in ats:
         parts.append(f'<option value="{html.escape(a)}">{html.escape(a)}</option>')
     parts.append("</select>")
     # Location is a filter you opt into, not one applied for you — the default is "all",
     # matching the rule that geography never removes anything on its own.
     if criteria is not None:
-        parts.append('<select id="loc" aria-label="Filter by location">')
+        parts.append('<select data-f="loc" aria-label="Filter by location">')
         for value, label in (
             ("", "Anywhere"),
             ("nyc", "NYC only"),
@@ -1895,10 +1916,13 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
         ):
             parts.append(f'<option value="{value}">{html.escape(label)}</option>')
         parts.append("</select>")
+    # A chip names the row attribute it reads, so one JS block serves the tier chips here
+    # and the source chips on the job boards panel without learning either vocabulary.
     for t in tiers:
         label = f"T{t}" if t != "—" else "untiered"
         parts.append(
-            f'<button type="button" class="chip" data-tier="{html.escape(str(t))}" '
+            f'<button type="button" class="chip" data-attr="tier" '
+            f'data-val="{html.escape(str(t))}" '
             f'aria-pressed="false">{html.escape(label)}</button>'
         )
     parts.append("</div>")
