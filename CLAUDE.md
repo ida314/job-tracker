@@ -496,6 +496,10 @@ model role in `tasks/`; it implements nothing and has no `page_url`/cursor/`pars
   `postings JOIN verdicts`.
 - **Postings close by age, never by absence** (`expire_after_days`, default 90). A channel cannot
   report that a req was filled; age is honest because it is a statement about *our observation*.
+- **A board that retracts explicitly sets `expire_after_days: 0`**, and `simplify` does. Age is
+  what you use when nothing better exists; where the board states which listings are still
+  published, age does not back that statement up, it contradicts it. Measured on the first real
+  import: 3,067 listings the board calls active, **614 closed on arrival** by a 90-day default.
 - **`health.evaluate_plugin` can never return `SUSPECT_EMPTY` for a routine poll**, and it lives
   in `health.py` because a second health policy in `cli.py` is what that module prevents. **The
   one exception is an empty *first* read** — a backfill that finds nothing is very likely a

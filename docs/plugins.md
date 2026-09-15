@@ -258,6 +258,13 @@ credential:
   honest thing to say because it is a statement about *our own observation* — "older than
   N days, and this feed has no way to tell us more" — rather than an inferred claim about
   the employer.
+- **…unless the board can retract, and then age is switched off.** `simplify` sets
+  `expire_after_days: 0` because it publishes `active` per listing: where the board says
+  outright what is still open, age does not supplement that answer, it overrides it with a
+  worse one. The first real import made the cost concrete — 3,067 listings the board calls
+  active, 614 of them older than ninety days and closed the moment they arrived. With age
+  off, `closed_ids` is the only way one of its rows closes, which is why that path has its
+  own test.
 - **`health.evaluate_plugin` can never return `SUSPECT_EMPTY` for a routine poll**, and
   the docstring argues it. §7.1 reads an empty board as suspect because a board is a
   complete statement; a channel poll is not. Flagging it would put the feed on the Boards

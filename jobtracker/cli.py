@@ -373,7 +373,7 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
             f"FAIL {fetch.error}"
             if fetch.error
             else f"{fetch.read} read, {fetch.imported} parsed, "
-                 f"{fetch.unparsed} unreadable, {fetch.skipped} not from a bot",
+                 f"{fetch.unparsed} unreadable, {fetch.skipped} skipped",
         )
 
         health = evaluate_plugin(company.name, fetch, store.get_health(conn, company.name), today)
@@ -414,8 +414,8 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
             aged = store.close_stale_postings(conn, company.name, floor, today)
             if aged:
                 log.info(
-                    "plugin %s: closed %d posting(s) older than %d days — a channel "
-                    "announces and never retracts, so age is the only signal it has",
+                    "plugin %s: closed %d posting(s) older than %d days — this board "
+                    "cannot say a req was filled, so age is the only signal it has",
                     plugin.name, aged, days,
                 )
 

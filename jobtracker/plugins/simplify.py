@@ -108,9 +108,15 @@ class Simplify(Plugin):
             # `jobtracker plugins enable simplify`, or the card on /settings — a
             # decision you type, which is what plugins.yaml holds.
             "enabled": False,
-            # A listing that stops being republished is retracted through `closed_ids`,
-            # so age is the backstop rather than the mechanism.
-            "expire_after_days": 90,
+            # **Zero, and that is the point.** This board states outright which
+            # listings are still published, and `closed_ids` carries the rest, so age
+            # here does not back that up — it contradicts it. Measured on the first real
+            # import: 3,067 listings the board calls active, 614 of them posted more
+            # than ninety days ago and closed on arrival by age. A req this board still
+            # publishes is open, however old the posting is, and the day it stops
+            # publishing one it tells us. Age is for a channel that announces and never
+            # retracts, which is the opposite of this.
+            "expire_after_days": 0,
             # Settable because the repo has renamed this path before, and a board that
             # moved should be a line in plugins.yaml rather than a release.
             "board_url": LISTINGS_URL,

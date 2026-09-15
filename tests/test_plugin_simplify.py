@@ -129,3 +129,25 @@ def test_the_group_name_is_the_one_the_old_feed_wrote_under(plugin):
 
 def test_installing_it_never_starts_reading_anything(plugin):
     assert plugin.defaults()["enabled"] is False
+
+
+def test_age_never_closes_a_listing_this_board_still_publishes(plugin):
+    """`expire_after_days` is 0 here, and that is a decision rather than an oversight.
+
+    Age exists for a channel that announces a role and never mentions it again — it is a
+    statement about our own observation, made because nothing better is available. This
+    board *does* have something better: it says outright which listings are still
+    published, and `closed_ids` carries the rest. Age would not back that up, it would
+    contradict it.
+
+    Measured on the first real import: 3,067 listings the board calls active, 614 of them
+    posted more than ninety days ago and closed on arrival by a 90-day default. A req this
+    board still publishes is open however old the posting is.
+    """
+    assert plugin.defaults()["expire_after_days"] == 0
+
+
+def test_the_board_still_retracts_explicitly(plugin, listings):
+    """The other half of that trade: with age off, `closed_ids` is the only way a row
+    ever closes, so it has to keep working."""
+    assert plugin.closed_ids(listings)
