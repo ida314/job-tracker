@@ -322,6 +322,13 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
    read as marks beside a row rather than as a toolbar under it. */
 td.act, .restlist .act { white-space: nowrap; }
 td.act { text-align: right; }
+.srctag { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; padding: 1px 6px; border-radius: 999px; vertical-align: 2px;
+  border: 1px solid var(--rule); color: var(--muted); background: var(--page); }
+.emp { color: var(--muted); }
+.dupchip { font-size: 11px; color: var(--muted); border-bottom: 1px dotted currentColor; }
+.appliedchip { font-size: 11px; color: var(--good); }
+.bt th.src, .bt td.src { white-space: nowrap; }
 .act .tchip, .act .tracked, .act .theld { display: inline-block; font-size: 11px;
     color: var(--muted);
                              vertical-align: middle; }
@@ -940,6 +947,7 @@ def build_dashboard(
     today: str,
     criteria: Criteria | None = None,
     interactive: bool = False,
+    include_job_boards: bool = True,
 ) -> str:
     """Return a complete HTML document. Pure read — never writes to `conn`.
 
@@ -955,8 +963,14 @@ def build_dashboard(
 
     """
     by_name = {c.name: c for c in companies}
-    matches = _by_location(store.open_postings_by_verdict(conn, "match"), criteria)
-    uncertain = _by_location(store.open_postings_by_verdict(conn, "uncertain"), criteria)
+    # Two pages out of one corpus, split on `postings.origin`: a row with no origin came
+    # from a curated company board, a row with one came from a job board. Nothing is
+    # filtered away — every row lands on exactly one of the two, which is the whole
+    # point of the split (`docs/plugins.md`).
+    matches, board_matches = _split_by_origin(
+        store.open_postings_by_verdict(conn, "match"), criteria)
+    uncertain, board_uncertain = _split_by_origin(
+        store.open_postings_by_verdict(conn, "uncertain"), criteria)
     counts = store.counts_by_verdict(conn)
     run = store.last_run(conn)
     unhealthy = store.unhealthy_boards(conn)
@@ -999,8 +1013,11 @@ def build_dashboard(
     parts.append(f"<style>{_CSS}</style>")
     parts.append('</head><body><div class="wrap">')
 
-    _header(parts, today, run, companies, pending_mail, interactive)
-    _tabs(parts, picks, apps, matches, uncertain, unhealthy)
+    _header(parts, today, run, companies, pending_mail, interactive,
+            job_boards=len({_origin_of(r) for r in board_matches + board_uncertain}))
+    board_rows = board_matches + board_uncertain
+    _tabs(parts, picks, apps, matches, uncertain, unhealthy,
+          board_rows if include_job_boards else [], include_job_boards)
 
     # Today first, and by itself: the point of the page is to shorten the distance
     # between opening it and applying to something.
@@ -1031,6 +1048,14 @@ def build_dashboard(
            letters_built)
     parts.append("</section>")
 
+    if include_job_boards:
+        parts.append('<section data-panel-body="jobboards" data-filter-scope hidden>')
+        _job_board_panel(parts, board_matches, board_uncertain, companies, criteria,
+                         interactive, tracked, suggestions, built, held, letters,
+                         letters_built, _company_keys(matches + uncertain), unhealthy,
+                         by_name)
+        parts.append("</section>")
+
     parts.append('<section data-panel-body="boards" hidden>')
     _boards(parts, unhealthy, by_name, proposals)
     _manual(parts, companies)
@@ -1048,20 +1073,31 @@ def build_dashboard(
 
 
 # -- sections ----------------------------------------------------------------------
-def _tabs(parts, picks, applications, matches, uncertain, unhealthy) -> None:
-    """Four tabs. Hidden until JS confirms it is running — see the CSS note.
+def _tabs(parts, picks, applications, matches, uncertain, unhealthy,
+          board_rows=(), include_job_boards: bool = True) -> None:
+    """The tabs. Hidden until JS confirms it is running — see the CSS note.
 
     Order is the priority order: what to do now, what you already did and still owe
-    something to, then everything, then plumbing. Applications sits second because the
-    outer loop is work you have already committed to, which outranks the raw corpus.
+    something to, then the two corpora, then plumbing. Applications sits second because
+    the outer loop is work you have already committed to, which outranks the raw corpus.
+
+    Company pages and Job boards are two tabs over two different kinds of source — one
+    curated board per employer, against aggregated feeds where the employer is a field on
+    the row. Under `serve` the job boards get a page of their own and this tab is absent,
+    which is what `include_job_boards` says; the static file keeps both, because a mailed
+    file has nowhere else to put them.
     """
-    parts.append('<nav class="tabs" role="tablist">')
-    for name, label, count in (
+    tabs = [
         ("today", "Today", len(picks)),
         ("applications", "Applications", len(applications)),
-        ("all", "All postings", len(matches) + len(uncertain)),
-        ("boards", "Boards", len(unhealthy)),
-    ):
+        ("all", "Company pages", len(matches) + len(uncertain)),
+    ]
+    if include_job_boards:
+        tabs.append(("jobboards", "Job boards", len(board_rows)))
+    tabs.append(("boards", "Board health", len(unhealthy)))
+
+    parts.append('<nav class="tabs" role="tablist">')
+    for name, label, count in tabs:
         badge = f'<span class="n">{count}</span>' if count else ""
         parts.append(
             f'<button class="tab" role="tab" data-panel="{name}" '
@@ -1144,12 +1180,9 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
         "snooze live on a pick.</p>"
     )
     for company, rows in groups.items():
-        tier = _tier_of(company, by_name)
-        var = _band_var(tier)
         parts.append('<div class="restco">')
         parts.append(
-            f'<h3><span class="tier" style="background:var({var});'
-            f'color:var({var}-ink)">T{tier if tier is not None else "?"}</span>'
+            f'<h3>{_source_badge(rows[0][1], by_name)}'
             f'{html.escape(company)} <span class="n">{len(rows)} '
             f'{"role" if len(rows) == 1 else "roles"}</span></h3>'
         )
@@ -1196,10 +1229,11 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
         f'<h3><a {_posting_attrs(row, interactive)}>'
         f'{html.escape(row["title"])}</a></h3>'
     )
+    # A job board row has no tier — it is not a curated company — so it wears the board
+    # it came from instead of the "T—" that would say nothing.
     parts.append(
-        f'<div class="meta">{pin}<span class="tier" style="background:var({var});'
-        f'color:var({var}-ink)">T{tier if tier is not None else "?"}</span>'
-        f'<span>{html.escape(row["company"])}</span><span>·</span>'
+        f'<div class="meta">{pin}{_source_badge(row, by_name)}'
+        f'<span>{html.escape(_employer_of(row) or row["company"])}</span><span>·</span>'
         f'<span>{html.escape(loc)}</span><span>·</span><span>{html.escape(age)}</span>'
         f'<span>·</span><span class="score">score {row["score"]:.1f}</span></div>'
     )
@@ -1464,7 +1498,15 @@ def _track_cell(row, tracked=None, suggestions=None, built=None, held=None,
     if letter_row is not None:
         bits.append(_letter_control(row, letter_row, letters_built))
 
-    if key in (tracked or set()):
+    applied = _applied_state(row)
+    if applied and key not in (tracked or set()):
+        # Applied to under *another* row — the same req reached by a different road. A
+        # state, not a control: the button would record a second application to one job.
+        bits.append(
+            f'<span class="tracked" title="You applied to this req under another row">'
+            f"applied · {html.escape(applied)}</span>"
+        )
+    elif key in (tracked or set()):
         bits.append('<span class="tracked" title="Already in the tracker">tracked</span>')
     else:
         bits.append(
@@ -1472,6 +1514,87 @@ def _track_cell(row, tracked=None, suggestions=None, built=None, held=None,
             'title="Record that you applied to this">+ tracker</button>'
         )
     return "".join(bits)
+
+
+
+def _origin_labels() -> dict:
+    """`origin` -> the short tag a row shows, from the plugin registry.
+
+    Imported here rather than at module scope: this is a rendering detail, and a page
+    that cannot import the registry should still render. Every consumer reads it with
+    `.get(origin, origin)`, so an origin whose plugin was removed degrades to its own
+    name instead of vanishing — the same rule a plugin group follows everywhere else.
+    """
+    try:
+        from . import plugins as plugins_mod
+
+        return {
+            plugin.name: plugin.display_tag()
+            for plugin in plugins_mod.plugins_of_kind(plugins_mod.KIND_IMPORT)
+        }
+    except Exception:  # pragma: no cover - a page must not 500 over a label
+        return {}
+
+
+def _origin_of(row) -> str:
+    """The board that imported this row, or "" for a curated company board."""
+    keys = row.keys()
+    return (row["origin"] or "") if "origin" in keys else ""
+
+
+def _employer_of(row) -> str:
+    keys = row.keys()
+    return (row["employer"] or "") if "employer" in keys else ""
+
+
+def _role_of(row) -> str:
+    """The title with the employer prefix removed, for a page that shows both.
+
+    Titles are stored as "Employer — Role" because the criteria tokens and the eval
+    corpus read that shape. Here the employer has its own cell, so repeating it inside
+    the role reads as a stutter — but the prefix is only ever stripped when the employer
+    column is actually rendering it.
+    """
+    title = row["title"] or ""
+    employer = _employer_of(row)
+    prefix = f"{employer} — "
+    return title[len(prefix):] if employer and title.startswith(prefix) else title
+
+
+def _tag_chip(origin: str, labels: dict) -> str:
+    if not origin:
+        return ""
+    label = labels.get(origin, origin)
+    return (f'<span class="srctag" title="imported from {html.escape(origin, quote=True)}">'
+            f"{html.escape(label)}</span>")
+
+
+def _source_badge(row, by_name, labels=None) -> str:
+    """The badge in front of a row: its tier, or the board that carried it.
+
+    A job board row has no tier — it is not a curated company — and rendering the "—"
+    that `_tier_of` returns as "T—" says nothing. The board's name says where the row
+    came from, which is the question you actually have about it.
+    """
+    origin = _origin_of(row)
+    if origin:
+        return _tag_chip(origin, labels if labels is not None else _origin_labels())
+    tier = _tier_of(row["company"], by_name)
+    var = _band_var(tier)
+    return (f'<span class="tier" style="background:var({var});color:var({var}-ink)">'
+            f'T{tier if tier is not None else "?"}</span>')
+
+
+def _applied_state(row) -> str:
+    """The status of an application covering this req, or "" — see `applied_status`.
+
+    Answered about the *req*, not the row: the query resolves it through this row's own
+    application or through any application sharing its dedupe key. That is what makes a
+    job board's copy of something you already applied to say so, rather than offering a
+    button that would record a second application to one job.
+    """
+    keys = row.keys()
+    return (row["applied_status"] or "") if "applied_status" in keys else ""
 
 
 def _proposal(suggestions, key) -> tuple[int, str]:
@@ -1752,7 +1875,8 @@ def version_chip() -> str:
     return f'<span class="ver">v{html.escape(base)} · {detail}</span>'
 
 
-def _header(parts, today, run, companies, pending_mail=0, interactive=False) -> None:
+def _header(parts, today, run, companies, pending_mail=0, interactive=False,
+            job_boards: int = 0) -> None:
     parts.append(
         f"<h1>Job tracker — {html.escape(today)} {version_chip()}</h1>"
     )
@@ -1767,9 +1891,12 @@ def _header(parts, today, run, companies, pending_mail=0, interactive=False) -> 
         f'{run["ok"]} of {run["companies"]} boards healthy, '
         f'{run["new_postings"]} new postings, {run["matches"]} new matches.</p>'
     )
+    feeds = (f", {job_boards} job board{'' if job_boards == 1 else 's'} importing"
+             if job_boards else "")
     parts.append(
         f'<p class="note">Coverage: {api} boards checked automatically, '
-        f"{manual} manual-only companies that are never scraped (see below).</p>"
+        f"{manual} manual-only companies that are never scraped (see below)"
+        f"{feeds}.</p>"
     )
 
 
@@ -2030,6 +2157,266 @@ _STATUS_STYLE = {
 }
 
 
+
+def _split_by_origin(rows, criteria):
+    """`(company board rows, job board rows)`, each in location order.
+
+    One query, split in Python rather than two queries with an `origin IS NULL` clause:
+    the two pages have to partition the corpus exactly, and a row that satisfied neither
+    filter — or both — would simply be missing from the product with nothing to notice it.
+    """
+    company_rows = [r for r in rows if not _origin_of(r)]
+    board_rows = [r for r in rows if _origin_of(r)]
+    return _by_location(company_rows, criteria), _by_location(board_rows, criteria)
+
+
+def _company_keys(rows) -> dict:
+    """`dedupe_key` -> the open company-page row holding it.
+
+    What the "on company page" chip is built from. Only keyed rows take part; a NULL key
+    means "not derived yet", never "the same req as every other underived row".
+    """
+    keyed = {}
+    for row in rows:
+        keys = row.keys()
+        key = row["dedupe_key"] if "dedupe_key" in keys else None
+        if key:
+            keyed.setdefault(key, row)
+    return keyed
+
+
+def _job_board_panel(parts, matches, uncertain, companies, criteria, interactive,
+                     tracked, suggestions, built, held, letters, letters_built,
+                     company_keys, unhealthy=(), by_name=None) -> None:
+    """Every job board's postings, in one list, each row saying which board carried it.
+
+    Deliberately **not** grouped by company the way the company pages are. There the
+    group is the employer and the tier is the thing you triage by; here the group would
+    be the feed — one heading holding three thousand rows from four hundred employers,
+    which is a grouping that answers no question. Flat, ordered by location preference,
+    with the employer as a column and the board as a tag beside the role.
+    """
+    labels = _origin_labels()
+    rows = matches + uncertain
+    parts.append("<h2>Job boards</h2>")
+    parts.append(
+        '<p class="note">Aggregated feeds — the same role often appears here and on its '
+        "employer's own board. Nothing is hidden for being a copy: a row already on a "
+        "company page says so, and a row you have applied to says that, whichever way "
+        "you reached it.</p>"
+    )
+
+    if not rows:
+        parts.append(
+            '<div class="empty">No job board has imported anything yet. Boards ship '
+            "switched off — turn one on with <code>jobtracker plugins enable "
+            "simplify</code> (or <code>ycombinator</code>), or from the Settings page."
+            "</div>"
+        )
+    else:
+        _board_filters(parts, rows, labels, criteria)
+        _board_table(parts, "Open matches", matches, "bmatches", False, criteria,
+                     interactive, labels, company_keys, tracked, suggestions, built,
+                     held, letters, letters_built)
+        _board_table(parts, "Uncertain — needs a human", uncertain, "buncertain", True,
+                     criteria, interactive, labels, company_keys, tracked, suggestions,
+                     built, held, letters, letters_built)
+
+    _manual_job_boards(parts, companies)
+    _board_feed_health(parts, unhealthy, by_name or {})
+
+
+def _board_filters(parts, rows, labels, criteria=None) -> None:
+    """Search, which board, and the location sort. No tier chips and no ATS select —
+    neither means anything on a feed, and a control that filters on a field every row
+    leaves empty is a control that only ever hides everything."""
+    sources = sorted({labels.get(_origin_of(r), _origin_of(r)) for r in rows})
+    parts.append('<div class="filters">')
+    parts.append(
+        '<input type="search" data-f="q" placeholder="Filter by role, employer, location…" '
+        'aria-label="Filter postings">'
+    )
+    if criteria is not None:
+        parts.append('<select data-f="loc" aria-label="Filter by location">')
+        for value, label in (
+            ("", "Anywhere"),
+            ("nyc", "NYC only"),
+            ("nyc|us", "US (incl. NYC)"),
+            ("unknown", "Unspecified"),
+            ("non-us", "Outside the US"),
+        ):
+            parts.append(f'<option value="{value}">{html.escape(label)}</option>')
+        parts.append("</select>")
+    for source in sources:
+        parts.append(
+            f'<button type="button" class="chip" data-attr="src" '
+            f'data-val="{html.escape(source, quote=True)}" '
+            f'aria-pressed="false">{html.escape(source)}</button>'
+        )
+    parts.append("</div>")
+    parts.append(
+        '<p class="note">No board selected means all boards. Location changes the '
+        "order, never the contents.</p>"
+    )
+
+
+def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactive,
+                 labels, company_keys, tracked=None, suggestions=None, built=None,
+                 held=None, letters=None, letters_built=None) -> None:
+    parts.append(
+        f'<h2>{html.escape(heading)} '
+        f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
+    )
+    if not rows:
+        parts.append('<div class="empty">Nothing here.</div>')
+        return
+    parts.append(
+        f'<table class="bt" data-filterable data-count-target="{ident}-count" '
+        f'data-empty-target="{ident}-empty">'
+    )
+    cols = ("<th>Role</th><th>Employer</th><th>Location</th>"
+            + ("<th>Why uncertain</th>" if reason else "")
+            + "<th>Posted</th>"
+            + ('<th class="act">Actions</th>' if interactive else ""))
+    parts.append(f"<thead><tr>{cols}</tr></thead><tbody>")
+
+    for row in rows:
+        origin = _origin_of(row)
+        tag = labels.get(origin, origin)
+        loc = row["location"] or ""
+        rank = location_rank(loc, criteria) if criteria is not None else None
+        loc_key = location_label(rank) if rank is not None else ""
+        employer = _employer_of(row) or row["company"]
+        role = _role_of(row)
+        # The employer is in the blob even though it has its own cell, for the reason the
+        # company name is in the company pages' blob: typing an employer's name is the
+        # first thing anyone does, and it must keep matching its own rows.
+        search = " ".join(x.lower() for x in (role, employer, loc, tag) if x)
+        parts.append(
+            f'<tr data-src="{html.escape(tag, quote=True)}" '
+            f'data-loc="{html.escape(loc_key)}" '
+            f'data-search="{html.escape(search)}">'
+        )
+
+        chips = _tag_chip(origin, labels)
+        twin = company_keys.get(row["dedupe_key"] if "dedupe_key" in row.keys() else None)
+        if twin is not None:
+            # Not a warning and not a removal: the employer's own board carries this req
+            # too, and that row is the better one to read. The link is the whole point.
+            chips += (
+                f'<a class="dupchip" {_posting_attrs(twin, interactive)} '
+                f'title="Also on {html.escape(twin["company"], quote=True)}\'s own board">'
+                "on company page</a>"
+            )
+        applied = _applied_state(row)
+        if applied and not interactive:
+            # Under `serve` the actions cell says this, with the control it replaces.
+            # In the static file there is no such cell, and this is the fact you most
+            # need from a list you are reading offline.
+            chips += (f'<span class="appliedchip">applied · '
+                      f"{html.escape(applied)}</span>")
+        parts.append(
+            f'<td><a {_posting_attrs(row, interactive)}>{html.escape(role)}</a> {chips}</td>'
+        )
+        parts.append(f'<td class="emp">{html.escape(employer)}</td>')
+        pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
+        parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
+        if reason:
+            parts.append(f'<td class="why">{html.escape(row["reason"] or "")}</td>')
+        posted = (row["posted_on"] if "posted_on" in row.keys() else None) or ""
+        parts.append(
+            f'<td class="seen">{html.escape(posted or (row["first_seen"] or "")[:10])}</td>'
+        )
+        if interactive:
+            parts.append(
+                f'<td class="act">'
+                f'{_track_cell(row, tracked, suggestions, built, held, letters, letters_built)}'
+                f"</td>"
+            )
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    parts.append(f'<div class="empty" id="{ident}-empty" hidden>No rows match the filters.</div>')
+
+
+def _manual_job_boards(parts, companies) -> None:
+    """Job boards nothing may read automatically, listed so they stay visible.
+
+    Wellfound is the case: Cloudflare's challenge on the first request, `/graphql`
+    answering 403, and a login past page one. Surfacing it for a human is honest;
+    pretending to have checked it would not be, and working around bot protection is not
+    on the table.
+    """
+    boards = sorted(
+        (c for c in companies if c.ats == "aggregator" and c.check_method == "manual"),
+        key=lambda c: c.name,
+    )
+    if not boards:
+        return
+    parts.append(f"<h2>Check by hand ({len(boards)})</h2>")
+    parts.append(
+        '<p class="note">No keyless machine-readable listing, so the pipeline '
+        "deliberately does not read them.</p>"
+    )
+    parts.append('<div class="cols">')
+    for c in boards:
+        link = (
+            f'<a href="{_safe_url(c.careers_page)}" target="_blank" '
+            f'rel="noopener noreferrer">{html.escape(c.name)}</a>'
+            if c.careers_page else html.escape(c.name)
+        )
+        note = f' <span class="emp">{html.escape(c.notes[:120])}</span>' if c.notes else ""
+        parts.append(f"<div>{link}{note}</div>")
+    parts.append("</div>")
+
+
+def _board_feed_health(parts, unhealthy, by_name) -> None:
+    """Any job board that did not read cleanly last night.
+
+    A feed's group is never in companies.yaml, so `by_name` is exactly the test for
+    "this health row belongs to a board rather than a company" — the same absence
+    `repair.detect` relies on to stay away from them.
+    """
+    feeds = [h for h in (unhealthy or []) if h["company"] not in by_name]
+    if not feeds:
+        return
+    parts.append(f"<h2>Boards needing attention ({len(feeds)})</h2>")
+    parts.append('<div class="cols">')
+    for h in feeds:
+        parts.append(
+            f'<div><strong>{html.escape(h["company"])}</strong> — '
+            f'{html.escape(h["last_status"])}'
+            f'<span class="emp"> {html.escape(h["detail"] or "")}</span></div>'
+        )
+    parts.append("</div>")
+
+
+def job_board_page_parts(conn, companies, today, criteria=None, interactive=True) -> list:
+    """The job boards panel as a standalone page's body. Pure read.
+
+    `serve` renders this at its own URL rather than as a tab: two entirely separate
+    pages was the point of the split, and one filter bar per page is what keeps the
+    controls scoped (`[data-filter-scope]`). The static file still carries both as tabs,
+    because a mailed file has nowhere else to put them.
+    """
+    by_name = {c.name: c for c in companies}
+    matches, board_matches = _split_by_origin(
+        store.open_postings_by_verdict(conn, "match"), criteria)
+    uncertain, board_uncertain = _split_by_origin(
+        store.open_postings_by_verdict(conn, "uncertain"), criteria)
+    apps = store.all_applications(conn)
+    tracked = {(a["company"], a["ats_job_id"]) for a in apps}
+    suggestions = store.suggestions_by_posting(conn)
+
+    parts: list = []
+    _job_board_panel(
+        parts, board_matches, board_uncertain, companies, criteria, interactive,
+        tracked, suggestions, _built_resumes(), _held_by_posting(suggestions),
+        store.letters_by_posting(conn), _built_letters(),
+        _company_keys(matches + uncertain), store.unhealthy_boards(conn), by_name,
+    )
+    return parts
+
+
 def _applications(parts, apps, events_by, today, by_name) -> None:
     """Everything you applied to, grouped by what needs doing.
 
@@ -2263,8 +2650,12 @@ def _proposal_cell(proposal) -> str:
 
 
 def _manual(parts, companies) -> None:
+    # `ats: aggregator` entries are job boards nobody can read automatically — Wellfound
+    # sits behind bot protection — and they belong beside the other job boards rather
+    # than in a list of companies. `_manual_job_boards` renders them there.
     manual = sorted(
-        (c for c in companies if c.check_method == "manual"),
+        (c for c in companies
+         if c.check_method == "manual" and c.ats != "aggregator"),
         key=lambda c: (c.tier if c.tier is not None else 99, c.name),
     )
     parts.append(f"<h2>Never scraped — check by hand ({len(manual)})</h2>")

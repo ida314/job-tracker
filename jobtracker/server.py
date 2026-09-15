@@ -481,6 +481,35 @@ def _questions_card(conn: sqlite3.Connection) -> list:
     return out
 
 
+def render_job_boards(conn: sqlite3.Connection, companies, today: str,
+                     criteria=None) -> str:
+    """Every job board's postings, at their own URL. Pure read.
+
+    Connection-in / string-out like the other pages here, and the body comes from
+    `dashboard.job_board_page_parts` so the served page and the static file's tab are
+    one renderer — the mistake this repo has already made once is two copies of a list
+    that drift into disagreeing about what is on it.
+
+    It carries `dashboard._JS`, not `server._JS`: every control on these rows is the
+    actions cell, whose handlers live in the file that renders the button.
+    """
+    p = [
+        "<!doctype html><meta charset=utf-8><title>Job boards</title>",
+        f"<style>{dashboard_mod._CSS}</style>",
+        "<body><div class=wrap>"
+        f"<h1>Job boards {dashboard_mod.version_chip()}</h1>", _NAV,
+        # The whole page is one filter scope, so the bar below drives these tables and
+        # nothing else — the company pages' bar lives on another page entirely.
+        "<section data-filter-scope>",
+    ]
+    p.extend(dashboard_mod.job_board_page_parts(conn, companies, today, criteria,
+                                                interactive=True))
+    p.append("</section>")
+    p.append("</div>")
+    p.append(f"<script>{dashboard_mod._JS}</script>")
+    return "\n".join(p)
+
+
 def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
     """Everything you applied to, and every control for changing it. Pure read.
 
@@ -2837,6 +2866,14 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._send(page)
+            elif path == "/jobboards":
+                conn = self._conn()
+                try:
+                    page = render_job_boards(conn, self._companies(), _today(),
+                                             load_criteria(self.server.criteria_path))
+                finally:
+                    conn.close()
+                self._send(page)
             elif path == "/applications":
                 conn = self._conn()
                 try:
@@ -3069,8 +3106,12 @@ class Handler(BaseHTTPRequestHandler):
             criteria = load_criteria(self.server.criteria_path)
             # interactive=True: only the served page gets the disposition buttons,
             # because only here is there something for them to POST to.
+            # No job boards tab here: under `serve` they are a page of their own,
+            # which is what "two entirely separate pages" means. The static file keeps
+            # both as tabs, having nowhere else to put them.
             page = dashboard_mod.build_dashboard(
                 conn, companies, _today(), criteria, interactive=True,
+                include_job_boards=False,
             )
         finally:
             conn.close()
@@ -5385,7 +5426,8 @@ def _optional_day(payload: dict, key: str) -> tuple[Optional[str], Optional[str]
 
 
 _NAV = (
-    '<nav class=nav><a href="/">Dashboard</a> · <a href="/applications">Applications</a>'
+    '<nav class=nav><a href="/">Dashboard</a> · <a href="/jobboards">Job boards</a>'
+    ' · <a href="/applications">Applications</a>'
     ' · <a href="/companies">Companies</a> · <a href="/tuning">Tuning</a>'
     ' · <a href="/settings">Settings</a></nav>'
 )

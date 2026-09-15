@@ -225,7 +225,7 @@ def test_tabs_carry_every_panel_server_side():
     conn, companies = _setup(
         [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
     doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
-    for panel in ("today", "all", "boards"):
+    for panel in ("today", "all", "jobboards", "boards"):
         assert f'data-panel-body="{panel}"' in doc
         assert f'data-panel="{panel}"' in doc
     assert doc.count("<script>") == 1  # tab JS lives in the one existing block
@@ -463,7 +463,12 @@ def _matches(*specs):
 
 
 def _all_panel(doc):
-    return doc[doc.index('data-panel-body="all"'):doc.index('data-panel-body="boards"')]
+    # Ends at the job boards panel, which now sits between this one and board health.
+    # The slice is what makes "is this in the company pages panel?" answerable at all,
+    # so it has to track the panel order rather than the last panel that happened to
+    # follow.
+    return doc[doc.index('data-panel-body="all"'):
+               doc.index('data-panel-body="jobboards"')]
 
 
 def test_open_matches_are_grouped_one_tbody_per_company():
@@ -801,7 +806,12 @@ def test_the_suggestion_line_carries_no_button_in_either_mode():
 
 # -- the actions cell ---------------------------------------------------------------
 def _all_panel(doc):
-    return doc[doc.index('data-panel-body="all"'):doc.index('data-panel-body="boards"')]
+    # Ends at the job boards panel, which now sits between this one and board health.
+    # The slice is what makes "is this in the company pages panel?" answerable at all,
+    # so it has to track the panel order rather than the last panel that happened to
+    # follow.
+    return doc[doc.index('data-panel-body="all"'):
+               doc.index('data-panel-body="jobboards"')]
 
 
 def _suggest(conn, company, jid, n=3, resolution="pending"):
