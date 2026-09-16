@@ -1214,8 +1214,6 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
 def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
           overrides=None, suggestions=None, held=None, built=None, letters=None,
           letters_built=None) -> None:
-    tier = _tier_of(row["company"], by_name)
-    var = _band_var(tier)
     days = rank_mod.days_since(row["posted_on"], today)
     age = f"posted {days}d ago" if days is not None else "posted date unknown"
     loc = row["location"] or "location unspecified"
