@@ -178,3 +178,73 @@ def test_an_unreadable_updated_at_sorts_last_not_first():
     ok = _app(ats_job_id="ok", updated_at="2026-08-10T09:00:00")
     got = A.group([bad, ok], {}, TODAY)
     assert [x["ats_job_id"] for x in got["active"]] == ["ok", "bad"]
+
+
+# -- sort views -----------------------------------------------------------------------
+def _ids(sections):
+    return [[a["ats_job_id"] for a in rows] for _k, _h, _b, rows in sections]
+
+
+def test_an_unknown_sort_falls_back_to_the_urgency_view():
+    assert A.sort_key("nonsense") == "urgency"
+    assert A.sort_key(None) == "urgency"
+    assert A.sort_key("applied") == "applied"
+
+
+def test_order_applied_runs_both_ways_with_the_undated_last():
+    first = _app(ats_job_id="first", applied_at="2026-07-01T09:00:00")
+    second = _app(ats_job_id="second", applied_at="2026-07-15T09:00:00")
+    third = _app(ats_job_id="third", applied_at="2026-08-01T09:00:00")
+    bad = _app(ats_job_id="bad", applied_at="garbage")
+    rows = [second, bad, third, first]
+    assert _ids(A.arrange(rows, {}, TODAY, "applied")) == [
+        ["third", "second", "first", "bad"]]
+    assert _ids(A.arrange(rows, {}, TODAY, "applied_asc")) == [
+        ["first", "second", "third", "bad"]]
+
+
+def test_same_moment_applications_keep_a_stable_name_order():
+    a = _app(ats_job_id="a", company="Zeta")
+    b = _app(ats_job_id="b", company="alpha")
+    assert _ids(A.arrange([a, b], {}, TODAY, "applied")) == [["b", "a"]]
+    assert _ids(A.arrange([a, b], {}, TODAY, "applied_asc")) == [["b", "a"]]
+
+
+def test_stage_view_puts_the_furthest_along_first():
+    rows = [_app(ats_job_id="r", status="rejected"),
+            _app(ats_job_id="a", status="applied"),
+            _app(ats_job_id="o", status="offer"),
+            _app(ats_job_id="i", status="interview")]
+    got = A.arrange(rows, {}, TODAY, "stage")
+    assert [k for k, *_ in got] == ["offer", "interview", "applied", "rejected"]
+
+
+def test_company_view_is_alphabetical_ignoring_case():
+    rows = [_app(ats_job_id="z", company="Zeta"), _app(ats_job_id="b", company="beta"),
+            _app(ats_job_id="a", company="Acme")]
+    assert _ids(A.arrange(rows, {}, TODAY, "company")) == [["a", "b", "z"]]
+
+
+def test_tier_view_groups_with_untiered_last():
+    rows = [_app(ats_job_id="m", company="Manual Co"),
+            _app(ats_job_id="t4", company="Big"),
+            _app(ats_job_id="t1", company="Small")]
+    tiers = {"Big": 4, "Small": 1}
+    got = A.arrange(rows, {}, TODAY, "tier", lambda c: tiers.get(c, "—"))
+    assert [h for _k, h, _b, _r in got] == ["Tier 1", "Tier 4", "No tier"]
+
+
+def test_every_view_shows_every_application_exactly_once():
+    rows = [_app(ats_job_id=str(i), company=c, status=s, applied_at=d)
+            for i, (c, s, d) in enumerate([
+                ("A", "applied", "2026-08-01"), ("B", "offer", "2026-07-01"),
+                ("C", "interview", "bad"), ("A", "withdrawn", "2026-06-01")])]
+    for sort in A.SORT_KEYS:
+        seen = [a for *_, r in A.arrange(rows, {}, TODAY, sort) for a in r]
+        assert sorted(a["ats_job_id"] for a in seen) == ["0", "1", "2", "3"], sort
+
+
+def test_company_view_sorts_a_job_board_row_by_its_employer_not_the_board():
+    feed = _app(ats_job_id="f", company="Simplify New-Grad-Positions", employer="Airbnb")
+    mine = _app(ats_job_id="m", company="Mongo")
+    assert _ids(A.arrange([mine, feed], {}, TODAY, "company")) == [["f", "m"]]

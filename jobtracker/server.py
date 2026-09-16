@@ -510,7 +510,8 @@ def render_job_boards(conn: sqlite3.Connection, companies, today: str,
     return "\n".join(p)
 
 
-def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
+def render_applications(conn: sqlite3.Connection, companies, today: str,
+                        sort: str = "") -> str:
     """Everything you applied to, and every control for changing it. Pure read.
 
     Connection-in / string-out like `render_tuning` and `render_settings`, so it is
@@ -521,6 +522,10 @@ def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
     this repo already follows for the picks: buttons exist only where a live process can
     answer them, and a button's handler ships in the file that renders the button — so
     every control here has its branch in `_JS` below, not in `dashboard._JS`.
+
+    `sort` picks the view (`applications.SORTS`). It is a query parameter and the bar is
+    plain links, so it needs no script and survives the `location.reload()` every save
+    ends in.
     """
     by_name = {c.name: c for c in (companies or [])}
     apps = store.all_applications(conn)
@@ -560,17 +565,11 @@ def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
             )
         p.append("</div>")
 
-        groups = apps_mod.group(apps, events_by, today)
-        for key, heading, blurb in (
-            ("needs_action", "Needs action",
-             "a date has come due, or nobody has moved in "
-             f"{store.STALE_AFTER_DAYS} days"),
-            ("active", "Active", "applied, waiting"),
-            ("closed", "Closed", "offer, rejection, or withdrawn"),
-        ):
-            rows = groups[key]
-            if not rows:
-                continue
+        sort = apps_mod.sort_key(sort)
+        p.append(dashboard_mod.app_sort_bar(sort, interactive=True))
+        for _key, heading, blurb, rows in apps_mod.arrange(
+                apps, events_by, today, sort,
+                lambda co: dashboard_mod._tier_of(co, by_name)):
             p.append(
                 f"<h2>{html.escape(heading)} <span class=count>{len(rows)}</span>"
                 f'<span class="sub">{html.escape(blurb)}</span></h2>'
@@ -2872,9 +2871,11 @@ class Handler(BaseHTTPRequestHandler):
                     conn.close()
                 self._send(page)
             elif path == "/applications":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 conn = self._conn()
                 try:
-                    page = render_applications(conn, self._companies(), _today())
+                    page = render_applications(conn, self._companies(), _today(),
+                                               (query.get("sort") or [""])[0])
                 finally:
                     conn.close()
                 self._send(page)

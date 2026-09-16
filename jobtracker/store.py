@@ -1715,10 +1715,17 @@ def all_applications(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     lets a manual entry — a job with no board, no verdict and no posting row — appear at
     all. Ordering here is only a stable default; the page re-groups by urgency.
     """
+    # `employer` rides along from `postings` where there is one, because a job-board
+    # application's `company` is the board's name. A LEFT JOIN on the posting's primary
+    # key: a manual entry keeps its row (with no employer) and nothing can multiply.
     return list(
         conn.execute(
-            f"SELECT {_APPLICATION_COLUMNS} "
-            "FROM applications ORDER BY updated_at DESC, company, title"
+            "SELECT a.company, a.ats_job_id, a.title, a.status, a.note, a.applied_at, "
+            "a.updated_at, a.url, a.location, COALESCE(a.source, 'tracked') AS source, "
+            "a.next_action, a.next_action_note, p.employer AS employer "
+            "FROM applications a LEFT JOIN postings p "
+            "ON p.company = a.company AND p.ats_job_id = a.ats_job_id "
+            "ORDER BY a.updated_at DESC, a.company, a.title"
         )
     )
 

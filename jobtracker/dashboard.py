@@ -374,6 +374,21 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
                        border: 0; padding: 0 0 0 10px; color: var(--accent);
                        font: inherit; font-size: 12.5px; cursor: pointer; }
 
+/* The applications view bar. In the static file it only works with the script, so it
+   is hidden until the script says it is running — the same rule as .tabs. */
+.appsort { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+           margin: 14px 0 4px; }
+.appsort.js-only { display: none; }
+.appsort.js-on { display: flex; }
+.appsort .lbl { font-size: 12.5px; color: var(--muted); margin-right: 2px; }
+/* Its own class, not .chip: the served pages give .chip a monospace token style. */
+.sortchip { font-size: 12.5px; padding: 3px 10px; border-radius: 999px;
+            border: 1px solid var(--rule); background: var(--surface);
+            color: var(--ink-2); text-decoration: none; }
+.sortchip:hover { text-decoration: none; border-color: var(--ink-2); }
+.sortchip[aria-pressed="true"] { background: var(--ink); color: var(--page);
+                                 border-color: var(--ink); }
+
 /* "Your inbox says something happened." Only rendered when there is something. */
 .banner.mail { background: var(--surface); border: 1px solid var(--border);
                border-left: 3px solid var(--accent); border-radius: 8px;
@@ -468,6 +483,26 @@ _JS = """
     t.addEventListener('click', function () { show(t.dataset.panel); });
   });
   show(tabs[0].dataset.panel);
+})();
+
+// Applications views, static file only. Every view is already rendered; this only
+// moves `hidden` between them. Under `serve` the chips are plain links and the bar has
+// no `js-only` class, so this finds nothing to do there.
+(function () {
+  var bar = document.querySelector('.appsort.js-only');
+  if (!bar) return;
+  bar.classList.add('js-on');
+  var chips = Array.prototype.slice.call(bar.querySelectorAll('.sortchip'));
+  var views = Array.prototype.slice.call(document.querySelectorAll('[data-appview]'));
+  bar.addEventListener('click', function (e) {
+    var chip = e.target.closest ? e.target.closest('.sortchip') : null;
+    if (!chip) return;
+    e.preventDefault();
+    chips.forEach(function (c) {
+      c.setAttribute('aria-pressed', c === chip ? 'true' : 'false');
+    });
+    views.forEach(function (v) { v.hidden = v.dataset.appview !== chip.dataset.sort; });
+  });
 })();
 
 // Disposition buttons. Only present when rendered by `serve` — the static file has
@@ -2475,25 +2510,50 @@ def _applications(parts, apps, events_by, today, by_name) -> None:
         )
     parts.append("</div>")
 
-    groups = apps_mod.group(apps, events_by, today)
-    for key, heading, blurb in (
-        ("needs_action", "Needs action", "a date has come due, or nobody has moved in "
-                                         f"{store.STALE_AFTER_DAYS} days"),
-        ("active", "Active", "applied, waiting"),
-        ("closed", "Closed", "offer, rejection, or withdrawn"),
-    ):
-        rows = groups[key]
-        if not rows:
-            continue
-        parts.append(
-            f"<h2>{html.escape(heading)} "
-            f'<span class="count">{len(rows)}</span>'
-            f'<span class="sub">{html.escape(blurb)}</span></h2>'
-        )
-        parts.append('<div class="apps">')
-        for app in rows:
-            _application(parts, app, events_by, today, by_name)
+    # Every view is rendered, and the script only toggles which one is not `hidden` —
+    # rows render server-side, JS only hides them. With JS off the bar stays hidden and
+    # the default view is the page, exactly as it was before sorting existed. Nothing
+    # here is a control that writes, so rendering a card once per view is harmless.
+    parts.append(app_sort_bar(apps_mod.SORT_KEYS[0], interactive=False))
+    def tier_of(company):
+        return _tier_of(company, by_name)
+
+    for i, sort in enumerate(apps_mod.SORT_KEYS):
+        parts.append(f'<div data-appview="{sort}"{"" if i == 0 else " hidden"}>')
+        for _key, heading, blurb, rows in apps_mod.arrange(
+                apps, events_by, today, sort, tier_of):
+            parts.append(
+                f"<h2>{html.escape(heading)} "
+                f'<span class="count">{len(rows)}</span>'
+                f'<span class="sub">{html.escape(blurb)}</span></h2>'
+            )
+            parts.append('<div class="apps">')
+            for app in rows:
+                _application(parts, app, events_by, today, by_name)
+            parts.append("</div>")
         parts.append("</div>")
+
+
+def app_sort_bar(current: str, *, interactive: bool) -> str:
+    """The row of views over the applications list, shared by both surfaces.
+
+    Under `serve` each chip is a real link (`?sort=`) and the server renders only that
+    view. In the static file there is no server to ask, so the chips carry `data-sort`,
+    the bar is hidden until the script confirms it is running, and the script swaps
+    which pre-rendered view is visible. Anchors, not buttons, in both: the static file
+    carries no buttons.
+    """
+    chips = []
+    for key, label in apps_mod.SORTS:
+        pressed = "true" if key == current else "false"
+        href = f"?sort={key}" if interactive else f"#sort={key}"
+        chips.append(
+            f'<a class="sortchip" href="{href}" data-sort="{key}" '
+            f'aria-pressed="{pressed}">{html.escape(label)}</a>'
+        )
+    cls = "appsort" if interactive else "appsort js-only"
+    return (f'<nav class="{cls}" aria-label="Sort applications">'
+            f'<span class="lbl">Sort by</span>{"".join(chips)}</nav>')
 
 
 def _application(parts, app, events_by, today, by_name) -> None:

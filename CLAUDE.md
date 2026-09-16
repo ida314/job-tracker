@@ -336,6 +336,11 @@ static dashboard. `docs/applications.md`.
 - **`applied_at`/`updated_at` are timestamps; `next_action` is a day.** Every comparison goes
   through `applications.day_of`; `days_since` returns None, never 0, and an unreadable
   `updated_at` sorts last.
+- **Sort views are one derivation, `applications.arrange`** (`SORTS`; urgency is the
+  default and the fallback for an unknown key). Under `serve` the bar is `?sort=` links; the
+  static tab pre-renders every view and JS only moves `hidden`. Company and tier sort on the
+  **employer** (`postings.employer`, LEFT JOINed in `all_applications`), never the feed's
+  name.
 - **What you *sent* is a separate table** (`application_submissions`), frozen on the write that
   creates the application and read back on the posting page. See *The posting page* below; the
   card's title links there, with a small `↗` keeping the employer one click away.

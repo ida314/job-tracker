@@ -176,6 +176,114 @@ def group(apps, events_by, today: str) -> dict[str, list]:
     return {"needs_action": urgent, "active": active, "closed": closed}
 
 
+# The views the page can be sorted into, in the order the bar offers them. The first is
+# the default: an unknown or missing key falls back to it rather than erroring, because
+# the key arrives in a URL anyone can mistype.
+SORTS = (
+    ("urgency", "Needs action"),
+    ("applied", "Newest applied"),
+    ("applied_asc", "Oldest applied"),
+    ("stage", "Stage"),
+    ("company", "Company"),
+    ("tier", "Tier"),
+)
+SORT_KEYS = tuple(k for k, _ in SORTS)
+
+# Furthest along first, then the two ways an application ends without an offer.
+STAGE_ORDER = ("offer", "interview", "screen", "oa", "applied", "rejected", "withdrawn")
+
+
+def sort_key(value) -> str:
+    """The requested view, or the default when the value is not one we offer."""
+    return value if value in SORT_KEYS else SORT_KEYS[0]
+
+
+def employer(app) -> str:
+    """Who the job is at. A job-board application's `company` is the board's name, so
+    the posting's `employer` wins where `all_applications` found one."""
+    keys = app.keys()
+    return ("employer" in keys and app["employer"]) or app["company"]
+
+
+def _by_applied(apps, *, newest: bool) -> list:
+    """Chronological order of applying. An unreadable `applied_at` sorts last in either
+    direction — it is unknown, not the oldest or the newest thing on the page."""
+    dated = [a for a in apps if _valid_day(a["applied_at"])]
+    undated = [a for a in apps if not _valid_day(a["applied_at"])]
+    dated.sort(key=lambda a: (employer(a).casefold(), a["title"]))
+    # Stable, so equal stamps keep the name order above in both directions.
+    dated.sort(key=lambda a: a["applied_at"], reverse=newest)
+    undated.sort(key=lambda a: (employer(a).casefold(), a["title"]))
+    return dated + undated
+
+
+def _valid_day(stamp) -> bool:
+    try:
+        date.fromisoformat(day_of(stamp))
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def arrange(apps, events_by, today: str, sort: str, tier_of=None) -> list[tuple]:
+    """The sections a view renders, as `(key, heading, blurb, rows)`.
+
+    One derivation for both surfaces, like `group`, which is the default view here.
+    `tier_of(company) -> int | None` is passed in because tiers are curation, and this
+    module reads no files. Within a grouped view the newest application comes first.
+    """
+    sort = sort_key(sort)
+    if sort == "urgency":
+        groups = group(apps, events_by, today)
+        return [
+            (k, heading, blurb, groups[k])
+            for k, heading, blurb in (
+                ("needs_action", "Needs action",
+                 "a date has come due, or nobody has moved in "
+                 f"{STALE_AFTER_DAYS} days"),
+                ("active", "Active", "applied, waiting"),
+                ("closed", "Closed", "offer, rejection, or withdrawn"),
+            )
+            if groups[k]
+        ]
+    if sort in ("applied", "applied_asc"):
+        newest = sort == "applied"
+        return [("all", "By date applied",
+                 "newest first" if newest else "oldest first",
+                 _by_applied(apps, newest=newest))]
+    if sort == "company":
+        rows = _by_applied(apps, newest=True)
+        rows.sort(key=lambda a: employer(a).casefold())
+        return [("all", "By company", "A–Z, newest application first", rows)]
+
+    newest = _by_applied(apps, newest=True)
+    if sort == "stage":
+        rank = {s: i for i, s in enumerate(STAGE_ORDER)}
+        sections = []
+        for status in sorted({a["status"] for a in apps},
+                             key=lambda s: (rank.get(s, len(rank)), s)):
+            rows = [a for a in newest if a["status"] == status]
+            sections.append((status, status.capitalize(), "", rows))
+        return sections
+
+    # tier
+    tiers: dict = {}
+    for app in newest:
+        # The board's own entry first; a job-board row falls through to its employer,
+        # which is tiered only when that employer is also curated.
+        tier = tier_of(app["company"]) if tier_of else None
+        if not isinstance(tier, int) and tier_of:
+            tier = tier_of(employer(app))
+        tiers.setdefault(tier if isinstance(tier, int) else None, []).append(app)
+    return [
+        (f"tier-{t}" if t is not None else "tier-none",
+         f"Tier {t}" if t is not None else "No tier",
+         "" if t is not None else "an employer not in companies.yaml",
+         tiers[t])
+        for t in sorted(tiers, key=lambda t: (t is None, t or 0))
+    ]
+
+
 def summary(apps, events_by) -> dict[str, int | float]:
     """The tile row: totals, where things stand, and the conversion rate.
 

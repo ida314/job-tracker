@@ -4485,3 +4485,21 @@ def test_the_two_resume_fields_say_which_is_which(tmp_path, monkeypatch):
     assert (page.index("<h2>Resume</h2>")
             < page.index("<h2 id=tailor>Resume tailor</h2>")
             < page.index("<h3>Source document</h3>"))
+
+
+def test_the_applications_page_sorts_by_query_and_the_bar_is_links(tmp_path):
+    db = _fresh(tmp_path)
+    h = _apps_handler(db)
+    h._api_application({"company": "Acme", "title": "SWE"})
+    conn = store.connect(db)
+    default = server.render_applications(conn, [], "2026-08-16")
+    by_date = server.render_applications(conn, [], "2026-08-16", "applied")
+    junk = server.render_applications(conn, [], "2026-08-16", "<script>")
+    conn.close()
+    assert 'href="?sort=applied"' in default
+    assert "By date applied" not in default
+    assert "By date applied" in by_date
+    assert 'data-sort="applied" aria-pressed="true"' in by_date
+    # An unknown key is the default view, and is never echoed back.
+    assert 'data-sort="urgency" aria-pressed="true"' in junk
+    assert "<script>" not in junk.replace("<script>", "", 1)

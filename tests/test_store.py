@@ -755,3 +755,18 @@ def test_the_application_key_is_indexed_because_every_rendered_row_asks_it():
     indexes = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     assert "idx_applications_dedupe_key" in indexes
+
+
+def test_all_applications_carries_a_postings_employer_and_keeps_manual_rows(tmp_path):
+    conn = store.connect(tmp_path / "s.db")
+    conn.execute(
+        "INSERT INTO postings (company, ats_job_id, title, url, first_seen, last_seen, "
+        "employer) VALUES ('Feed', '1', 'Airbnb — SWE', 'https://x/1', '2026-08-01', "
+        "'2026-08-01', 'Airbnb')")
+    store.record_application(conn, "Feed", "1", "Airbnb — SWE", "applied", "2026-08-02")
+    store.record_application(conn, "Hand", "manual:x", "SWE", "applied", "2026-08-03")
+    rows = {r["company"]: r for r in store.all_applications(conn)}
+    assert rows["Feed"]["employer"] == "Airbnb"
+    assert rows["Hand"]["employer"] is None
+    assert rows["Hand"]["source"] == "tracked"
+    conn.close()

@@ -140,6 +140,31 @@ Grouped by what needs doing, not by date:
    quiet surface without you having to filter for them.
 3. **Closed** — offer, rejection, withdrawn. Most recent first; a record, not a queue.
 
+That is the default view. A **Sort by** bar above the list offers five more, all from
+one function, `applications.arrange`, so the two surfaces cannot sort differently:
+
+| View | Order |
+|---|---|
+| Needs action | the three sections above (default) |
+| Newest applied / Oldest applied | one flat list by `applied_at`; an unreadable date sorts last *both* ways |
+| Stage | a section per status, furthest along first (offer → interview → screen → oa → applied → rejected → withdrawn) |
+| Company | one flat list, A–Z by **employer**, newest first within each |
+| Tier | a section per tier, then "No tier" |
+
+- **Company and tier read the employer, not `company`.** A job-board application's
+  `company` is the board's name (`Simplify New-Grad-Positions`), so `all_applications`
+  LEFT JOINs `postings.employer` onto each row — a LEFT JOIN on the posting's primary key,
+  so manual rows survive and nothing multiplies. Tier tries the curated entry first and
+  falls back to the employer.
+- **Under `serve` the bar is links** (`/applications?sort=applied`), and the server renders
+  only that view. No script, and it survives the `location.reload()` every save ends in.
+  An unknown key is the default view and is never echoed back.
+- **The static tab pre-renders every view** as `[data-appview]` blocks, all but the default
+  `hidden`, and the script only moves `hidden` between them — rows render server-side, JS
+  only hides them. The bar is `js-only`: with the script off you get the default view, as
+  before. The chips are anchors (`.sortchip`), not buttons, because the static file has
+  none, and not `.chip`, which the served pages style as monospace tokens.
+
 A row carries: status pill (with `×N` when the stage repeats), tier chip, location, how
 long ago you applied, days since anything moved, the next action and what it is, and the
 event timeline behind a `<details>`.

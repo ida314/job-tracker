@@ -1303,3 +1303,19 @@ def test_a_missing_tailored_directory_reads_as_nothing_built():
     """The ordinary state on a machine that has never run `tailor build`."""
     with mock.patch.object(config, "TAILORED_DIR", Path("/nonexistent/tailored")):
         assert dashboard._built_resumes() == set()
+
+
+def test_the_static_applications_tab_prerenders_every_view_and_hides_all_but_one():
+    conn, companies = _setup(
+        [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
+    store.record_application(conn, "Acme", "1", "t", "applied", "2026-07-22")
+    doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
+    from jobtracker import applications as apps_mod
+    for i, key in enumerate(apps_mod.SORT_KEYS):
+        tag = f'<div data-appview="{key}"' + ("" if i == 0 else " hidden") + ">"
+        assert tag in doc, key
+    # The bar only works with the script, so it is hidden until the script runs, and
+    # the script is the one existing block.
+    assert 'class="appsort js-only"' in doc
+    assert ".appsort.js-only" in dashboard._JS
+    assert doc.count("<script>") == 1
