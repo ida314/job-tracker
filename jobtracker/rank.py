@@ -262,5 +262,39 @@ def top_n(rows, n: int, today: str) -> list:
     return available(rows, today)[:n]
 
 
+def _applied_day(row) -> str | None:
+    keys = row.keys()
+    stamp = row["applied_at"] if "applied_at" in keys else None
+    return stamp.split("T", 1)[0] if stamp else None
+
+
+def applied_today(rows, today: str) -> int:
+    """How many scored reqs you recorded an application to today.
+
+    Counted over the ranked corpus, one row per req, so a job reached by two roads is
+    one application — and a hand-entered job with no posting row is not counted, since
+    it never held a slot.
+    """
+    scored = one_row_per_req([r for r in rows if r["score"] is not None])
+    return sum(1 for r in scored if _applied_day(r) == today)
+
+
+def todays_picks(rows, today: str, n: int = 3) -> tuple[list, list]:
+    """`(picks, rest)`: today's picks, and everything ranked below them.
+
+    Applying uses a slot up for the day; skipping or snoozing does not. The picks are a
+    day's work rather than a rolling top three — apply to one and two remain, while a
+    skip is a pick that was never worth the slot, so the next one fills it. Without
+    this, applying to three jobs would put three more on the page, and the list would
+    never end. Tomorrow `applied_today` is zero again and all three slots are back.
+
+    `rest` starts where the picks stop, so a slot given up by applying moves nothing
+    out of sight: the posting that would have filled it heads the list below.
+    """
+    ranked = available(rows, today)
+    slots = max(0, n - applied_today(rows, today))
+    return ranked[:slots], ranked[slots:]
+
+
 def tier_lookup(companies: list[Company]) -> dict:
     return {c.name: c.tier for c in companies}

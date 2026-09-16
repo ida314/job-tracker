@@ -1477,7 +1477,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
     scored, unranked = _rescore(conn, profile, criteria, tiers, today)
     stats.scored, stats.unranked = scored, unranked
 
-    top = rank_mod.top_n(store.ranked_matches(conn), 3, today)
+    top, _ = rank_mod.todays_picks(store.ranked_matches(conn), today)
     conn.close()
 
     log.info("rank complete: %s", stats.summary())
@@ -1850,7 +1850,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
             return 1
 
         _rescore(conn, ctx.profile, ctx.criteria, ctx.tiers, today)
-        picks = rank_mod.top_n(store.ranked_matches(conn), args.count, today)
+        picks, _ = rank_mod.todays_picks(store.ranked_matches(conn), today, args.count)
         if not picks:
             print("Nothing queued for tomorrow.")
             print("  Run `check` then `work` — or you have dispositioned everything.")
@@ -2139,7 +2139,7 @@ def cmd_today(args: argparse.Namespace) -> int:
 
     rows = store.ranked_matches(conn)
     conn.close()
-    top = rank_mod.top_n(rows, args.count, today)
+    top, _ = rank_mod.todays_picks(rows, today, args.count)
     unranked = sum(1 for r in rows if r["score"] is None)
 
     if not top:

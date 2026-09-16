@@ -257,9 +257,15 @@ disagree about what is on it.
   keeps them out of "N of M shown".
 - **The picks must never be a `table[data-filterable]`**, and neither must the applications panel
   — a filter set on another tab would silently empty a curated list. Both have tests.
-- **Today's `<details>` drawer** is built from `rank.available(...)[3:]`, never raw
-  `ranked_matches`, or a job you applied to this morning reappears. It carries **no `data-act`**
-  in either mode: that attribute must keep meaning exactly the three disposition buttons.
+- **The picks are a day's work, not a rolling top three.** `rank.todays_picks` is the one
+  split: applying today uses up a slot (`applied_today`, one per req), skipping or snoozing
+  frees one to be refilled. Dashboard, `/api/disposition`, `today`, `prepare` and `rank` all
+  call it — a second slice is how the card and the terminal come to disagree.
+- **Today's `<details>` drawer** is the `rest` half of that split, never raw `ranked_matches`,
+  or a job you applied to this morning reappears. It is **flat, in ranking order**, with the
+  employer as a `.cobadge` beside the role (`_employer_of`, never the feed's name). It carries
+  **no `data-act`** in either mode: that attribute must keep meaning exactly the three
+  disposition buttons.
 - **Disposition buttons only exist under `serve`** (`interactive=True`). A dead button in a
   mailed file is worse than no button. Counts render in both modes.
 - **A button's handler lives in the file that renders the button.** `server._JS` and

@@ -3236,7 +3236,7 @@ class Handler(BaseHTTPRequestHandler):
 
             conn.commit()
             # Hand back the next pick so the card can be replaced without a reload.
-            remaining = rank_mod.top_n(store.ranked_matches(conn), 3, _today())
+            remaining, _ = rank_mod.todays_picks(store.ranked_matches(conn), _today())
             nxt = [
                 {"company": r["company"], "ats_job_id": r["ats_job_id"],
                  "title": r["title"], "score": r["score"]}

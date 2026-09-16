@@ -181,6 +181,59 @@ def test_top_n_skips_unranked_and_unavailable():
     assert picked == ["1", "4", "5"]
 
 
+def test_applying_today_shrinks_the_picks_and_skipping_does_not():
+    today = "2026-08-02"
+    rows = [
+        _row(ats_job_id="1", score=90.0, applied_status="applied",
+             applied_at="2026-08-02T10:00:00"),
+        _row(ats_job_id="2", score=80.0, deferral_kind="skipped"),
+        _row(ats_job_id="3", score=70.0),
+        _row(ats_job_id="4", score=60.0),
+        _row(ats_job_id="5", score=50.0),
+        _row(ats_job_id="6", score=40.0),
+    ]
+    picks, rest = rank.todays_picks(rows, today)
+    assert [r["ats_job_id"] for r in picks] == ["3", "4"]
+    assert [r["ats_job_id"] for r in rest] == ["5", "6"]
+
+
+def test_an_application_from_another_day_uses_no_slot():
+    rows = [
+        _row(ats_job_id="1", score=90.0, applied_status="applied",
+             applied_at="2026-08-01T10:00:00"),
+        _row(ats_job_id="2", score=80.0),
+        _row(ats_job_id="3", score=70.0),
+        _row(ats_job_id="4", score=60.0),
+    ]
+    picks, _ = rank.todays_picks(rows, "2026-08-02")
+    assert [r["ats_job_id"] for r in picks] == ["2", "3", "4"]
+
+
+def test_one_req_applied_through_two_rows_uses_one_slot():
+    """A job board copy of the req carries the same application through its key."""
+    rows = [
+        _row(ats_job_id="1", score=90.0, applied_status="applied",
+             applied_at="2026-08-02T10:00:00", dedupe_key="k", origin=None),
+        _row(company="Feed", ats_job_id="f", score=85.0, applied_status="applied",
+             applied_at="2026-08-02T10:00:00", dedupe_key="k", origin="simplify"),
+        _row(ats_job_id="2", score=80.0),
+        _row(ats_job_id="3", score=70.0),
+    ]
+    assert rank.applied_today(rows, "2026-08-02") == 1
+    picks, _ = rank.todays_picks(rows, "2026-08-02")
+    assert len(picks) == 2
+
+
+def test_applied_at_comes_back_from_ranked_matches():
+    conn = store.connect(":memory:")
+    store.sync_postings(conn, "Acme", [Posting("Acme", "1", "SWE", "u")], "2026-08-02")
+    store.record_verdict(
+        conn, Verdict("Acme", "1", Decision.MATCH, "r", "rules"), "2026-08-02")
+    store.record_application(conn, "Acme", "1", "SWE", "applied", "2026-08-02T09:30:00")
+    row = store.ranked_matches(conn)[0]
+    assert row["applied_at"] == "2026-08-02T09:30:00"
+
+
 # -- storage round-trip ------------------------------------------------------------
 def test_judgment_round_trips_and_survives_a_rescore():
     conn = store.connect(":memory:")

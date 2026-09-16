@@ -1890,6 +1890,12 @@ def ranked_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
                     AND ak.dedupe_key = p.dedupe_key
                   ORDER BY ak.updated_at DESC LIMIT 1
                )) AS applied_status,
+               COALESCE(a.applied_at, (
+                 SELECT ak.applied_at FROM applications ak
+                  WHERE p.dedupe_key IS NOT NULL AND p.dedupe_key != ''
+                    AND ak.dedupe_key = p.dedupe_key
+                  ORDER BY ak.updated_at DESC LIMIT 1
+               )) AS applied_at,
                d.kind AS deferral_kind, d.until AS deferral_until
         FROM postings p
         JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id

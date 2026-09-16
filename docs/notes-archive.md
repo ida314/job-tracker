@@ -478,7 +478,8 @@ already committed to outranks the raw corpus.
     Tier/company cells moved into the head but stay in the row's search blob, or searching a
     company name stops matching its own rows.
 - **Today has a `<details>` drawer for the rest of the ranking** (2026-08-16), grouped by
-  company, numbered with the real rank. `<details>` because it opens with no script and is not
+  company, numbered with the real rank. (Flattened into ranking order with an employer badge
+  on 2026-09-16: grouping put a firm's weaker roles above better ones elsewhere.) `<details>` because it opens with no script and is not
   a table the filter JS could reach. Built from `rank.available(...)[3:]` — **never** raw
   `ranked_matches`, or a job you applied to this morning reappears on the page it left. **No
   `data-act` in it, in either mode**: a pick is what gets dispositioned, which keeps

@@ -302,13 +302,17 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .rest > summary { cursor: pointer; font-size: 13px; color: var(--ink-2);
                   padding: 8px 0; }
 .rest > summary:hover { color: var(--ink); }
-.restco { margin: 10px 0 4px; }
-.restco h3 { display: flex; align-items: center; gap: 8px; font-size: 13px;
-             margin: 14px 0 6px; }
-.restco h3 .n { color: var(--muted); font-weight: 400; font-size: 12px; }
-.restlist { list-style: none; margin: 0; padding: 0; }
-.restlist li { display: flex; align-items: baseline; gap: 9px; padding: 4px 0;
-               border-top: 1px solid var(--grid); font-size: 13px; }
+.restlist { list-style: none; margin: 8px 0 0; padding: 0; }
+.restlist li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 9px;
+               padding: 4px 0; border-top: 1px solid var(--grid); font-size: 13px; }
+.restlist .role { flex: 0 1 auto; min-width: 0; }
+.restlist .meta { flex: 1 1 14rem; min-width: 0; }
+.restlist .tier, .restlist .srctag { flex: none; }
+/* The employer, beside the role it belongs to. Neutral on purpose: tier already has
+   the colour, and a second coloured chip on every row would compete with it. */
+.cobadge { display: inline-block; font-size: 11.5px; line-height: 1.4; padding: 0 7px;
+           border-radius: 999px; border: 1px solid var(--rule); color: var(--ink-2);
+           background: var(--page); white-space: nowrap; vertical-align: 1px; }
 .restlist .rn { color: var(--muted); font-size: 11.5px; min-width: 22px;
                 font-variant-numeric: tabular-nums; }
 .restlist .meta { color: var(--muted); font-size: 11.5px; }
@@ -982,8 +986,9 @@ def build_dashboard(
     ranked = store.ranked_matches(conn)
     # One list, split — never two queries. The rest has to come out of the same filtered
     # set the picks did, or a job you applied to this morning reappears below them.
-    ranked_open = rank_mod.available(ranked, today)
-    picks, rest = ranked_open[:3], ranked_open[3:]
+    # Applying uses a slot up for the day; see `rank.todays_picks`.
+    picks, rest = rank_mod.todays_picks(ranked, today)
+    applied_today = rank_mod.applied_today(ranked, today)
     unranked = sum(1 for r in ranked if r["score"] is None)
     # `None`, not `{}`, and not the query: with prefill switched off there is no plan
     # worth reporting and nothing that could act on one. Passed down rather than tested
@@ -1026,7 +1031,8 @@ def build_dashboard(
     # between opening it and applying to something.
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
-           rest, overrides, suggestions, tracked, built, held, letters, letters_built)
+           rest, overrides, suggestions, tracked, built, held, letters, letters_built,
+           applied_today)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -1111,15 +1117,29 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy,
 
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
            plans=None, rest=(), overrides=None, suggestions=None, tracked=None,
-           built=None, held=None, letters=None, letters_built=None) -> None:
-    """The three to apply to today.
+           built=None, held=None, letters=None, letters_built=None,
+           applied_today: int = 0) -> None:
+    """The three to apply to today, less the ones you already applied to.
 
     Deliberately not a `data-filterable` table. The filter JS selects
     `table[data-filterable]`, so a tier or location filter set on the All postings tab
     would otherwise silently empty a curated list the user did not ask to filter.
     """
     parts.append("<h2>Apply to these today</h2>")
-    if not picks:
+    if applied_today:
+        # Said out loud, or two cards where there were three reads as a lost pick.
+        n = applied_today
+        parts.append(
+            f'<p class="note">You applied to {n} today — '
+            f'{"that is" if n == 1 else "those are"} '
+            f'{"one" if n == 1 else n} of today\'s three.</p>'
+        )
+    if not picks and applied_today >= 3:
+        parts.append(
+            '<div class="empty">Done for today. The next picks arrive tomorrow — '
+            "the rest of the ranking is below.</div>"
+        )
+    elif not picks:
         parts.append(
             '<div class="empty">Nothing queued. Run <code>jobtracker rank</code> '
             "after <code>check</code>, or you have dispositioned everything.</div>"
@@ -1141,18 +1161,23 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
         )
 
     _rest_of_ranking(parts, rest, by_name, today, criteria, plans, interactive,
-                     tracked, suggestions, built, held, letters, letters_built)
+                     tracked, suggestions, built, held, letters, letters_built,
+                     start=len(picks) + 1)
 
 
 def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
                      interactive: bool = False, tracked=None, suggestions=None,
-                     built=None, held=None, letters=None, letters_built=None) -> None:
-    """Everything the ranker scored below today's three, grouped by company.
+                     built=None, held=None, letters=None, letters_built=None,
+                     start: int = 4) -> None:
+    """Everything the ranker scored below today's picks, in ranking order.
+
+    One flat list, best first, with the employer as a badge beside the role. Grouping by
+    company put a firm's weaker roles ahead of better roles elsewhere, and this list
+    exists to show the ranking.
 
     `<details>` rather than a JS drawer: it is native disclosure, it opens with no script
     at all, and — unlike a table — it cannot be caught by the filter JS, which the today
-    panel must never be. Grouped in encounter order over the score-sorted list, so the
-    company with the best role comes first and nothing is re-sorted.
+    panel must never be.
 
     No `data-act`, in either mode, and no controls at all in the static file. The rule
     used to be "no buttons here" and its reason was the selector: `dashboard._JS` reads
@@ -1164,53 +1189,45 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
     """
     if not rest:
         return
-    # The number is carried alongside the row rather than looked up later: `sqlite3.Row`
-    # compares by value, so `rest.index(row)` would hand two identical rows the same
-    # position, and the ranking is the one thing this drawer is for.
-    groups: dict[str, list] = {}
-    for n, row in enumerate(rest, 4):
-        groups.setdefault(row["company"], []).append((n, row))
-
+    firms = len({_employer_of(row) or row["company"] for row in rest})
     roles = "role" if len(rest) == 1 else "roles"
-    firms = "company" if len(groups) == 1 else "companies"
+    noun = "company" if firms == 1 else "companies"
     parts.append('<details class="rest">')
     parts.append(
         f"<summary>The rest of the ranking — {len(rest)} {roles} "
-        f"at {len(groups)} {firms}</summary>"
+        f"at {firms} {noun}</summary>"
     )
     parts.append(
-        '<p class="note">Scored below today\'s three. A list, not a queue — skip and '
+        '<p class="note">Scored below today\'s picks. A list, not a queue — skip and '
         "snooze live on a pick.</p>"
     )
-    for company, rows in groups.items():
-        parts.append('<div class="restco">')
-        parts.append(
-            f'<h3>{_source_badge(rows[0][1], by_name)}'
-            f'{html.escape(company)} <span class="n">{len(rows)} '
-            f'{"role" if len(rows) == 1 else "roles"}</span></h3>'
+    parts.append('<ul class="restlist">')
+    # The number is the position in the ranking, counted here rather than looked up:
+    # `sqlite3.Row` compares by value, so `rest.index(row)` would give two identical
+    # rows the same number.
+    for n, row in enumerate(rest, start):
+        loc = row["location"] or "location unspecified"
+        is_nyc = criteria is not None and location_rank(row["location"], criteria) == 0
+        pin = '<span class="pin">NYC</span> ' if is_nyc else ""
+        bits = [f'{pin}{html.escape(loc)}', f'score {row["score"]:.1f}']
+        plan = (plans or {}).get((row["company"], row["ats_job_id"]))
+        if plan is not None and plan["fields"]:
+            bits.append(f'prefill {plan["fields"] - plan["gaps"]}/{plan["fields"]} fields')
+        act = (
+            f'<span class="act">'
+            f'{_track_cell(row, tracked, suggestions, built, held, letters, letters_built)}'
+            f'</span>'
+            if interactive else ""
         )
-        parts.append('<ul class="restlist">')
-        for n, row in rows:
-            loc = row["location"] or "location unspecified"
-            is_nyc = criteria is not None and location_rank(row["location"], criteria) == 0
-            pin = '<span class="pin">NYC</span> ' if is_nyc else ""
-            bits = [f'{pin}{html.escape(loc)}', f'score {row["score"]:.1f}']
-            plan = (plans or {}).get((row["company"], row["ats_job_id"]))
-            if plan is not None and plan["fields"]:
-                bits.append(f'prefill {plan["fields"] - plan["gaps"]}/{plan["fields"]} fields')
-            act = (
-                f'<span class="act">'
-                f'{_track_cell(row, tracked, suggestions, built, held, letters, letters_built)}'
-                f'</span>'
-                if interactive else ""
-            )
-            parts.append(
-                f'<li><span class="rn">{n}</span>'
-                f'<a {_posting_attrs(row, interactive)}>'
-                f'{html.escape(row["title"])}</a>'
-                f'<span class="meta">{" · ".join(bits)}</span>{act}</li>'
-            )
-        parts.append("</ul></div>")
+        employer = _employer_of(row) or row["company"]
+        parts.append(
+            f'<li><span class="rn">{n}</span>{_source_badge(row, by_name)}'
+            f'<span class="role"><a {_posting_attrs(row, interactive)}>'
+            f'{html.escape(_role_of(row))}</a> '
+            f'<span class="cobadge">{html.escape(employer)}</span></span>'
+            f'<span class="meta">{" · ".join(bits)}</span>{act}</li>'
+        )
+    parts.append("</ul>")
     parts.append("</details>")
 
 

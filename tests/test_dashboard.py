@@ -619,8 +619,10 @@ def test_the_rest_of_the_ranking_excludes_what_you_applied_to_or_skipped():
     """It has to come out of the same filtered list the picks did, or a job you applied
     to this morning reappears on the page it left."""
     conn = _ranked_pool(6)
+    # Yesterday: an application recorded today also uses up a pick slot, which is its
+    # own test below.
     store.record_application(conn, "Acme", "5", "Engineer 5", "applied",
-                            "2026-07-22T09:00:00")
+                            "2026-07-21T09:00:00")
     store.set_deferral(conn, "Zeta", "6", "skipped", "2026-07-22")
     conn.commit()
     panel = _today_panel(dashboard.build_dashboard(
@@ -628,6 +630,89 @@ def test_the_rest_of_the_ranking_excludes_what_you_applied_to_or_skipped():
     assert "Engineer 5" not in panel
     assert "Engineer 6" not in panel
     assert "1 role at 1 company" in panel
+
+
+def test_the_rest_of_the_ranking_is_in_ranking_order_not_grouped_by_company():
+    """Acme and Zeta alternate down the ranking, so grouping would reorder them."""
+    conn = _ranked_pool(8)
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    rest = panel[panel.index('<details class="rest">'):]
+    positions = [rest.index(f">Engineer {i}</a>") for i in range(4, 9)]
+    assert positions == sorted(positions)
+    assert "restco" not in rest and "<h3>" not in rest
+    # The employer rides beside the role as a badge, once per row.
+    assert rest.count('<span class="cobadge">Acme</span>') == 2
+    assert rest.count('<span class="cobadge">Zeta</span>') == 3
+
+
+def test_a_job_board_row_is_badged_with_its_employer_not_the_feed():
+    conn = _ranked_pool(3)
+    conn.execute(
+        "INSERT INTO postings (company, ats_job_id, title, url, first_seen, last_seen,"
+        " origin, employer) VALUES ('Simplify New-Grad-Positions', 'f1',"
+        " 'Ramp — Backend Engineer', 'https://ramp.example/1', '2026-07-22',"
+        " '2026-07-22', 'simplify', 'Ramp')"
+    )
+    conn.execute(
+        "INSERT INTO verdicts (company, ats_job_id, verdict, reason, decided_by,"
+        " decided_at) VALUES ('Simplify New-Grad-Positions', 'f1', 'match', '',"
+        " 'rules', '2026-07-22')"
+    )
+    _ranked(conn, "Simplify New-Grad-Positions", "f1", 10.0)
+    conn.commit()
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    rest = panel[panel.index('<details class="rest">'):]
+    assert '<span class="cobadge">Ramp</span>' in rest
+    assert ">Backend Engineer</a>" in rest
+    assert "cobadge\">Simplify" not in rest
+
+
+def test_applying_today_uses_up_a_pick_and_the_slot_is_not_refilled():
+    """Apply to one of three and two remain; the fourth heads the list below instead."""
+    conn = _ranked_pool(6)
+    store.record_application(conn, "Acme", "1", "Engineer 1", "applied",
+                            "2026-07-22T09:00:00")
+    conn.commit()
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    picks = panel[:panel.index('<details class="rest">')]
+    assert picks.count('<article class="pick">') == 2
+    assert "Engineer 4" not in picks
+    assert "You applied to 1 today" in picks
+    rest = panel[panel.index('<details class="rest">'):]
+    assert '<span class="rn">3</span>' in rest
+    assert rest.index(">Engineer 4</a>") < rest.index(">Engineer 5</a>")
+
+
+def test_a_skip_is_refilled_from_the_ranking():
+    conn = _ranked_pool(6)
+    store.set_deferral(conn, "Acme", "1", "skipped", "2026-07-22")
+    conn.commit()
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    picks = panel[:panel.index('<details class="rest">')]
+    assert picks.count('<article class="pick">') == 3
+    assert "Engineer 4" in picks
+    assert "You applied" not in picks
+
+
+def test_three_applications_today_is_done_not_nothing_queued():
+    conn = _ranked_pool(6)
+    for jid in ("1", "2", "3"):
+        store.record_application(conn, "Acme" if int(jid) % 2 else "Zeta", jid,
+                                f"Engineer {jid}", "applied", "2026-07-22T09:00:00")
+    conn.commit()
+    panel = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-22"))
+    assert '<article class="pick">' not in panel
+    assert "Done for today" in panel
+    assert "Nothing queued" not in panel
+    # Tomorrow the slots are back.
+    tomorrow = _today_panel(dashboard.build_dashboard(
+        conn, [_company("Acme", 1), _company("Zeta", 3)], "2026-07-23"))
+    assert tomorrow.count('<article class="pick">') == 3
 
 
 def test_no_drawer_when_there_is_nothing_below_the_picks():

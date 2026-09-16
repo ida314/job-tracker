@@ -151,6 +151,14 @@ static file written by `jobtracker dashboard` has no buttons on purpose — it m
 self-contained, offline, and read-only, and a dead button in a mailed file is worse
 than no button.
 
+**The three are a day's work, not a rolling top three.** Applying uses up a slot until
+tomorrow: apply to one and two picks remain, and the posting that would have filled the
+slot heads the rest of the ranking instead. Skipping or snoozing frees the slot, and the
+next posting fills it. Without that, every application would put another pick on the page
+and the list would never end. `rank.todays_picks` is the one place the split is made, and
+it counts one application per req, so a job reached through two boards uses one slot. A
+hand-entered application has no posting row and uses none.
+
 `applied` goes to the existing `applications` table, not to `deferrals`: it is not a
 deferral, it is the start of the outer loop that table already tracks. A snooze returns
 the posting on its own once `until` passes — that is the difference between snoozing
