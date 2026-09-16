@@ -491,6 +491,43 @@ def test_the_nightly_build_is_one_compile_per_new_letter(tmp_path, monkeypatch):
 
 
 # -- the queue --------------------------------------------------------------------------
+TODAY = "2026-09-11"
+
+
+def _seed_letter_queue(conn):
+    conn.execute(
+        "INSERT INTO postings (company, ats_job_id, title, url, first_seen, last_seen,"
+        " description) VALUES ('Acme', 'j1', 'Backend Engineer', 'u', '2026-09-11',"
+        " '2026-09-11', ?)",
+        (DESCRIPTION,),
+    )
+    conn.execute(
+        "INSERT INTO verdicts (company, ats_job_id, verdict, reason, decided_by,"
+        " decided_at) VALUES ('Acme', 'j1', 'match', '', 'rules', '2026-09-11')"
+    )
+    conn.execute(
+        "INSERT INTO rankings (company, ats_job_id, backend_fit, growth, entry_risk,"
+        " why, prose_hash, judged_at, score)"
+        " VALUES ('Acme', 'j1', 'high', 'high', 'low', '', 'h1', '2026-09-11', 8.0)"
+    )
+    conn.commit()
+
+
+def test_an_expired_snooze_does_not_keep_a_posting_from_its_letter():
+    """The MongoDB and Stripe picks: snoozed until 2026-09-13, back in Today after it,
+    and never written a letter because this query read any `deferrals` row as final."""
+    conn = store.connect(":memory:")
+    _seed_letter_queue(conn)
+
+    store.set_deferral(conn, "Acme", "j1", "snoozed", "2026-09-06", until="2026-09-13")
+    assert store.matches_needing_a_letter(conn, "key-1", today="2026-09-12") == []
+    assert len(store.matches_needing_a_letter(conn, "key-1", today="2026-09-16")) == 1
+
+    store.set_deferral(conn, "Acme", "j1", "skipped", "2026-09-14")
+    assert store.matches_needing_a_letter(conn, "key-1", today="2026-09-16") == []
+    conn.close()
+
+
 def test_a_letter_leaves_the_queue_once_written(template):
     """`run_task` recomputes `remaining` by re-reading `pending_count` rather than
     subtracting, so a task whose queue does not shrink after `apply` reports a backlog
@@ -513,10 +550,10 @@ def test_a_letter_leaves_the_queue_once_written(template):
     )
     conn.commit()
 
-    assert len(store.matches_needing_a_letter(conn, "key-1")) == 1
+    assert len(store.matches_needing_a_letter(conn, "key-1", today=TODAY)) == 1
     store.record_letter(conn, "Acme", "j1", "[]", "key-1", "2026-09-11")
     conn.commit()
-    assert store.matches_needing_a_letter(conn, "key-1") == []
+    assert store.matches_needing_a_letter(conn, "key-1", today=TODAY) == []
     # A moved template is a different question, so it comes back.
-    assert len(store.matches_needing_a_letter(conn, "key-2")) == 1
+    assert len(store.matches_needing_a_letter(conn, "key-2", today=TODAY)) == 1
     conn.close()

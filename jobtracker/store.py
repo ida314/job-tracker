@@ -2690,7 +2690,7 @@ def set_posting_resume(
 # -- resume suggestions ---------------------------------------------------------------
 def matches_needing_tailoring(
     conn: sqlite3.Connection, resume_hash: str, keywords_hash: str = "",
-    limit: Optional[int] = None,
+    limit: Optional[int] = None, *, today: str,
 ) -> list[sqlite3.Row]:
     """Scored, open matches whose suggestions were not made against this resume.
 
@@ -2715,7 +2715,12 @@ def matches_needing_tailoring(
     settle, rather than being invisible forever.
 
     Postings you have already applied to or skipped are excluded — a suggestion for a job
-    that is behind you is work nobody will read.
+    that is behind you is work nobody will read. A snooze excludes only until its `until`
+    day, the rule `rank.is_available` and `plans_needing_refresh` apply: nothing deletes a
+    `deferrals` row when the day passes, so testing bare presence here kept a posting out
+    of this queue forever while Today showed it again. `today` is required for that
+    reason — a default would have to pick what "no date" means, and "still snoozed" is
+    the bug.
     """
     sql = """
         SELECT p.company, p.ats_job_id, p.title, p.description, r.score
@@ -2730,14 +2735,15 @@ def matches_needing_tailoring(
           AND r.score IS NOT NULL
           AND p.description IS NOT NULL AND p.description != ''
           AND a.company IS NULL
-          AND d.company IS NULL
+          AND (d.company IS NULL
+               OR (d.kind='snoozed' AND d.until IS NOT NULL AND d.until <= ?))
           AND (s.resume_hash IS NULL OR s.resume_hash != ?
                OR COALESCE(s.keywords_hash, '') != ?)
         ORDER BY r.score DESC, p.company
     """
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
-    return list(conn.execute(sql, (resume_hash, keywords_hash)))
+    return list(conn.execute(sql, (today, resume_hash, keywords_hash)))
 
 
 def record_suggestions(
@@ -2768,6 +2774,7 @@ def record_suggestions(
 # -- cover letters --------------------------------------------------------------------
 def matches_needing_a_letter(
     conn: sqlite3.Connection, unit_key: str, limit: Optional[int] = None,
+    *, today: str,
 ) -> list[sqlite3.Row]:
     """Scored, open matches with no letter written under the current configuration.
 
@@ -2785,7 +2792,8 @@ def matches_needing_a_letter(
 
     Postings you have already applied to or skipped are excluded. A letter for a job that
     is behind you is a page of prose nobody will read, and it is the most expensive
-    per-unit answer in the queue.
+    per-unit answer in the queue. A snooze excludes only until its `until` day — see
+    `matches_needing_tailoring` for why `today` is required.
     """
     sql = """
         SELECT p.company, p.ats_job_id, p.title, p.description, r.score
@@ -2800,13 +2808,14 @@ def matches_needing_a_letter(
           AND r.score IS NOT NULL
           AND p.description IS NOT NULL AND p.description != ''
           AND a.company IS NULL
-          AND d.company IS NULL
+          AND (d.company IS NULL
+               OR (d.kind='snoozed' AND d.until IS NOT NULL AND d.until <= ?))
           AND (l.unit_key IS NULL OR l.unit_key != ?)
         ORDER BY r.score DESC, p.company
     """
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
-    return list(conn.execute(sql, (unit_key,)))
+    return list(conn.execute(sql, (today, unit_key)))
 
 
 def record_letter(

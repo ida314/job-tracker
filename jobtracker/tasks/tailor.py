@@ -391,7 +391,8 @@ class TailorTask(Task):
         self, conn, ctx: TaskContext, limit: Optional[int] = None
     ) -> list[TaskUnit]:
         rows = store.matches_needing_tailoring(
-            conn, ctx.resume_hash, _keywords(ctx).hash, limit=limit
+            conn, ctx.resume_hash, _keywords(ctx).hash, limit=limit,
+            today=ctx.today,
         )
         return [
             TaskUnit(

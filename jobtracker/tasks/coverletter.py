@@ -281,7 +281,7 @@ class CoverLetterTask(Task):
         self, conn, ctx: TaskContext, limit: Optional[int] = None
     ) -> list[TaskUnit]:
         rows = store.matches_needing_a_letter(
-            conn, _unit_key(ctx), limit=limit
+            conn, _unit_key(ctx), limit=limit, today=ctx.today
         )
         return [
             TaskUnit(

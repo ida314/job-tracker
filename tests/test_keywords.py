@@ -377,9 +377,9 @@ def test_ruling_on_a_term_re_asks_every_posting(tmp_path):
         store.record_suggestions(conn, "Ramp", "7", "[]", "rh", "2026-09-04",
                                  keywords_hash=kw.Keywords().hash)
         conn.commit()
-        assert store.matches_needing_tailoring(conn, "rh", kw.Keywords().hash) == []
+        assert store.matches_needing_tailoring(conn, "rh", kw.Keywords().hash, today="2026-09-04") == []
         assert len(store.matches_needing_tailoring(
-            conn, "rh", kw.Keywords(allowed=("Kafka",)).hash)) == 1
+            conn, "rh", kw.Keywords(allowed=("Kafka",)).hash, today="2026-09-04")) == 1
     finally:
         conn.close()
 

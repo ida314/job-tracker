@@ -286,6 +286,9 @@ def test_nothing_in_the_tailor_path_writes_bytes_to_a_resume():
 
 
 # -- the queue -----------------------------------------------------------------------
+TODAY = "2026-09-01"
+
+
 def test_a_unit_leaves_the_queue_once_its_suggestions_are_stored(tmp_path):
     """`run_task` recomputes `remaining` by re-reading `pending_count`, not by
     subtracting — so a task whose queue does not shrink after `apply` reports a backlog
@@ -293,9 +296,9 @@ def test_a_unit_leaves_the_queue_once_its_suggestions_are_stored(tmp_path):
     conn = store.connect(":memory:")
     _seed_scored(conn)
 
-    assert len(store.matches_needing_tailoring(conn, "hash-1")) == 1
+    assert len(store.matches_needing_tailoring(conn, "hash-1", today=TODAY)) == 1
     store.record_suggestions(conn, "Acme", "1", "[]", "hash-1", "2026-09-01")
-    assert store.matches_needing_tailoring(conn, "hash-1") == []
+    assert store.matches_needing_tailoring(conn, "hash-1", today=TODAY) == []
     conn.close()
 
 
@@ -307,8 +310,8 @@ def test_a_new_resume_re_asks_every_posting(tmp_path):
     _seed_scored(conn)
     store.record_suggestions(conn, "Acme", "1", "[]", "hash-1", "2026-09-01")
 
-    assert store.matches_needing_tailoring(conn, "hash-1") == []
-    assert len(store.matches_needing_tailoring(conn, "hash-2")) == 1
+    assert store.matches_needing_tailoring(conn, "hash-1", today=TODAY) == []
+    assert len(store.matches_needing_tailoring(conn, "hash-2", today=TODAY)) == 1
     conn.close()
 
 
@@ -317,7 +320,7 @@ def test_an_unscored_match_is_not_pending(tmp_path):
     scoring first is that `tailor` works the postings you will actually be shown."""
     conn = store.connect(":memory:")
     _seed_scored(conn, score=None)
-    assert store.matches_needing_tailoring(conn, "hash-1") == []
+    assert store.matches_needing_tailoring(conn, "hash-1", today=TODAY) == []
     conn.close()
 
 
@@ -328,7 +331,25 @@ def test_a_posting_you_already_applied_to_is_not_pending(tmp_path):
     store.record_application(
         conn, "Acme", "1", "Backend Engineer", "applied", "2026-09-01"
     )
-    assert store.matches_needing_tailoring(conn, "hash-1") == []
+    assert store.matches_needing_tailoring(conn, "hash-1", today=TODAY) == []
+    conn.close()
+
+
+def test_an_expired_snooze_does_not_keep_a_posting_out_of_the_queue():
+    """Nothing deletes a `deferrals` row when its day passes, so testing bare presence
+    kept a snoozed posting out of this queue forever while Today showed it again — a
+    pick with no tailored resume and no backlog to say so. A live snooze and a skip still
+    exclude."""
+    conn = store.connect(":memory:")
+    _seed_scored(conn)
+
+    store.set_deferral(conn, "Acme", "1", "snoozed", "2026-09-01", until="2026-09-13")
+    assert store.matches_needing_tailoring(conn, "hash-1", today="2026-09-12") == []
+    assert len(store.matches_needing_tailoring(conn, "hash-1", today="2026-09-13")) == 1
+    assert len(store.matches_needing_tailoring(conn, "hash-1", today="2026-09-16")) == 1
+
+    store.set_deferral(conn, "Acme", "1", "skipped", "2026-09-14")
+    assert store.matches_needing_tailoring(conn, "hash-1", today="2026-09-16") == []
     conn.close()
 
 
@@ -377,8 +398,8 @@ def test_dismissing_keeps_the_row_so_it_is_not_proposed_again():
     row = store.get_suggestions(conn, "Acme", "1")
     assert row is not None and row["resolution"] == "dismissed"
     # Still out of the queue for this resume, and back in for a different one.
-    assert store.matches_needing_tailoring(conn, "hash-1") == []
-    assert len(store.matches_needing_tailoring(conn, "hash-2")) == 1
+    assert store.matches_needing_tailoring(conn, "hash-1", today=TODAY) == []
+    assert len(store.matches_needing_tailoring(conn, "hash-2", today=TODAY)) == 1
     conn.close()
 
 
