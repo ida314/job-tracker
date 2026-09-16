@@ -154,7 +154,8 @@ def test_the_two_counters_are_independent():
 class _Fetch:
     """A PluginFetch stand-in. Hand-written, per house style."""
 
-    def __init__(self, ok=True, error=None, read=0, imported=0, first_read=False):
+    def __init__(self, ok=True, error=None, read=0, imported=0, first_read=False,
+                 snapshot=False):
         self.ok = ok
         self.error = error
         self.read = read
@@ -162,6 +163,7 @@ class _Fetch:
         self.unparsed = 0
         self.skipped = 0
         self.first_read = first_read
+        self.snapshot = snapshot
 
 
 def test_an_incremental_feed_that_read_nothing_is_ok_not_suspect_empty():
@@ -206,6 +208,23 @@ def test_an_empty_first_backfill_poll_is_reported_not_recorded_as_no_jobs():
     assert got.status is HealthStatus.SUSPECT_EMPTY
     assert is_degraded(got)
     assert "Read Message History" in got.detail
+
+
+def test_a_snapshot_board_that_read_nothing_is_suspect_on_every_run_not_just_the_first():
+    """The distinction this module protects is between a poll and a statement, never
+    between a plugin and a board. A board that republishes its whole listing every run
+    *is* a complete statement, so 7.1 applies to it exactly as it does to Greenhouse:
+    zero rows means the listing emptied or its shape moved under us."""
+    prior = evaluate_plugin("Simplify", _Fetch(read=2000, snapshot=True), None, "2026-08-30")
+    got = evaluate_plugin("Simplify", _Fetch(read=0, snapshot=True), prior, "2026-08-31")
+    assert got.status is HealthStatus.SUSPECT_EMPTY
+    assert is_degraded(got)
+    assert "whole listing" in got.detail
+
+
+def test_an_empty_poll_is_still_fine_beside_an_empty_snapshot():
+    """The two live in one function and must not have merged into one rule."""
+    assert evaluate_plugin("Discord: #jobs", _Fetch(read=0), None, "d").status is HealthStatus.OK
 
 
 def test_a_first_poll_that_did_read_something_is_simply_ok():

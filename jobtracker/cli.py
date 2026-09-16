@@ -373,7 +373,7 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
             f"FAIL {fetch.error}"
             if fetch.error
             else f"{fetch.read} read, {fetch.imported} parsed, "
-                 f"{fetch.unparsed} unreadable, {fetch.skipped} not from a bot",
+                 f"{fetch.unparsed} unreadable, {fetch.skipped} skipped",
         )
 
         health = evaluate_plugin(company.name, fetch, store.get_health(conn, company.name), today)
@@ -386,17 +386,10 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
                 degraded.append(f"{company.name}={health.status.value}")
             continue
 
-        inserted, suppressed = store.append_postings(
-            conn, company.name, fetch.postings, today
+        inserted = store.append_postings(
+            conn, company.name, fetch.postings, today, origin=plugin.name
         )
         stats["new_postings"] += len(inserted)
-        for dup in suppressed:
-            log.info("plugin %s: skipped %s — already tracked", plugin.name, dup.title[:60])
-        if suppressed:
-            log.info(
-                "plugin %s: %d announcement(s) were reqs already tracked and were not imported",
-                plugin.name, len(suppressed),
-            )
 
         # Every downstream query is postings JOIN verdicts, so a posting with no verdict
         # is in the table and absent from the product.
@@ -406,14 +399,23 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
             if verdict.decision.value == "match" and posting in inserted:
                 stats["matches"] += 1
 
+        retracted = store.close_feed_postings(
+            conn, company.name, fetch.closed_ids, today
+        )
+        if retracted:
+            log.info(
+                "plugin %s: closed %d posting(s) the board itself marked closed",
+                plugin.name, retracted,
+            )
+
         days = int(settings.get("expire_after_days") or 0)
         if days:
             floor = (date.fromisoformat(today) - timedelta(days=days)).isoformat()
             aged = store.close_stale_postings(conn, company.name, floor, today)
             if aged:
                 log.info(
-                    "plugin %s: closed %d posting(s) older than %d days — a channel "
-                    "announces and never retracts, so age is the only signal it has",
+                    "plugin %s: closed %d posting(s) older than %d days — this board "
+                    "cannot say a req was filled, so age is the only signal it has",
                     plugin.name, aged, days,
                 )
 
@@ -641,14 +643,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     for c in skipped:
         log.warning("no adapter for %s (ats=%s) — skipping", c.name, c.ats)
 
-    # Aggregator feeds (community new-grad lists) need a board_url to fetch. An
-    # aggregator entry without one — e.g. a repo whose current URL isn't yet confirmed —
-    # stays in the "never scraped" bucket rather than failing the run every night.
-    aggregators = [
-        c
-        for c in companies
-        if c.check_method == "aggregator" and c.board_url and get_source(c.ats)
-    ]
+    # A leftover `check_method: aggregator` entry. Nothing reads one any more — community
+    # listings are job boards, switched on in plugins.yaml — and the loader keeps loading
+    # whatever is on disk, so this is said out loud rather than dropped. Silence would
+    # leave an entry that still looks tracked on /companies and reports nothing forever.
+    for c in companies:
+        if c.check_method == "aggregator":
+            log.warning(
+                "%s is check_method: aggregator, which nothing fetches any more — "
+                "listings feeds are job board plugins now (`jobtracker plugins list`)",
+                c.name,
+            )
 
     # Import plugins: feeds that are not boards in companies.yaml (docs/plugins.md).
     # A disabled plugin, an absent plugins.yaml and a missing credential all mean
@@ -657,11 +662,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     active_plugins = _active_plugins(getattr(args, "plugins", None))
 
     log.info(
-        "loaded %d companies: %d api + %d aggregator fetchable, %d manual (never scraped)",
+        "loaded %d companies: %d api boards, %d manual (never scraped); "
+        "job boards are read separately, as plugins",
         len(companies),
         len(api),
-        len(aggregators),
-        len(companies) - len(api) - len(skipped) - len(aggregators),
+        len(companies) - len(api) - len(skipped),
     )
 
     # Held open past matching: descriptions are fetched for the match/uncertain
@@ -669,19 +674,10 @@ def cmd_check(args: argparse.Namespace) -> int:
     # open. Closed in the `finally` below, after that pass.
     fetcher = Fetcher()
     results = fetcher.fetch_all(api)
-    for c in aggregators:
-        log.info("fetching aggregator %s", c.name)
-        res = fetcher.fetch_aggregator(c)
-        log.info(
-            "aggregator %s: %s",
-            c.name,
-            f"FAIL {res.error}" if res.error else f"{len(res.postings)} postings",
-        )
-        results.append(res)
 
     config.ensure_data_dir()
     conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
-    by_name = {c.name: c for c in api + aggregators}
+    by_name = {c.name: c for c in api}
     # One dict for the whole run: ~9k postings, a handful of overrides.
     overrides = store.load_overrides(conn)
 
@@ -754,47 +750,35 @@ def cmd_check(args: argparse.Namespace) -> int:
     # and already correct — just unsortable — so this is pure re-typing, no refetch.
     # Self-draining: it only looks at posted_on IS NULL, so it is a no-op from run two.
     filled = store.backfill_posted_on(
-        conn, {c.name: get_source(c.ats) for c in api + aggregators if get_source(c.ats)}, today
+        conn, {c.name: get_source(c.ats) for c in api if get_source(c.ats)}, today
     )
     if filled:
         log.info("normalized posted_at -> posted_on for %d stored posting(s)", filled)
 
-    # One identity for one req, however it arrived (dedupe.py). Two passes, and the
-    # ordering matters: keys first for rows that predate the column, then one closure
-    # sweep over the whole open set.
+    # One identity for one req, however it arrived (dedupe.py). Keys first, for rows that
+    # predate the column, then one read over the whole open set.
     #
-    # The sweep is deliberately NOT inside the board loop above. A shared key's winner
-    # can be fetched later in the same run than its loser, and boards are fetched in
-    # companies.yaml order — so deciding per board would make which row survives depend
-    # on the ordering of a curated file.
+    # Nothing is closed here. A job reached by two roads is two rows on two pages, each
+    # saying where it came from, and the duplication is answered where it is read: a
+    # shared key renders as a chip, and a key matching an application renders as
+    # "applied". What is left to do in the run is report a key too coarse to be one.
     keyed = store.backfill_dedupe_key(
         conn, {c.name: (c.ats, c.slug) for c in companies if c.slug}
     )
     if keyed:
         log.info("derived dedupe keys for %d stored posting(s)", keyed)
 
-    closed_dupes, conflicts = store.close_duplicates(
-        conn, {c.name: c.check_method for c in companies}, today
+    conflicts = store.board_key_conflicts(
+        conn, {c.name: c.check_method for c in companies}
     )
     for group in conflicts:
-        # Two api rows sharing a key is a finding, not a duplicate — almost certainly a
-        # key too coarse to tell two live reqs apart. Neither row was touched.
+        # Two board rows sharing a key is a finding, not a duplicate — almost certainly a
+        # key too coarse to tell two live reqs apart. Nothing is closed anywhere any more,
+        # so this log line is the only way such a key becomes visible.
         log.warning(
-            "dedupe: %d api postings share one key and none were closed: %s",
+            "dedupe: %d board postings share one key: %s",
             len(group),
             ", ".join(f"{r['company']}/{r['ats_job_id']}" for r in group),
-        )
-    for dup in closed_dupes:
-        log.info(
-            "dedupe: closed %s/%s — same req as %s",
-            dup["company"], dup["ats_job_id"], dup["title_of"],
-        )
-    if closed_dupes:
-        # Said out loud because the first run shifts every count on the dashboard at
-        # once, and a legitimate cleanup that says nothing reads as a regression at 2am.
-        log.info(
-            "dedupe: %d posting(s) closed as duplicates of a row already tracked",
-            len(closed_dupes),
         )
 
     store.record_run(conn, started, _now(), stats)
@@ -3054,7 +3038,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="human-facing careers URL; the fallback when the API breaks, "
                         "and the page `repair` reads to find a moved slug")
     a.add_argument("--board-url", dest="board_url", default="",
-                   help="raw feed URL, for check_method: aggregator")
+                   help="raw feed URL, for an entry whose board is a published file")
     a.add_argument("--expected-board-name", dest="expected_board_name", default="",
                    help="asserted on every run to catch identity drift. Leave unset and "
                         "`verify-slugs --write` seeds it from the board itself")

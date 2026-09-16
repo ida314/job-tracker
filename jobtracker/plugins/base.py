@@ -78,6 +78,14 @@ class PluginFetch:
     cursor: dict = field(default_factory=dict)
     error: Optional[str] = None
     first_read: bool = False
+    # Ids the payload said are closed, in its own words — `active: false` on a listing.
+    # Only a snapshot board can say this; a channel announces and never retracts, which
+    # is why age exists as the other half of the answer.
+    closed_ids: list = field(default_factory=list)
+    # Was this read a complete statement of what the board holds? True for a snapshot
+    # board, False for a cursor walk. `health.evaluate_plugin` reads it: zero rows from a
+    # poll is an ordinary quiet night, and zero rows from a complete statement is not.
+    snapshot: bool = False
 
 
 class BasePlugin:
@@ -124,6 +132,14 @@ class Plugin(BasePlugin):
 
     kind = KIND_IMPORT
     page_size: int = 0
+    # The short label rendered beside a role on the job boards page: "simplify", "yc",
+    # "discord". One list holds every board's rows, so each row has to say which board it
+    # came from; that is the whole reason this exists. Defaults to the plugin's name.
+    tag: str = ""
+    # "json" or "text" — which fetch the runner makes. A board whose listing is embedded
+    # in a server-rendered page is read as text and parsed by the plugin, so the plugin
+    # stays the only thing that knows the shape of its own source.
+    page_format: str = "json"
 
     def company(self, settings: dict) -> Company:
         """The synthetic posting group this feed writes under.
@@ -136,6 +152,34 @@ class Plugin(BasePlugin):
         is what stops a failing feed sending the slug-repair agent to scrape Discord.
         """
         raise NotImplementedError
+
+    def display_tag(self) -> str:
+        """What a row from this board is labelled with. Never empty."""
+        return self.tag or self.name
+
+    def page_urls(self, settings: dict, today: str) -> Optional[list]:
+        """The fixed set of pages that together are this board's whole answer, or None.
+
+        None — the default — means this feed is a cursor walk: an endless stream read
+        forward from where the last run stopped, where "nothing new" is the normal answer
+        and the cursor is the state that matters.
+
+        A **snapshot** board is the other shape. It republishes its whole listing every
+        time, so there is no cursor to keep and no window to lose: the run fetches these
+        URLs, in order, and what comes back is the complete statement. Absence from it
+        still closes nothing — `closed_ids` is how such a board retracts, because a page
+        that failed to load halfway is indistinguishable from a listing that shrank.
+        """
+        return None
+
+    def closed_ids(self, raw: object) -> list:
+        """Ids this payload explicitly marks as closed. Empty for a feed that cannot say.
+
+        The honest half of closing. A channel announces a job and never mentions it
+        again, so age is the only signal it has; a listing that carries `active: false`
+        is *telling* us, and passing that through is better than waiting 90 days.
+        """
+        return []
 
     def first_cursor(self, settings: dict, today: str) -> str:
         """Where to start reading when there is no stored cursor."""

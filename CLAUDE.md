@@ -33,12 +33,12 @@ order; the parser and every `awk`/`grep` sweep depends on it.
 
 | Field | Meaning |
 |---|---|
-| `ats` | `greenhouse`, `lever`, `ashby`, `workday`, `gem`, `bespoke`, `aggregator`, `unknown` |
+| `ats` | `greenhouse`, `lever`, `ashby`, `workday`, `gem`, `bespoke`, `aggregator`, `unknown`. `aggregator` now only ever pairs with `check_method: manual` — a job board nothing may read automatically (Wellfound). |
 | `slug` | Board identifier. A Workday slug is the *triple* `tenant/dc/site` (`redhat/wd5/jobs`) — the data centre is part of the hostname and is not derivable from the tenant. Empty for `bespoke`. |
-| `board_url` | Full JSON API URL for `api`; raw README URL for `aggregator`. Empty for `manual`. |
+| `board_url` | Full JSON API URL for `api`. On a `manual` entry it is documentation — nothing fetches it. A listings feed that *is* fetched is a job board plugin and carries its own URL in `plugins.yaml`. |
 | `careers_page` | Human-facing careers URL. The fallback when the API breaks. |
 | `category` | Free-text bucket, e.g. `data-infra`, `fintech-backend`. |
-| `check_method` | `api`, `manual`, or `aggregator`. Governs what the agent may do. |
+| `check_method` | `api` or `manual`. Governs what the agent may do. **`aggregator` was retired 2026-09-15**: community listings are job boards now. `curation.validate_new` refuses the value and `/companies` no longer offers it, while `load_companies` still loads a leftover entry and names it at WARNING — the loader must keep loading whatever is on disk. |
 | `status` | `not-open` / `open`. |
 | `last_checked` | Date of the last check. Set on every run, including no-match runs. |
 | `last_posting_seen` | Appended title + date when a matching role is found. |
@@ -94,7 +94,14 @@ company for manual review is correct, pretending to have checked it is not.
 
 Two clarifications, both from an audit that found the premise wrong for six entries:
 
-- **Never scrape a company whose portal has no public JSON board.** Absolute.
+- **Never scrape a company whose portal has no public JSON board.** Absolute, with one
+  scoped exception below.
+- **The exception, taken by the user on 2026-09-15: YC's jobs board** (`plugins/ycombinator.py`).
+  YC publishes no JSON board, but its listing pages are server-rendered with the whole job list
+  in one `data-page` attribute — Inertia's payload, parsed as *data*. The scope is what keeps it
+  an exception: a fixed set of listing paths capped at six, no link followed off the page, no DOM
+  walk (a test reads that off the source), and `robots.txt` allows `/jobs`. Do not widen it into
+  a crawl, and do not cite it for any other portal.
 - **`manual` is a finding, not a category.** It records that nobody found an endpoint. The right
   response to "is there one?" is to look — at the network the page makes, not its DOM. Finding
   one is a reclassification. A found endpoint is *verified before it is written*, same as a slug.
@@ -104,8 +111,12 @@ Two clarifications, both from an audit that found the premise wrong for six entr
 
 Recon shortcuts worth not repeating: Snowflake is Phenom People (`/api/apply/v2/jobs`, tenant
 param unknown; `ats: unknown` is known to be wrong). Retool's Gem endpoint answers **403**, so
-it is real and gated. Epic (Avature) and YC Work at a Startup are login-walled; Coralogix's
-Comeet token is minted client-side. SAP's board is server-rendered HTML. For Workday guesses, a
+it is real and gated. Epic (Avature) is login-walled, and so is *applying* through YC — its listing reads fine, every
+`applyUrl` is one shared login link; Coralogix's
+Comeet token is minted client-side. SAP's board is server-rendered HTML. **Wellfound is refused
+and stays refused**: a plain GET returns Cloudflare's challenge script, `/graphql` answers 403,
+robots disallows the `?role=`/`?jobId=` forms, and page two needs a login — it is a check-by-hand
+job board, and working around bot protection is not on the table. For Workday guesses, a
 wrong tenant **422**s and a right tenant with a wrong site **401**s — `intuit.wd1` 401s, so that
 tenant exists. A 401 or 422 is FETCH_FAILED, never "no openings". Full table in the archive.
 
@@ -203,9 +214,17 @@ silently changes the verdict on thousands of postings already judged. See `docs/
 
 ## The HTML dashboard
 
-`jobtracker dashboard` renders `state.db` to a single self-contained HTML file. Four tabs;
+`jobtracker dashboard` renders `state.db` to a single self-contained HTML file. Five tabs;
 **Today is the landing screen**, Applications second — work already committed to outranks the
 raw corpus.
+
+**Postings live on two surfaces, split by `postings.origin`.** No origin is a curated company
+board (Company pages); an origin is a job board (Job boards). The two **partition** the corpus —
+a row on both, or on neither, is the failure worth catching, and neither looks like anything from
+outside. Under `serve` the job boards are their own page at `/jobboards`, in `_NAV`, and the
+dashboard drops that tab (`include_job_boards=False`); the static file keeps both, having nowhere
+else to put them. One renderer serves both, because two copies of a list are how they come to
+disagree about what is on it.
 
 - **It is a pure read.** Unlike `report`, it never marks manual companies as surfaced.
 - **No network at view time, ever.** No CDN, no chart library — the one chart is CSS. That is
@@ -216,6 +235,19 @@ raw corpus.
 - **Escape everything.** Titles and locations come from third-party APIs; URLs get a scheme check
   too, or a `javascript:` href executes on click.
 - **Location sorts, never filters.** The dropdown defaults to "Anywhere".
+- **A filter bar drives the panel that renders it**, found through `[data-filter-scope]` and
+  `data-f="q|ats|loc"` — never by a global id, or two postings panels in one file would leave one
+  bar silently driving the other's tables. A chip names the row attribute it reads
+  (`data-attr`/`data-val`), which is what lets one JS block serve tier chips and source chips.
+- **The job boards table is flat, and that is deliberate.** Grouping by company is right where the
+  group is the employer; here it would be the feed — one heading over thousands of rows from
+  hundreds of employers. Employer is its own column, the board is a `srctag` beside the role, and
+  the filter bar offers search, which board, and the location sort. No tier chips and no ATS
+  select: a control that filters on a field every row leaves empty only ever hides everything.
+- **A duplicate is shown, never hidden.** A job board row sharing a `dedupe_key` with an open
+  company-page row carries an "on company page" chip linking to it; a row whose key matches an
+  application renders "applied · \<status\>" where `+ tracker` would be. A live-looking control
+  there would record a second application to one req.
 - **Tier color is three bands, not seven steps**, and the number is always printed — color is
   reinforcement, never the encoding.
 - **The postings tables group by company.** Rows render visible and JS collapses on load, never
@@ -404,11 +436,33 @@ first thing other than the user to touch the outer loop, which is why it may onl
 
 ---
 
-## Import plugins
+## Job boards (import plugins)
 
 `jobtracker plugins`, `jobtracker/plugins/`, a card on `/settings`, one extra loop in
-`cmd_check`. `docs/plugins.md`. One module plus one import line; module pure, `runner.py` owns
-the socket.
+`cmd_check`, and the `/jobboards` page. `docs/plugins.md`. One module plus one import line;
+module pure, `runner.py` owns the socket.
+
+**Two shapes of board, and the difference is what the runner branches on.** A *cursor walk*
+(Discord) reads an endless stream forward and remembers where it stopped. A *snapshot* board
+(Simplify, YC) republishes its whole listing every run: `page_urls` returns a fixed set of pages,
+there is no cursor, and `collect` takes the snapshot path.
+
+- **A failed snapshot page ends the read and drops what it had collected** (`_nothing`). Half a
+  listing is not a smaller listing — it is the shape a board that emptied would present. The
+  cursor walk keeps its partial pages instead, because each is a complete statement about its own
+  window and the cursor simply does not advance.
+- **Snapshot pages overlap by construction** (a role listing and a location listing share jobs),
+  so ids are de-duplicated across them — otherwise one req is two rows inside a single board.
+- **`closed_ids` is the honest half of closing.** A board that publishes `active: false` is
+  *telling* us; `store.close_feed_postings` closes those, chunked because a listing carrying its
+  whole history names far more ids than this tracker holds. Absence still closes nothing.
+- **`health.evaluate_plugin` reads an empty snapshot as SUSPECT_EMPTY on every run**, not just the
+  first. The distinction that module protects is between a poll and a statement, never between a
+  plugin and a board.
+- **Every row records `origin` and wears a `tag`.** `origin` is the plugin name and is what splits
+  the two pages; `tag` is the short label the row shows, because one list holds every board's rows
+  and each has to say which board that was. `employer` is its own column too — titles keep the
+  `"Employer — Role"` shape the criteria tokens and the eval corpus read.
 
 **A plugin has a `kind`.** `import` is a feed of postings. `task` is the switch for a bounded
 model role in `tasks/`; it implements nothing and has no `page_url`/cursor/`parse_page`
@@ -421,7 +475,10 @@ model role in `tasks/`; it implements nothing and has no `page_url`/cursor/`pars
   you typed, and a reason printed beside it reads as a fault. `work --task <off>` says so and
   exits **0**. The switch comes **before** the query: a disabled task is never asked for
   `unavailable_reason` and never asked for `pending()`.
-- **`level`, `judge` and `inbox` default to on**; new plugins default to off.
+- **`level`, `judge` and `inbox` default to on**; every import plugin defaults to off, including
+  `simplify`, which replaced a feed that *was* running nightly. Installing a board never starts
+  reading anything: an upgrade that quietly began fetching 13MB from a new host is exactly what
+  that rule is for. Switching one on is `jobtracker plugins enable <name>` or the Settings card.
 - **`purge` is import-only.** A model role imports nothing.
 - **Each plugin declares its own settings** (`defaults()`); the type of a setting is the type of
   its default. Semantic rules live in `validate()` on the owning plugin, and **`coerce` runs
@@ -439,6 +496,10 @@ model role in `tasks/`; it implements nothing and has no `page_url`/cursor/`pars
   `postings JOIN verdicts`.
 - **Postings close by age, never by absence** (`expire_after_days`, default 90). A channel cannot
   report that a req was filled; age is honest because it is a statement about *our observation*.
+- **A board that retracts explicitly sets `expire_after_days: 0`**, and `simplify` does. Age is
+  what you use when nothing better exists; where the board states which listings are still
+  published, age does not back that statement up, it contradicts it. Measured on the first real
+  import: 3,067 listings the board calls active, **614 closed on arrival** by a 90-day default.
 - **`health.evaluate_plugin` can never return `SUSPECT_EMPTY` for a routine poll**, and it lives
   in `health.py` because a second health policy in `cli.py` is what that module prevents. **The
   one exception is an empty *first* read** — a backfill that finds nothing is very likely a
@@ -480,8 +541,15 @@ model role in `tasks/`; it implements nothing and has no `page_url`/cursor/`pars
 
 ## URL dedupe
 
-`jobtracker/dedupe.py`, three columns on `postings`, two calls in `cmd_check`. `docs/dedupe.md`.
-Runs across **every** source, not just plugins.
+`jobtracker/dedupe.py`, three columns on `postings`, one column on `applications`, two calls in
+`cmd_check`. `docs/dedupe.md`. Runs across **every** source, not just plugins.
+
+**It flags; it does not close.** Postings live on two pages, and the same req legitimately appears
+on both — once from the employer's own board, once from a job board pointing at it. Closing either
+deletes half of what the job boards page is for. `close_duplicates` and `dedupe.preferred` are
+gone, `append_postings` no longer refuses an announcement of a job already tracked, and rows
+closed by the old rule are reopened once on connect **with the count logged** — `sync_postings`
+reopens only closures that came from absence, so nothing else ever would.
 
 - **The key is not the URL string.** ATS identity is extracted from the path first
   (`lever:artera-2:<uuid>`), and **before the query is dropped** — Greenhouse's
@@ -493,11 +561,17 @@ Runs across **every** source, not just plugins.
 - **`gh_jid` is identity and must survive normalization.** Drop it and every board linking its
   reqs to one careers page collapses onto a handful of keys. `t` and `utm_*` are tracking and are
   dropped.
-- **Precedence: only a feed is closed by a peer** — not "unless it is api". An uncurated company
-  has no `check_method`; ranking it below a feed would make forgetting an entry in
-  `companies.yaml` a way to close live rows. Unknown loses to a board, outranks every feed, and is
-  never peer-closed. Two board rows sharing a key are logged at WARNING with neither touched —
-  the only way a too-coarse key becomes visible.
+- **The question is answered where it is read.** `open_postings_by_verdict` and `ranked_matches`
+  resolve `applied_status` through the row's own application **or** any application sharing its
+  key, as a correlated subquery — two applications can share a key, and a join would multiply the
+  posting row. `rank.one_row_per_req` then collapses the picks to one row per key, with the
+  company-board row winning even when the feed row scores higher: it is the one carrying health,
+  identity, a description and a form.
+- **What survives of precedence is the finding, not the closure.** Two *board* rows on one key
+  means the key cannot tell two live reqs apart; `store.board_key_conflicts` reports it and
+  touches nothing. `_is_feed` still asks "redundant by construction?" rather than "is this api?",
+  because an uncurated company is not a feed and reading it as one would hide a real collision.
+  Since nothing is closed anywhere, that WARNING is the only way such a key becomes visible.
 - **The index cannot live in `_SCHEMA`.** `connect()` runs `executescript(_SCHEMA)` *before*
   `_apply_column_migrations`, so an index on `postings(dedupe_key)` raises `no such column` on any
   pre-existing database — and passes on every freshly built one, which is every database in the
@@ -506,16 +580,17 @@ Runs across **every** source, not just plugins.
   `closed_reason IS NULL`, i.e. on the closure having come from absence.
 - **`dedupe_key` is a plain assignment, not COALESCE** — the key is derived from the same
   statement's URL, and a URL that moves must take its key with it.
-- **`close_duplicates` runs once per check, after every board has synced**, never inside the board
-  loop, or which row survives depends on the ordering of a curated file.
-- **The reason lives in `closed_reason`/`duplicate_of_url`**, not in `verdicts` (rewritten nightly)
-  and not in `overrides` (which mean "I ruled on this role", while a duplicate is a fact about the
-  *row*).
+- **`applications.dedupe_key` follows its URL exactly**, including being cleared: absent/None
+  leaves it, `""` clears it, and a URL yielding no key stores `''` rather than leaving yesterday's
+  key on today's link. Every reader excludes `''`, or one empty key would match every other.
+- **`closed_reason` still exists and still matters** — `'aged_out'` and `'feed_inactive'` are
+  closures absence did not cause, and they are what stops `sync_postings` reopening them nightly.
+  `'duplicate'` is no longer written by anything.
 - **Blind spot, documented not hidden:** a `simplify.jobs/p/<uuid>` row and its direct twin do not
   dedupe. A test asserts the miss. Workday is deliberately out of the URL extractor and covered by
   `key_from_identity`.
-- **The first run that closes anything must say how many in the run log**, or a legitimate cleanup
-  reads as a regression at 2am.
+- **A migration that changes what the pages show says how many in the run log**, or a legitimate
+  one-time cleanup reads as a regression at 2am. That is why `store.py` has a logger at all.
 
 ---
 
@@ -976,24 +1051,30 @@ paged boards, not of Workday.
 
 ---
 
-## Aggregator sources
+## The job boards themselves
 
-`jobtracker/sources/aggregator.py`. Community new-grad list repos are the highest-yield source for
-new-grad roles specifically, including companies not on our list. One `check_method: aggregator`
-entry with a `board_url` = one feed; the adapter parses the README's HTML `<table>` and it flows
-through the same health/`sync_postings`/`match` loop as any board.
+Three, and each is a different answer to "can this be read at all". `plugins/simplify.py`,
+`plugins/ycombinator.py`, and a `companies.yaml` entry for Wellfound.
 
-- **The feed is the `company`, the employer is in the title** (`"Employer — Role"`). One stable
-  diff namespace per feed, and the employer stays visible with no schema change. Caveat: an
-  employer name containing a title-shaped exclude token is conservatively rejected.
-- **`ats_job_id` is the Simplify `/p/<uuid>` when present, else a hash of employer+role** — stable
-  across runs so `sync_postings` recognizes the same row.
-- **Closed rows (`🔒`) are skipped** — a filled req is not an opening.
-- **A missing `board_url` skips the feed** rather than failing the run.
-- **The Ouckah/CVrve feed is unwired** — its 2026/2027 repo URL is unconfirmed, so its entry has
-  no `board_url` and is skipped at no cost. Simplify is wired.
-- **Parsing tolerates garbage** (`[]` on any unexpected shape) — these repos restyle the table
-  every cycle; an empty feed is a visible SUSPECT_EMPTY, never a crash.
+- **Simplify reads `listings.json`, never the README.** The repo publishes both; the JSON names
+  every field the table parser used to reconstruct by regex, links straight at the employer's own
+  application page — which is what lets a row meet its board's row under one key — and carries
+  ~3,000 active listings against the table's ~460. The README is restyled every hiring cycle.
+- **Its group name is `Simplify New-Grad-Positions`, byte-identical to the old entry.** `postings`
+  is keyed by `(company, ats_job_id)` and every verdict, override, decision and application ever
+  recorded against this feed hangs off that pair.
+- **`active` and `is_visible` both mean "no longer published"**, and both go to `closed_ids`.
+- **YC's `applyUrl` is the same login URL on every job** — store it and the whole board collapses
+  onto one dedupe key, one pick, every row claiming to be the same req. The job's own detail path
+  is unique and is what `url` holds; no special extractor is needed.
+- **YC's `minExperience` ("Any (new grads ok)" against "6+ years") goes in the description as
+  prose**, never a filter. Deciding a level is the `level` task's job, and a gate here would apply
+  before any title was read.
+- **Everything `page_error` catches answers 200 and parses to zero rows** — a login wall, a
+  redirect to marketing, a truncated body, a payload rename. Zero rows on a *well-formed* page is
+  allowed through: that is health's question, not the parser's.
+- **Ouckah/CVrve is gone**, not parked: its 2026/2027 URL was never confirmed, and an entry that
+  fetches nothing is better deleted than carried.
 
 ---
 

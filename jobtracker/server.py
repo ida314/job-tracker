@@ -481,6 +481,35 @@ def _questions_card(conn: sqlite3.Connection) -> list:
     return out
 
 
+def render_job_boards(conn: sqlite3.Connection, companies, today: str,
+                     criteria=None) -> str:
+    """Every job board's postings, at their own URL. Pure read.
+
+    Connection-in / string-out like the other pages here, and the body comes from
+    `dashboard.job_board_page_parts` so the served page and the static file's tab are
+    one renderer — the mistake this repo has already made once is two copies of a list
+    that drift into disagreeing about what is on it.
+
+    It carries `dashboard._JS`, not `server._JS`: every control on these rows is the
+    actions cell, whose handlers live in the file that renders the button.
+    """
+    p = [
+        "<!doctype html><meta charset=utf-8><title>Job boards</title>",
+        f"<style>{dashboard_mod._CSS}</style>",
+        "<body><div class=wrap>"
+        f"<h1>Job boards {dashboard_mod.version_chip()}</h1>", _NAV,
+        # The whole page is one filter scope, so the bar below drives these tables and
+        # nothing else — the company pages' bar lives on another page entirely.
+        "<section data-filter-scope>",
+    ]
+    p.extend(dashboard_mod.job_board_page_parts(conn, companies, today, criteria,
+                                                interactive=True))
+    p.append("</section>")
+    p.append("</div>")
+    p.append(f"<script>{dashboard_mod._JS}</script>")
+    return "\n".join(p)
+
+
 def render_applications(conn: sqlite3.Connection, companies, today: str) -> str:
     """Everything you applied to, and every control for changing it. Pure read.
 
@@ -1108,9 +1137,9 @@ def _add_company_card() -> list:
     p.append("<label>ATS" + _select("newco", "ats", _ATS_CHOICES, "greenhouse") + "</label>")
     p.append(
         "<label>Check method"
-        + _select("newco", "check_method", ("api", "manual", "aggregator"), "api")
-        + '<p class=hint>An aggregator with no board URL is skipped rather than fetched — '
-          "that is how an unconfirmed feed is parked.</p></label>"
+        + _select("newco", "check_method", ("api", "manual"), "api")
+        + '<p class=hint>A community listings feed is not an entry here any more — it is '
+          "a job board, switched on under Settings.</p></label>"
     )
     p.append(
         "<label>Tier"
@@ -1152,8 +1181,8 @@ def _tracked_companies(conn: sqlite3.Connection, companies) -> list:
     groups: dict = {}
     for c in companies:
         groups.setdefault(c.tier, []).append(c)
-    # None last: the aggregator feeds sort after every tiered entry, on the page for the
-    # same reason they do in the file.
+    # None last: an untiered entry sorts after every tiered one, on the page for the
+    # same reason it does in the file.
     order = sorted((t for t in groups if t is not None)) + ([None] if None in groups else [])
 
     p = [f"<h2>Tracked <span class=count>{len(companies)}</span></h2>"]
@@ -2837,6 +2866,14 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._send(page)
+            elif path == "/jobboards":
+                conn = self._conn()
+                try:
+                    page = render_job_boards(conn, self._companies(), _today(),
+                                             load_criteria(self.server.criteria_path))
+                finally:
+                    conn.close()
+                self._send(page)
             elif path == "/applications":
                 conn = self._conn()
                 try:
@@ -3069,8 +3106,12 @@ class Handler(BaseHTTPRequestHandler):
             criteria = load_criteria(self.server.criteria_path)
             # interactive=True: only the served page gets the disposition buttons,
             # because only here is there something for them to POST to.
+            # No job boards tab here: under `serve` they are a page of their own,
+            # which is what "two entirely separate pages" means. The static file keeps
+            # both as tabs, having nowhere else to put them.
             page = dashboard_mod.build_dashboard(
                 conn, companies, _today(), criteria, interactive=True,
+                include_job_boards=False,
             )
         finally:
             conn.close()
@@ -5385,7 +5426,8 @@ def _optional_day(payload: dict, key: str) -> tuple[Optional[str], Optional[str]
 
 
 _NAV = (
-    '<nav class=nav><a href="/">Dashboard</a> · <a href="/applications">Applications</a>'
+    '<nav class=nav><a href="/">Dashboard</a> · <a href="/jobboards">Job boards</a>'
+    ' · <a href="/applications">Applications</a>'
     ' · <a href="/companies">Companies</a> · <a href="/tuning">Tuning</a>'
     ' · <a href="/settings">Settings</a></nav>'
 )

@@ -562,8 +562,6 @@ own blind spots, because the failure is invisible at exactly the moment it matte
 
 Planned expansion, in descending value-per-hour:
 
-- **Aggregator sources.** Community-maintained new-grad listing repositories are already
-  structured, high-yield, and free to diff. Highest return of any item here.
 - **Workday.** The `/wday/cxs/{tenant}/{site}/jobs` endpoint returns JSON without auth.
   Fragile and per-tenant, but it covers 8 of the 24 manual entries.
 - **Headless browser** for the remaining bespoke portals. High maintenance, low yield;
@@ -593,7 +591,7 @@ Planned expansion, in descending value-per-hour:
 | Slug-repair agent (§8) | **Complete** — `docs/repair.md`; regex-first, model as fallback |
 | Inbox reading (§8.4) | **Complete** — `docs/mail.md`; local Maildir, read-only, proposes only |
 | Question matching (was §8.4) | **Removed 2026-08-25** — see §8.1; the bound held and the answers were wrong anyway. `jobtracker prefill` is rules-only |
-| Aggregator sources (§9) | **Complete** — `sources/aggregator.py`; Simplify wired, Ouckah/CVrve unwired pending a URL |
+| Job boards (§9) | **Complete** — `docs/plugins.md`; Simplify and YC read as import plugins, Discord alongside them, `/jobboards` is their page. Wellfound is check-by-hand: bot-protected, no keyless listing |
 
 The verified slug data is the asset worth preserving from version 1. The audit that
 produced it — fetching every board, confirming identity against the company name, and

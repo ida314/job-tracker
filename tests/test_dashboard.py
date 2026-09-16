@@ -225,7 +225,7 @@ def test_tabs_carry_every_panel_server_side():
     conn, companies = _setup(
         [("Acme", _one_match(), Decision.MATCH)], [_company("Acme", 1)])
     doc = dashboard.build_dashboard(conn, companies, "2026-07-22")
-    for panel in ("today", "all", "boards"):
+    for panel in ("today", "all", "jobboards", "boards"):
         assert f'data-panel-body="{panel}"' in doc
         assert f'data-panel="{panel}"' in doc
     assert doc.count("<script>") == 1  # tab JS lives in the one existing block
@@ -463,7 +463,12 @@ def _matches(*specs):
 
 
 def _all_panel(doc):
-    return doc[doc.index('data-panel-body="all"'):doc.index('data-panel-body="boards"')]
+    # Ends at the job boards panel, which now sits between this one and board health.
+    # The slice is what makes "is this in the company pages panel?" answerable at all,
+    # so it has to track the panel order rather than the last panel that happened to
+    # follow.
+    return doc[doc.index('data-panel-body="all"'):
+               doc.index('data-panel-body="jobboards"')]
 
 
 def test_open_matches_are_grouped_one_tbody_per_company():
@@ -515,8 +520,21 @@ def test_the_filter_counts_every_group_not_only_the_first():
 def test_a_filter_expands_the_groups_it_matches():
     """A collapsed page under a typed search reads as "nothing found", which is the one
     thing this page may never say while it is holding rows that match."""
-    assert "var filtering = !!(text || ats || locs || tiers);" in dashboard._JS
+    assert "var filtering = !!(text || ats || locs || pressed);" in dashboard._JS
     assert "b.dataset.closed === '1' && !filtering" in dashboard._JS
+
+
+def test_each_filter_bar_drives_only_its_own_panel():
+    """Company pages and job boards are two filterable panels in one file. Looking the
+    controls up by id would leave one bar silently driving the other's tables, so they
+    are found inside the panel that renders them."""
+    assert "document.getElementById('q')" not in dashboard._JS
+    assert "querySelectorAll('[data-filter-scope]')" in dashboard._JS
+    assert 'scope.querySelector(\'[data-f="q"]\')' in dashboard._JS
+    conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
+    doc = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22")
+    assert 'data-panel-body="all" data-filter-scope' in doc
+    assert 'id="q"' not in doc
 
 
 def test_a_row_still_matches_a_search_for_its_company_after_the_cell_moved():
@@ -788,7 +806,12 @@ def test_the_suggestion_line_carries_no_button_in_either_mode():
 
 # -- the actions cell ---------------------------------------------------------------
 def _all_panel(doc):
-    return doc[doc.index('data-panel-body="all"'):doc.index('data-panel-body="boards"')]
+    # Ends at the job boards panel, which now sits between this one and board health.
+    # The slice is what makes "is this in the company pages panel?" answerable at all,
+    # so it has to track the panel order rather than the last panel that happened to
+    # follow.
+    return doc[doc.index('data-panel-body="all"'):
+               doc.index('data-panel-body="jobboards"')]
 
 
 def _suggest(conn, company, jid, n=3, resolution="pending"):

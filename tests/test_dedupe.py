@@ -145,119 +145,57 @@ def test_identity_declines_when_there_is_no_curated_shape(ats, slug, job):
     assert dedupe.key_from_identity(ats, slug, job) is None
 
 
-# -- precedence: the two rules that bound the damage a bad key can do ----------------
-def test_an_api_row_is_never_closed_in_favour_of_a_feed_row():
-    api = _row("Stripe", "4567", "api", first_seen="2026-08-20")
-    feed = _row("Simplify", "abc", "aggregator", first_seen="2026-01-01")
-    plugin = _row("Discord: #jobs", "999", "plugin", first_seen="2026-01-01")
-    winner, losers = dedupe.preferred([feed, plugin, api])
-    assert winner is api
-    assert losers == [feed, plugin] or set(map(id, losers)) == {id(feed), id(plugin)}
-
-
-def test_two_api_rows_sharing_a_key_are_reported_and_neither_is_closed():
+# -- what is left of precedence: reporting a key too coarse to be one ---------------
+#
+# Nothing closes a duplicate any more. Postings live on two pages — company career pages
+# and job boards — and a req reached by both roads is two rows, each saying where it came
+# from. What survives here is the one question that was never about closing: whether two
+# *board* rows have collided on a key, which means the key cannot tell two live reqs
+# apart. `store.board_key_conflicts` is the only caller.
+def test_two_board_rows_sharing_a_key_are_a_finding():
     """The fallback key is a normalized URL, and a board that links every req to one
-    careers-search page hands dozens of live postings one key. Closing those is the most
-    expensive failure this feature can have, so equal-rank api rows are a finding."""
+    careers-search page hands dozens of live postings one key. That is worth a WARNING —
+    and, now that nothing is closed on the strength of a key, it is the only way such a
+    key ever becomes visible."""
     a = _row("Stripe", "1", "api", first_seen="2026-01-01")
     b = _row("Stripe", "2", "api", first_seen="2026-02-01")
-    winner, losers = dedupe.preferred([a, b])
-    assert winner is a
-    assert losers == []
     assert dedupe.conflicting_api_rows([a, b]) == [a, b]
 
 
-def test_a_feed_row_behind_two_conflicting_api_rows_is_still_closed():
-    """The conflict is between the api rows. The feed row is redundant either way."""
-    a = _row("Stripe", "1", "api")
-    b = _row("Stripe", "2", "api")
-    feed = _row("Simplify", "x", "aggregator")
-    _, losers = dedupe.preferred([a, b, feed])
-    assert losers == [feed]
+def test_a_feed_row_beside_a_board_row_is_not_a_conflict():
+    """This is the ordinary case the two pages exist to render: the same job, reached
+    twice. It is reported nowhere and closed nowhere."""
+    api = _row("Stripe", "4567", "api")
+    feed = _row("Simplify", "abc", "aggregator")
+    plugin = _row("Discord: #jobs", "999", "plugin")
+    assert dedupe.conflicting_api_rows([api, feed, plugin]) == []
 
 
-def test_two_feed_rows_of_equal_rank_do_collapse():
+def test_two_feed_rows_on_one_key_are_not_a_conflict_either():
+    """Two job boards carrying one employer's req is expected — it is what a tag on each
+    row is for. The page collapses them for the picks; nothing complains."""
     older = _row("Simplify", "a", "aggregator", first_seen="2026-01-01")
-    newer = _row("Simplify", "b", "aggregator", first_seen="2026-05-01")
-    winner, losers = dedupe.preferred([newer, older])
-    assert winner is older and losers == [newer]
+    newer = _row("Discord: #jobs", "b", "plugin", first_seen="2026-05-01")
+    assert dedupe.conflicting_api_rows([older, newer]) == []
 
 
-def test_the_winner_is_the_same_whichever_board_was_fetched_first():
-    """`close_duplicates` runs once over the whole open set precisely so the outcome does
-    not depend on companies.yaml ordering — but `preferred` must be order-free too, or
-    that guarantee stops at the function boundary."""
-    rows = [
-        _row("Simplify", "a", "aggregator", "2026-01-01"),
-        _row("Stripe", "4567", "api", "2026-08-01"),
-        _row("Discord: #jobs", "99", "plugin", "2026-02-01"),
-    ]
-    import itertools
-
-    winners = {dedupe.preferred(list(p))[0]["company"] for p in itertools.permutations(rows)}
-    assert winners == {"Stripe"}
-
-
-def test_ties_within_a_rank_break_on_first_seen_then_the_primary_key():
-    same_day = [
-        _row("B feed", "2", "aggregator", "2026-01-01"),
-        _row("A feed", "1", "aggregator", "2026-01-01"),
-    ]
-    winner, _ = dedupe.preferred(same_day)
-    assert winner["company"] == "A feed"
-
-
-def test_one_row_is_never_its_own_duplicate():
-    only = _row("Stripe", "1", "api")
-    assert dedupe.preferred([only]) == (only, [])
-    assert dedupe.preferred([]) == (None, [])
-
-
-def test_an_unknown_check_method_loses_to_a_board_but_is_never_closed_by_a_peer():
-    """A company missing from companies.yaml is far more likely to be a board we lost
-    track of than a feed, and the damage runs one way. Measured on the live database:
-    2,805 open postings sit on 13 shared fallback keys — 795 Databricks, 527 Stripe, 400
-    MongoDB — and every one is safe only because its rows rank as something that is not a
-    feed. Rank the unknown last instead and one dropped entry closes 795 live jobs."""
+def test_a_company_nobody_curates_is_still_reported_rather_than_treated_as_a_feed():
+    """`_is_feed` asks "is this redundant by construction?", not "is this api?". A company
+    dropped from companies.yaml is far more likely to be a board we lost track of, and
+    reading it as a feed would hide a real collision between two live reqs."""
     known = _row("Stripe", "1", "api")
     weird = _row("Odd", "2", "somethingelse")
-    winner, losers = dedupe.preferred([weird, known])
-    assert winner is known
-    assert losers == []  # not a feed, so not closed
+    assert len(dedupe.conflicting_api_rows([weird, known])) == 2
 
-    # Two unknowns are likewise left alone, and reported instead.
     other = _row("Odder", "3", "somethingelse")
-    assert dedupe.preferred([weird, other])[1] == []
     assert len(dedupe.conflicting_api_rows([weird, other])) == 2
 
-    # A real feed row behind them is still redundant and is still closed.
-    feed = _row("Simplify", "9", "aggregator")
-    assert dedupe.preferred([weird, known, feed])[1] == [feed]
+
+def test_one_row_is_never_a_conflict_with_itself():
+    assert dedupe.conflicting_api_rows([_row("Stripe", "1", "api")]) == []
+    assert dedupe.conflicting_api_rows([]) == []
 
 
-def test_a_careers_url_keeps_the_query_parameter_that_identifies_the_req():
-    """Betterment links all 41 of its live reqs to one careers page, distinguished only
-    by `gh_jid` — which is the Greenhouse job id, not tracking. Verified over the live
-    database: it appears on 6,019 URLs and equals the stored ats_job_id on all 6,403 rows
-    carrying it, with none differing. Dropping it collapses a board into one key."""
-    a = dedupe.dedupe_key(
-        "https://www.betterment.com/careers/current-openings/job?gh_jid=7184616&gh_jid=7184616"
-    )
-    b = dedupe.dedupe_key(
-        "https://www.betterment.com/careers/current-openings/job?gh_jid=7187115&gh_jid=7187115"
-    )
-    assert a != b
-    assert a == "url:betterment.com/careers/current-openings/job?gh_jid=7184616"
-
-
-def test_tracking_parameters_beside_an_identity_one_are_still_dropped():
-    """Robinhood's URLs carry `?t=gh_src=&gh_jid=...`; only the second one identifies."""
-    with_tracking = dedupe.dedupe_key("https://x.example/job?t=gh_src=&gh_jid=99&utm_source=d")
-    plain = dedupe.dedupe_key("https://x.example/job?gh_jid=99")
-    assert with_tracking == plain == "url:x.example/job?gh_jid=99"
-
-
-# -- documented blind spot -----------------------------------------------------------
 def test_a_simplify_wrapper_and_its_target_are_a_documented_miss():
     """Resolving this needs a redirect followed per posting against a third party at
     ingest time, to save one duplicate row. Not worth it — but the miss is pinned here

@@ -1,16 +1,18 @@
 # A feed is not a board, and the difference is the whole design
 
-Jobs reach this tracker from three kinds of place now. Sixty-eight ATS boards, which
-answer "what is open at this company right now". Two community README feeds. And, since
-this document, a Discord channel where a bot announces roles as it finds them.
-
-The third kind broke an assumption the first two share, and finding out *why* is most of
-what this subsystem is:
+Jobs reach this tracker from two kinds of place. Sixty-eight ATS boards, which answer
+"what is open at this company right now", and **job boards** — aggregated listings that
+answer "what did this board publish". The second kind lives here, and everything in this
+file follows from one distinction:
 
 ```
-a board   is a complete statement   -> a posting missing from it has closed
-a feed    is an incremental stream  -> a posting missing from it means nothing at all
+a board    is a complete statement   -> a posting missing from it has closed
+a feed     is an incremental stream  -> a posting missing from it means nothing at all
 ```
+
+There are three job boards: `simplify` (a listings file), `ycombinator` (a rendered page),
+and `discord` (a channel a bot announces into). Wellfound is a fourth in name only — it
+sits behind bot protection and is a check-by-hand entry in `companies.yaml`.
 
 `store.sync_postings` closes every posting absent from a fetch, and it is right to. A
 Discord poll returns only what arrived since the last read, so on a normal night it
@@ -30,7 +32,7 @@ plugin now declares a `kind`, and there are two:
 
 | kind | what it is | driven by |
 |---|---|---|
-| `import` | a feed of postings that is not a board (Discord) | `plugins/runner.collect`, from `cmd_check` |
+| `import` | a job board: a feed of postings that is not an ATS board | `plugins/runner.collect`, from `cmd_check` |
 | `task` | the switch for a bounded model role in `tasks/` | `tasks/runner`, from `jobtracker work` |
 
 A task plugin implements **nothing**. It has no `page_url`, no cursor, no `parse_page` —
@@ -50,11 +52,43 @@ Two consequences worth stating:
 
 `level`, `judge` and `inbox` default to **on** — they predate the switch, and adding it was
 not meant to change anyone's queue. `tailor` defaults to off, like any newly installed
-plugin. A switched-off task is **absent** from `work --dry-run`, not listed as unavailable:
+plugin, and so does every import plugin — including `simplify`, which replaced a
+companies.yaml feed that *was* running nightly. Installing a board never starts reading
+anything; an upgrade that quietly began fetching 13MB from a new host is the case that rule
+exists for. A switched-off task is **absent** from `work --dry-run`, not listed as unavailable:
 switched off is a decision you typed and there is nothing to go and fix, while a reason
 printed beside it reads as a fault.
 
 ---
+
+## Two shapes of board, and what the runner does about it
+
+A **cursor walk** reads an endless stream forward and remembers where it stopped. That is
+Discord, and for a while it was the only shape. A **snapshot** board republishes its whole
+listing every run — Simplify's `listings.json`, YC's rendered pages — so there is no window
+to lose and nothing to remember between runs. A plugin declares which it is by returning a
+fixed list from `page_urls` (snapshot) or `None` (cursor walk).
+
+The snapshot path differs wherever the difference follows from being a complete statement:
+
+- **A failed page ends the read and drops what it collected** (`runner._nothing`). Half a
+  listing is not a smaller listing — it is the exact shape a board that emptied would
+  present. The cursor walk keeps its partial pages instead, because each is a complete
+  statement about its own window and the cursor simply does not advance past the failure.
+- **Ids are de-duplicated across pages.** A snapshot board's pages overlap by construction
+  — YC's role listing and its location listings share jobs — and importing one twice would
+  be two rows for one req inside a single board.
+- **Zero rows is SUSPECT_EMPTY on every run**, not just the first. This is §7.1 applied to
+  the thing it was written about: the distinction is between a poll and a statement, never
+  between a plugin and a board.
+- **`closed_ids` is how such a board retracts.** `active: false` is the board telling us,
+  and `store.close_feed_postings` closes exactly those ids — chunked, because a listing
+  carrying its whole history names far more ids than this tracker holds. Absence still
+  closes nothing.
+- **`page_format`** picks a JSON or a text fetch, so the plugin stays the only thing that
+  knows the shape of its own source. YC's board is HTML with the listing inside a
+  `data-page` attribute; parsing it is reading the payload the page ships, not walking a
+  DOM, and a test reads that rule off the source.
 
 ## Each plugin declares its own settings
 
@@ -77,6 +111,8 @@ A plugins.yaml written before any of this loads unchanged, key for key. There is
 
 ```bash
 jobtracker plugins list                    # what exists, what is on, what it has imported
+jobtracker plugins enable simplify         # the new-grad listings board
+jobtracker plugins enable ycombinator      # YC's jobs board
 jobtracker plugins enable discord
 jobtracker plugins set discord channel_id=123456789012345678 label=new-grad-jobs
 jobtracker plugins set discord guild_id=987654321098765432
@@ -222,6 +258,13 @@ credential:
   honest thing to say because it is a statement about *our own observation* — "older than
   N days, and this feed has no way to tell us more" — rather than an inferred claim about
   the employer.
+- **…unless the board can retract, and then age is switched off.** `simplify` sets
+  `expire_after_days: 0` because it publishes `active` per listing: where the board says
+  outright what is still open, age does not supplement that answer, it overrides it with a
+  worse one. The first real import made the cost concrete — 3,067 listings the board calls
+  active, 614 of them older than ninety days and closed the moment they arrived. With age
+  off, `closed_ids` is the only way one of its rows closes, which is why that path has its
+  own test.
 - **`health.evaluate_plugin` can never return `SUSPECT_EMPTY` for a routine poll**, and
   the docstring argues it. §7.1 reads an empty board as suspect because a board is a
   complete statement; a channel poll is not. Flagging it would put the feed on the Boards
@@ -235,6 +278,16 @@ credential:
   message the poll *decided about*, imported or not. The two halves pull in opposite
   directions and both matter: a cursor that only moved for imported postings would stall
   forever on a channel whose recent traffic is all conversation.
+- **Every row records `origin` and wears a `tag`.** `origin` is the plugin's name, written
+  by `append_postings`, and it is the whole split between the two postings pages: no origin
+  is a curated company board, an origin is a job board. It is stored rather than derived
+  from the group name, because a group name is built from settings — rename a Discord
+  channel label and every row it ever imported would re-classify itself. `tag` is the short
+  label the row shows on `/jobboards`, because one list holds every board's rows and each
+  has to say which board that was.
+- **`employer` is a column, and the title keeps its shape.** Titles stay `"Employer — Role"`
+  because criteria tokens, `decisions.title` and the eval corpus all read that shape; the
+  column is the same fact for a page that renders it as a field.
 - **A plugin's group is not curation.** It is never written to `companies.yaml` and never
   joined onto a `load_companies` result. Every consumer resolves companies with `.get`
   and degrades to tier `—`, so nothing breaks — and the absence is load-bearing in one

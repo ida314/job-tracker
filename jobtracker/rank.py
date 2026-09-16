@@ -202,14 +202,59 @@ class RankStats:
 # Python composes the score — so it is worth keeping the file split on it.
 
 
+def _key_of(row):
+    """This row's dedupe key, or None for a row that has none — and for the callers,
+    like the tests' own fixtures, whose rows predate the column."""
+    keys = row.keys()
+    return row["dedupe_key"] if "dedupe_key" in keys else None
+
+
+def _is_board_row(row) -> bool:
+    """A curated company board carries no `origin`. See `postings.origin`."""
+    keys = row.keys()
+    return not ("origin" in keys and row["origin"])
+
+
+def one_row_per_req(rows) -> list:
+    """Collapse rows that are the same req reached by different roads.
+
+    Postings are split across two pages, and the same job legitimately appears on both —
+    once from the employer's own board, once from a job board that links to it. That is
+    right on the pages, where each copy says where it came from, and wrong here: three
+    picks that are two jobs is a worse answer than three picks that are three.
+
+    The company-board row wins regardless of score, because it is the one carrying
+    health, identity, a description and a form; the feed row is a pointer to it. Among
+    rows of equal standing the first wins, and callers pass score order, so that is the
+    best-scoring one. Order is otherwise preserved.
+    """
+    best: dict[str, int] = {}
+    for i, row in enumerate(rows):
+        key = _key_of(row)
+        if not key:
+            continue
+        held = best.get(key)
+        if held is None or (_is_board_row(row) and not _is_board_row(rows[held])):
+            best[key] = i
+    out = []
+    for i, row in enumerate(rows):
+        key = _key_of(row)
+        if key and best.get(key) != i:
+            continue
+        out.append(row)
+    return out
+
+
 def available(rows, today: str) -> list:
-    """Every scored posting still awaiting your decision, best first.
+    """Every scored posting still awaiting your decision, best first, one row per req.
 
     Extracted from `top_n` so that anything showing what falls *below* the picks starts
     from the same list they came out of. Reading the raw query instead would put the jobs
     you already applied to or skipped back on the page they left.
     """
-    return [r for r in rows if is_available(r, today) and r["score"] is not None]
+    return one_row_per_req(
+        [r for r in rows if is_available(r, today) and r["score"] is not None]
+    )
 
 
 def top_n(rows, n: int, today: str) -> list:

@@ -51,8 +51,10 @@ class Company:
     check_method: str = "manual"  # api | manual | aggregator
     expected_board_name: Optional[str] = None
     careers_page: str = ""  # human-facing fallback + where slug-repair reads
-    board_url: str = ""  # aggregator feeds fetch this directly (a raw README URL), since
-    #                      they have no slug to template — see sources/aggregator.py.
+    board_url: str = ""  # Where this entry's listing lives, when it is a published
+    #                      file rather than an ATS board. Documentation on a `manual`
+    #                      entry: nothing fetches it. A listings feed that IS fetched is
+    #                      a job board plugin, and carries its own URL in plugins.yaml.
     notes: str = ""
 
     @property
@@ -87,6 +89,13 @@ class Posting:
     posted_at: Optional[str] = None
     description: str = ""
     posted_on: Optional[str] = None
+    # The employer, where the source names one. `company` is the *group* a posting was
+    # imported under — a board's own name, or a feed's — so on a job board it says
+    # "Simplify", not who is hiring. Titles keep carrying "Employer — Role" because the
+    # criteria tokens, `decisions.title` and the eval corpus all read that shape; this
+    # holds the same fact as a field, for the pages that render it as one. None where the
+    # source never said.
+    employer: Optional[str] = None
 
 
 @dataclass(frozen=True)

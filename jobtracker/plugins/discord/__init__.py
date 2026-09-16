@@ -132,6 +132,7 @@ class Discord(Plugin):
     name = "discord"
     summary = "import job postings a bot announces in one Discord channel"
     page_size = PAGE
+    tag = "discord"
 
     # -- settings --------------------------------------------------------------------
     def defaults(self) -> dict:

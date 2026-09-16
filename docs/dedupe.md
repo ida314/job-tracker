@@ -1,18 +1,25 @@
 # One req, one row, however it arrived
 
 A job reaches this tracker by several roads. Stripe's own Greenhouse board publishes it,
-the Simplify new-grad README lists it, and a Discord channel announces it. Those are three
-rows in `postings` describing one application you can submit exactly once, and two of them
-are noise on a page whose whole job is to be short.
+the Simplify listings file names it, and a Discord channel announces it. Those are three
+rows in `postings` describing one application you can submit exactly once.
 
-So every posting now carries a `dedupe_key`, and a redundant copy is either never imported
-or closed with its reason recorded.
+Every posting carries a `dedupe_key`, and knowing that is what lets the pages **say** so.
 
 ```
 key       derived from the URL, or from curated identity when we have it
-rank      api (0)  <  aggregator (1)  <  plugin (2)
-outcome   the best-ranked row stays open; the rest are closed as 'duplicate'
+outcome   nothing is closed, hidden or refused for being a copy
+          a shared key renders as "on company page"
+          a key matching an application renders as "applied · <status>"
+          the picks show one row per key (rank.one_row_per_req)
 ```
+
+**This used to close things, and the change is the point.** Postings live on two pages now —
+company career pages and job boards — and the same req legitimately appears on both. The
+job board's copy is not noise: it is what that board published, and it is the row you would
+read on that board. So `close_duplicates` and `dedupe.preferred` are gone,
+`append_postings` no longer refuses an announcement of a job already tracked, and rows
+closed by the old rule are reopened once on connect with the count logged.
 
 ## The key is not the URL string
 
@@ -59,60 +66,56 @@ Verified where both derivations apply: 3,487 rows agree, 0 disagree.
 `backfill_dedupe_key` drain: it looks at `dedupe_key IS NULL`, and a URL it could decline
 would be re-examined every night forever.
 
-## Precedence, which is the entire safety argument
+## What replaced precedence
 
-> **An `api` row is never closed in favour of a feed row.** A board row carries health,
-> identity, a description and a prefillable form; a feed row is a pointer to it.
->
-> **A row is closed by a peer only if it is a feed.** Two board rows sharing a key is a
-> *finding* — almost certainly a key too coarse to tell two live reqs apart — and the
-> honest response is to report it at WARNING and touch nothing.
+Ranking sources existed to decide which row to close. Nothing is closed, so what is left is
+narrower and lives in two places.
 
-The second rule is what makes it safe to run this across every source rather than only the
-plugin, and its exact wording is load-bearing. It is **not** "unless it is `api`".
+**Answering "have I applied to this?" about the req, not the row.** `applications` carries
+its own `dedupe_key`, derived from the URL you applied at and following it exactly —
+absent leaves it, `""` clears it, and a URL yielding no key stores `''` rather than leaving
+yesterday's key attached to today's link. `open_postings_by_verdict` and `ranked_matches`
+resolve `applied_status` through the row's own application *or* through any application
+sharing its key. It is a correlated subquery and not a second join: two applications can
+share a key, and a join would multiply the posting row rather than answering once.
 
-A company missing from `companies.yaml` has no `check_method` to rank by, and ranking it
-below a feed would make *forgetting an entry* a way to close live postings. That is not
-theoretical: running this pass against a deliberately empty companies file closed 795
-Databricks rows in one go, because they lost their curated identity key and their rank in
-the same step. So an unknown rank loses to a real board, still outranks every feed, and is
-never closed by a peer. Only `aggregator` and `plugin` rows — redundant by construction —
-can be.
+That is also why `rank.is_available` needed no change. It already excluded on the presence
+of a status, so a job board's copy of something you applied to leaves the picks for free.
 
-Ties break on `first_seen`, then on the primary key, so the winner is stable across runs.
+**Showing one pick per req.** `rank.one_row_per_req` collapses rows sharing a key, keeping
+the company-board row even when the feed row scores higher — it is the one carrying health,
+identity, a description and a form, and the feed row is a pointer to it. Among rows of
+equal standing the first wins, and callers pass score order. Three picks that are two jobs
+is a worse answer than three picks that are three.
 
-## Two mechanisms, because there are two situations
+## The one thing still worth reporting
 
-- **Never imported.** `append_postings` refuses at the door: a feed posting whose key
-  already belongs to an open, better-ranked row is never written, so nothing enters
-  `postings`, `verdicts`, the report or the ranking. This is where most of it happens,
-  because the feeds are where the redundancy comes from.
-- **Closed later.** `close_duplicates` runs once per `check`, **after every board has
-  synced**, never inside the board loop. The winner of a shared key can be fetched later
-  in the same run than the loser, and boards are fetched in `companies.yaml` order — so
-  deciding per board would make which row survives depend on the ordering of a curated
-  file. One pass over the whole open set is order-independent by construction.
+Two **board** rows sharing a key is a *finding*, not a duplicate: almost certainly a key
+too coarse to tell two live reqs apart. `store.board_key_conflicts` returns those groups
+and touches nothing; `cmd_check` logs them at WARNING.
 
-## Why the reason lives in `closed_reason`
+`dedupe._is_feed` still asks "is this row redundant by construction?" rather than "is this
+`api`?", and the wording stays load-bearing. A company missing from `companies.yaml` has no
+`check_method`, and reading it as a feed would *hide* a real collision between live reqs
+rather than report it. Running the old pass against a deliberately empty companies file
+closed 795 Databricks rows in one go; the same misreading now costs a silence instead.
 
-Not `verdicts`: `cmd_check` re-derives a verdict from the title for every posting it
-fetches, which is the documented mechanism that erased 99 llm matches overnight on
-2026-08-02. A reason written there lasts one night.
+## Closure still exists, for reasons absence did not cause
 
-Not `overrides`: those survive rematch, but an override means *"I ruled on this role"*,
-and a duplicate is a statement about the *row*. It would also collide with a genuine human
-override on the same posting.
+`closed_reason` is NULL for the ordinary case — closed by absence from its board's fetch —
+and carries a value when something else closed the row:
 
-So: `closed_at` plus `closed_reason='duplicate'` plus `duplicate_of_url`. Closure is
-already the vocabulary for "this row is no longer live", and it turns *"it vanished"* into
-*"closed because this URL is the same req"* — DESIGN.md §3.5 with two columns and no new
-table.
+- `'aged_out'`: a feed announces and never retracts, so age is the only signal it has.
+- `'feed_inactive'`: a snapshot board published `active: false`. It *told* us, which beats
+  waiting ninety days.
 
-**And `sync_postings` must not undo it.** That function reopens any re-seen posting, which
-is right for a board: a req that comes back is open again. But a duplicate's own feed still
-lists it tomorrow, so an unconditional reset would undo the closure at 01:00 and remake it
-at 01:05, every night, forever. The reopen is therefore conditional on the closure having
-come from absence — a NULL `closed_reason`.
+`'duplicate'` is no longer written by anything, and the migration that reopens the rows
+carrying it is self-draining.
+
+**And `sync_postings` must not undo either of those.** It reopens any re-seen posting,
+which is right for a board: a req that comes back is open again. But a feed still lists an
+aged-out row tomorrow, so the reopen is conditional on the closure having come from
+absence — a NULL `closed_reason`.
 
 ## Known blind spots
 
@@ -136,7 +139,11 @@ come from absence — a NULL `closed_reason`.
   not always in it. `key_from_identity("workday", ...)` covers every Workday row we
   curate. A key that is merely missing costs one duplicate row; a key that is wrong closes
   a real posting.
-- **A closed duplicate stops being rematched.** `cmd_rematch` filters `closed_at IS NULL`,
-  so "a `criteria.yaml` edit reclassifies all of history" narrows by one row per
-  duplicate. Correct — its twin is still open and still rematched — but worth saying.
-- **The only ways back** from a dedupe closure are the winner closing or the key changing.
+- **A too-coarse key now costs a wrong chip rather than a closed row.** If two live reqs
+  share a key, one may render "on company page" pointing at the other, or inherit an
+  "applied" flag that belongs to its twin. That is the trade the rewrite makes deliberately:
+  the failure is visible on the page instead of being a row that silently vanished.
+- **Simplify's careers-site links still do not bridge to their board.** The listing links at
+  `employer.com/...?gh_jid=X` while the employer's own row keys as `greenhouse:slug:X`, so
+  the "on company page" chip fires less often than the corpus would allow. Unchanged by the
+  rewrite, and the reason not to bridge it is unchanged too.
