@@ -999,25 +999,40 @@ def _posting_application(conn, company: str, ats_job_id: str, title: str,
 
     # The same two writes `/applications` makes, and the same two controls, because
     # moving a stage and changing a reminder are different things (docs/applications.md).
-    out.append("<div class=appform>")
+    out.extend(_app_controls(app, deletable=False))
+    out.append("</section>")
+    return out
+
+
+def _app_controls(app, deletable: bool) -> list:
+    """The stage and reminder controls, shared by `/applications` and the posting page.
+
+    One renderer, because the two pages post through one handler (`.app, .aprow`) and a
+    second copy of the markup is how they would come to disagree about it. Delete is
+    `/applications`-only.
+    """
+    out = ["<div class=appform>", "<div class=grp>"]
     out.append("<label>Stage" + _status_select("appstatus", app["status"]) + "</label>")
     out.append(
-        '<label>What happened<input class=appnote type=text placeholder="round 2 — '
-        'system design"></label>'
+        '<input class=appnote type=text aria-label="What happened" '
+        'placeholder="what happened, e.g. round 2 — system design">'
     )
-    out.append('<div class=acts><button class=app-save>Log stage</button></div>')
+    out.append('<button class=app-save>Log stage</button>')
+    out.append("</div><div class=grp>")
     out.append(
-        '<label>Follow up on<input class=appnext type=date value="'
+        '<label>Follow up<input class=appnext type=date value="'
         f'{html.escape(app["next_action"] or "", quote=True)}"></label>'
     )
     out.append(
-        '<label>On what<input class=appnextnote type=text value="'
+        '<input class=appnextnote type=text aria-label="On what" value="'
         f'{html.escape(app["next_action_note"] or "", quote=True)}" '
-        'placeholder="follow up"></label>'
+        'placeholder="follow up">'
     )
-    out.append('<div class=acts><button class=app-meta>Set reminder</button></div>')
+    out.append('<button class=app-meta>Set reminder</button>')
     out.append("</div>")
-    out.append("</section>")
+    if deletable:
+        out.append('<button class="app-delete danger">Delete</button>')
+    out.append("</div>")
     return out
 
 
@@ -2163,25 +2178,7 @@ def _application_card(app, events_by, today: str, by_name) -> list:
     # Two separate writes, because they mean different things. Moving the stage is an
     # event and joins the history; changing a reminder is not and must not, or the
     # timeline fills with entries recording that you rescheduled a phone call.
-    p.append("<div class=appform>")
-    p.append("<label>Stage" + _status_select("appstatus", app["status"]) + "</label>")
-    p.append(
-        '<label>What happened<input class=appnote type=text placeholder="round 2 — '
-        'system design"></label>'
-    )
-    p.append('<div class=acts><button class=app-save>Log stage</button></div>')
-    p.append(
-        '<label>Follow up on<input class=appnext type=date value="'
-        f'{html.escape(app["next_action"] or "", quote=True)}"></label>'
-    )
-    p.append(
-        '<label>On what<input class=appnextnote type=text value="'
-        f'{html.escape(app["next_action_note"] or "", quote=True)}" '
-        'placeholder="follow up"></label>'
-    )
-    p.append('<div class=acts><button class=app-meta>Set reminder</button>'
-             '<button class="app-delete danger">Delete</button></div>')
-    p.append("</div>")
+    p.extend(_app_controls(app, deletable=True))
 
     if app["note"]:
         p.append(f'<div class="note">{html.escape(app["note"])}</div>')
@@ -5496,13 +5493,24 @@ border-radius:8px}
 .addapp .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
 gap:.6rem;margin-top:.7rem}
 .addapp label{display:flex;flex-direction:column;gap:.25rem;font-size:.82rem;opacity:.85}
-.appform input,.appform select,.addapp input,.addapp select{padding:.35rem .5rem;
+.addapp input,.addapp select{padding:.35rem .5rem;
 border-radius:5px;border:1px solid currentColor;background:transparent;color:inherit;
 font:inherit;font-size:.88rem;min-width:0}
-.appform{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-gap:.5rem;margin-top:.75rem;align-items:end}
-.appform label{display:flex;flex-direction:column;gap:.25rem;font-size:.78rem;opacity:.8}
-.appform .acts{display:flex;gap:.4rem;align-items:end}
+/* One compact row under each application, at the size of the text around it. Labels sit
+   beside their field rather than above it, which is most of the height saved. */
+.appform{display:flex;flex-wrap:wrap;gap:.3rem .9rem;margin-top:.35rem;align-items:center;
+font-size:12px}
+.appform label{display:flex;align-items:center;gap:.3rem;color:var(--muted)}
+.appform input,.appform select{padding:1px 5px;height:22px;border-radius:4px;
+border:1px solid var(--rule);background:transparent;color:var(--ink);font:inherit;
+font-size:12px;min-width:0}
+.appform .appnote{flex:0 1 13rem;width:13rem}
+.appform .appnextnote{flex:0 1 8rem;width:8rem}
+.appform .grp{display:flex;flex-wrap:wrap;align-items:center;gap:.3rem .35rem;
+max-width:100%}
+.appform button,.app.prop button{padding:0 .5rem;height:22px;font-size:12px;
+line-height:20px;white-space:nowrap}
+.appform .danger{margin-left:auto}
 .app .danger{border-color:rgba(220,53,69,.6);opacity:.75}
 .app .danger:hover{opacity:1;color:#dc3545}
 /* A proposal from the mailbox. Marked as unwritten — the border is the reminder that

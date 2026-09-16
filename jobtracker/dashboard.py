@@ -379,20 +379,23 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 /* Lives here rather than in server.py because both surfaces render it: the read-only
    tab in the static file and the editable page under `serve`, which concatenates this
    stylesheet. One definition means the two cannot drift apart visually. */
-.apps { display: grid; gap: 10px; margin: 6px 0 26px; }
-.app { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-       padding: 13px 16px; }
+.apps { display: grid; gap: 6px; margin: 6px 0 22px; }
+/* Body-text sized. A list you scan every morning, so a row is a line of text with its
+   controls under it, not a card with a form in it. */
+.app { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+       padding: 7px 12px; font-size: 13px; }
 /* The left rule is the section's urgency, carried onto every row in it. */
 .app.urgent { border-left: 3px solid var(--serious); }
 .app.stale  { border-left: 3px solid var(--warning); }
 .app.done   { opacity: .78; }
-.app h3 { margin: 0 0 3px; font-size: 15.5px; line-height: 1.35; font-weight: 550; }
+.app h3 { margin: 0 0 1px; font-size: 13.5px; line-height: 1.35; font-weight: 600; }
 .app h3 a { color: var(--ink); text-decoration: none; }
 .app h3 a:hover { text-decoration: underline; }
 .app .co { color: var(--ink-2); font-weight: 400; }
-.app .meta { color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap;
-             gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
-.app .note { font-size: 13px; color: var(--ink-2); margin-top: 7px;
+.app .meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap;
+             gap: 2px 6px; align-items: center; font-variant-numeric: tabular-nums; }
+.app .meta .st, .app .meta .tier { padding-top: 0; padding-bottom: 0; font-size: 11px; }
+.app .note { font-size: 12.5px; color: var(--ink-2); margin-top: 4px;
              border-left: 2px solid var(--grid); padding-left: 10px; }
 /* Status pills. One hue per stage of the funnel, and the word is always present — the
    color is reinforcement, never the encoding, same rule as the tier chips. */
