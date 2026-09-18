@@ -170,6 +170,41 @@ you sent is history, and rewriting it is not a correction.
 A copy that fails is a log and a gap in the row, never an exception: this runs inside the
 click that records an application, and a refused "I applied" is work you have to redo.
 
+## Taking a document back out
+
+**Did not send** (`sub-drop` → `POST /api/submission/clear`, `submissions.drop_document`)
+removes one frozen document from the record: the column goes NULL, `*_kind` goes empty,
+the archived copy is deleted, and the row reads "none went out" like any application that
+had no letter to begin with.
+
+It exists because the freeze records the document that was **in effect**, and a letter
+`coverletter build` wrote is in effect for a posting whether or not you attached it to the
+employer's form. Nothing here can see the form you filled in, so the one correction this
+record needs is subtractive.
+
+It is the second writer of `application_submissions`, and deliberately not
+`freeze_submission(replace=True)` in different clothes:
+
+| | Update what I submitted | Did not send |
+|---|---|---|
+| direction | rewrites the row from what is in effect **now** | only ever removes |
+| scope | the whole row, both documents and the Q&A | one document |
+| status | `applied` only | any status |
+
+The status difference falls out of the direction. An update after a reply would put
+today's documents into yesterday's record, which is inventing history; a removal can only
+ever say less than the row already said, and the month you notice a record is wrong is
+rarely the month you applied.
+
+**The row goes first, then the bytes** — `/api/posting-letter/clear`'s rule. An orphaned
+file under `SUBMISSIONS_DIR` is inert; a row naming a file that is not there logs on every
+lookup and renders a download that 404s. A failed unlink is a log, not an exception: by
+then the record is already correct. Removing what is not there is a refusal, not a no-op,
+and like every refusal here it writes nothing. `kind` names a column, so it is checked
+against `store.SUBMISSION_DOCUMENTS` rather than bound. The control renders only beside a
+document the row actually carries, and `/api/submission/clear` stays out of
+`_UPLOAD_ROUTES` for the same reason its `posting-letter` sibling does.
+
 ---
 
 ## Rules that must not be "simplified"

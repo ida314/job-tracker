@@ -1047,8 +1047,17 @@ def _submitted_block(conn, company: str, ats_job_id: str, app) -> list:
     have opened this page, so the snapshot it froze is of a page you had not filled in.
     It is scoped to an application still at `applied`: once an employer has replied, what
     you sent is history and rewriting it is not a correction.
+
+    "Did not send" is the other direction and is **not** scoped that way. The freeze
+    records the document that was *in effect* — a letter `coverletter build` wrote counts
+    whether or not you attached it to the employer's form — so the one correction this
+    record needs is subtractive, and it stays available at every status because the month
+    you notice is rarely the month you applied. It only ever removes, so unlike an update
+    it cannot put today's documents into yesterday's record.
     """
     qc, qj = dashboard_mod._q(company), dashboard_mod._q(ats_job_id)
+    c = html.escape(company, quote=True)
+    j = html.escape(ats_job_id, quote=True)
     row = store.get_submission(conn, company, ats_job_id)
     out = ['<div class="sub">']
     if row is None:
@@ -1068,7 +1077,11 @@ def _submitted_block(conn, company: str, ats_job_id: str, app) -> list:
                 f'<span class="dname">{html.escape(name)}</span>'
                 f'<span class="dkind">{html.escape(word or "")}</span>'
                 f'<a class="ddl" href="/api/document?company={qc}&amp;job={qj}'
-                f'&amp;kind=submitted-{kind}" download>{glyph}</a></div>'
+                f'&amp;kind=submitted-{kind}" download>{glyph}</a>'
+                f'<button class="sub-drop danger" data-kind="{kind}" '
+                f'data-company="{c}" data-job="{j}" title="Record that this '
+                f'{label.lower()} never went out, and delete the copy">'
+                'Did not send</button></div>'
             )
         frozen = store.submitted_answers(row)
         if frozen:
@@ -1085,8 +1098,6 @@ def _submitted_block(conn, company: str, ats_job_id: str, app) -> list:
                        "recorded.</div>")
 
     if app["status"] == "applied":
-        c = html.escape(company, quote=True)
-        j = html.escape(ats_job_id, quote=True)
         out.append(
             f'<div class="acts"><button class="p-resubmit" data-company="{c}" '
             f'data-job="{j}" title="Replace this record with the documents and answers '
@@ -2996,6 +3007,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_question(payload))
             elif path == "/api/submission":
                 self._send_json(self._api_submission(payload))
+            elif path == "/api/submission/clear":
+                self._send_json(self._api_submission_clear(payload))
             elif path == "/api/tailor-build":
                 self._send_json(self._api_tailor_build(payload))
             elif path == "/api/coverletter-build":
@@ -4283,6 +4296,41 @@ class Handler(BaseHTTPRequestHandler):
             )
             conn.commit()
             return {"ok": True, "detail": "recorded", "summary": out}
+        finally:
+            conn.close()
+
+    def _api_submission_clear(self, payload: dict) -> dict:
+        """Take one document back out of what you submitted. It never went.
+
+        The case this is for: `coverletter build` wrote a letter, so it was in effect for
+        this posting and the freeze recorded it — and then you did not attach it to the
+        employer's form. Left alone the record reads, months later, as a letter you sent.
+
+        Unlike "Update what I submitted" this is **not** scoped to an application still at
+        `applied`. That control rewrites the row from the documents in effect *now*, which
+        after a reply would be inventing history. This one only ever removes, and the
+        moment you notice a record is wrong is usually long after someone replied.
+
+        It carries two short strings and no file, so it stays out of `_UPLOAD_ROUTES` —
+        `/api/posting-letter/clear`'s rule.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        kind = str(payload.get("kind") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and ats_job_id are required"}
+        if kind not in store.SUBMISSION_DOCUMENTS:
+            return {"ok": False, "error": f"unknown document {kind!r}"}
+        conn = self._conn()
+        try:
+            dropped = submissions.drop_document(conn, company, job_id, kind)
+            if dropped is None:
+                # The wording `_send_document` uses for the same absence, so the
+                # refusal and the download say the same thing about one state.
+                return {"ok": False,
+                        "error": f"nothing was recorded as the {kind} you submitted"}
+            conn.commit()
+            return {"ok": True, "detail": "removed", "filename": dropped}
         finally:
             conn.close()
 
@@ -6685,6 +6733,18 @@ document.addEventListener('click', async (e) => {
     // freeze rides along with it on the server side.
     const res = await post('/api/disposition', {
       company: sec.dataset.company, ats_job_id: sec.dataset.job, action: 'applied'});
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
+  const sdrop = e.target.closest('button.sub-drop');
+  if (sdrop) {
+    const what = sdrop.dataset.kind === 'letter' ? 'cover letter' : 'resume';
+    if (!confirm('Record that this ' + what + ' never went out? The archived copy is ' +
+                 'deleted and the record will say none went out.')) return;
+    const res = await post('/api/submission/clear', {company: sdrop.dataset.company,
+                                                     ats_job_id: sdrop.dataset.job,
+                                                     kind: sdrop.dataset.kind});
     if (!res.ok) { alert(res.error); return; }
     location.reload();
     return;

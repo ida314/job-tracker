@@ -394,6 +394,15 @@ the questions it asks beyond them, and — after applying — what you actually 
   cannot both decide they are first. **"Update what I submitted" is the only `replace=True`
   caller**, and only while the application is still at `applied` — once someone replied, what
   you sent is history.
+- **"Did not send" is the second writer and it only ever removes.**
+  `submissions.drop_document` NULLs one document's columns and deletes the archived copy —
+  the freeze records what was *in effect*, and a letter `coverletter build` wrote is in
+  effect whether or not you attached it to the form. Because it can only say less than the
+  row already said it is **not** scoped to `applied`, where an update is: the month you
+  notice a record is wrong is rarely the month you applied. **The row goes first, then the
+  bytes**, and `kind` names a column so it is checked against `store.SUBMISSION_DOCUMENTS`,
+  never bound. Removing what is not there is a refusal, and the control renders only beside
+  a document the row carries.
 - **A failed copy is a log and a gap, never an exception.** This runs inside the click that
   records an application; a refused "I applied" is work you have to redo.
 - **`/api/posting-letter` is in `_UPLOAD_ROUTES`, `/api/posting-letter/clear` is not** — the

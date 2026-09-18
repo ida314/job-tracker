@@ -345,6 +345,136 @@ def test_the_tailored_pdf_is_not_the_resume_until_it_is_attached(paths):
     assert path.name == "resume.pdf"
 
 
+# -- taking a document back out ------------------------------------------------------
+def _applied_with_both(paths):
+    """An application whose freeze recorded a resume *and* a cover letter."""
+    db, conn = _db(paths)
+    rname = resumes.stored_name("Acme", "1", ".pdf")
+    resumes.write_atomic(resumes.path_for(rname), PDF)
+    store.set_posting_resume(conn, "Acme", "1", rname, len(PDF), "2026-09-12")
+    lname = resumes.letter_upload_name("Acme", "1", ".pdf")
+    resumes.write_atomic(resumes.path_for(lname), PDF)
+    store.set_posting_letter(conn, "Acme", "1", lname, len(PDF), "2026-09-12")
+    conn.commit()
+    conn.close()
+    h = _handler(db, _bank(paths))
+    _apply(h)
+    return db, h
+
+
+def test_a_document_you_never_attached_can_be_taken_back_out(paths):
+    """The freeze records the document that was *in effect*, which a letter
+    `coverletter build` wrote is whether or not you attached it to the employer's form.
+    Left standing it reads, months later, as a letter you sent."""
+    db, h = _applied_with_both(paths)
+    conn = store.connect(db)
+    row = store.get_submission(conn, "Acme", "1")
+    letter = submissions.archived_path(row, "letter")
+    resume = submissions.archived_path(row, "resume")
+    assert letter.is_file() and resume.is_file()
+    conn.close()
+
+    res = h._api_submission_clear(
+        {"company": "Acme", "ats_job_id": "1", "kind": "letter"})
+    assert res["ok"] is True
+
+    conn = store.connect(db)
+    row = store.get_submission(conn, "Acme", "1")
+    assert row["letter"] is None and row["letter_kind"] == ""
+    assert not letter.exists()
+    # Subtractive and scoped to one document: the resume is untouched, bytes and all.
+    assert row["resume"] and resume.read_bytes() == PDF
+
+
+def test_taking_a_document_out_is_still_possible_after_an_employer_replied(paths):
+    """The opposite of "Update what I submitted", which stops at `applied` because it
+    rewrites the row from the documents in effect now. This one only ever removes, and
+    the month you notice the record is wrong is rarely the month you applied."""
+    db, h = _applied_with_both(paths)
+    conn = store.connect(db)
+    store.advance_application(conn, "Acme", "1", "Backend Engineer, New Grad",
+                              "interview", "2026-09-20T09:00:00")
+    conn.commit()
+
+    body = _body(_page(conn)[0])
+    assert "p-resubmit" not in body and "sub-drop" in body
+    conn.close()
+
+    assert h._api_submission_clear(
+        {"company": "Acme", "ats_job_id": "1", "kind": "letter"})["ok"] is True
+    conn = store.connect(db)
+    assert store.get_submission(conn, "Acme", "1")["letter"] is None
+
+
+def test_the_control_is_absent_for_a_document_that_did_not_go_out(paths):
+    """A button offering to remove what is already recorded as "none went out" is a
+    control with nothing to do, on the one page whose job is to be exact."""
+    db, conn = _db(paths)
+    store.advance_application(conn, "Acme", "1", "Backend Engineer, New Grad",
+                              "applied", "2026-09-12T09:00:00")
+    store.freeze_submission(conn, "Acme", "1", "2026-09-12T09:00:00",
+                            resume="resume.pdf", resume_kind="default")
+    conn.commit()
+    body = _body(_page(conn)[0])
+    assert body.count('class="sub-drop') == 1
+    assert 'data-kind="resume"' in body and 'class="sub-drop danger" data-kind="letter"' \
+        not in body
+
+
+def test_taking_out_what_is_not_there_is_refused_and_writes_nothing(paths):
+    """Twice is not an error you can act on differently the second time, so it is a
+    refusal — and a refused write writes nothing, `/applications`' rule."""
+    db, h = _applied_with_both(paths)
+    assert h._api_submission_clear(
+        {"company": "Acme", "ats_job_id": "1", "kind": "letter"})["ok"] is True
+    res = h._api_submission_clear(
+        {"company": "Acme", "ats_job_id": "1", "kind": "letter"})
+    assert res["ok"] is False and "nothing was recorded" in res["error"]
+
+    conn = store.connect(db)
+    row = store.get_submission(conn, "Acme", "1")
+    assert row["resume"] and submissions.archived_path(row, "resume").is_file()
+
+
+def test_a_document_kind_the_record_does_not_have_is_refused(paths):
+    """`kind` names a column, so it is checked against the tuple rather than bound."""
+    db, h = _applied_with_both(paths)
+    for kind in ("answers", "submitted_at", ""):
+        res = h._api_submission_clear(
+            {"company": "Acme", "ats_job_id": "1", "kind": kind})
+        assert res["ok"] is False, kind
+    conn = store.connect(db)
+    row = store.get_submission(conn, "Acme", "1")
+    assert row["resume"] and row["letter"]
+
+
+def test_the_clear_route_is_wired_into_the_post_table(paths):
+    """The button, its handler and the endpoint sit in three places. A method nothing
+    dispatches to is the same dead control seen from the other end, so this one goes
+    through `do_POST` rather than calling the method."""
+    import io
+
+    db, h = _applied_with_both(paths)
+    body = json.dumps({"company": "Acme", "ats_job_id": "1", "kind": "letter"}).encode()
+    h.path = "/api/submission/clear"
+    h.headers = {"Content-Length": str(len(body))}
+    h.rfile = io.BytesIO(body)
+    sent = {}
+    h._send_json = lambda payload, status=200: sent.update(payload=payload,
+                                                           status=status)
+
+    h.do_POST()
+
+    assert sent["payload"]["ok"] is True
+    conn = store.connect(db)
+    assert store.get_submission(conn, "Acme", "1")["letter"] is None
+
+
+def test_dropping_a_document_on_a_posting_with_no_submission_is_a_no_op(paths):
+    db, conn = _db(paths)
+    assert submissions.drop_document(conn, "Acme", "1", "resume") is None
+
+
 # -- every control has a handler on the page that renders it -------------------------
 def test_every_control_on_the_posting_page_has_a_handler_in_its_own_script(paths):
     """The regression this repo already shipped: a button rendered by one file with its
@@ -377,11 +507,12 @@ def test_every_control_on_the_posting_page_has_a_handler_in_its_own_script(paths
     classes = set(re.findall(r'<button class="([a-z-]+)', body))
     classes |= set(re.findall(r'<button class=([a-z-]+)>', body))
     assert classes == {"q-save", "q-del", "q-add", "p-upload", "p-clear",
-                       "p-resubmit", "app-save", "app-meta"}
+                       "p-resubmit", "sub-drop", "app-save", "app-meta"}
     for cls in classes:
         assert f"button.{cls}" in script, cls
     for endpoint in ("/api/posting-answer", "/api/posting-resume", "/api/posting-letter",
-                     "/api/submission", "/api/application", "/api/disposition"):
+                     "/api/submission", "/api/submission/clear", "/api/application",
+                     "/api/disposition"):
         assert endpoint in script, endpoint
     assert page.count("<script>") == 1
 

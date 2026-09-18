@@ -3206,6 +3206,37 @@ def freeze_submission(
     return bool(cur.rowcount)
 
 
+SUBMISSION_DOCUMENTS = ("resume", "letter")
+
+
+def clear_submission_document(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, kind: str
+) -> bool:
+    """Record that one document did **not** go out. True if this write landed.
+
+    The second writer of this table, and deliberately not `freeze_submission(replace=True)`
+    wearing a different hat. That call re-reads what is in effect *now* and rewrites the
+    whole row with it, which is why it is scoped to an application still at `applied`.
+    This one only ever removes: it cannot put today's document into yesterday's record,
+    so a record you discover is wrong in November is still correctable in November.
+
+    False covers both "no submission" and "nothing was recorded for that document". The
+    caller tells those apart from the row it read anyway, to learn which file to delete.
+
+    `kind` names a column, so it is checked against the tuple rather than bound.
+    """
+    if kind not in SUBMISSION_DOCUMENTS:
+        raise ValueError(f"unknown submission document {kind!r}")
+    cur = conn.execute(
+        f"""
+        UPDATE application_submissions SET {kind}=NULL, {kind}_kind=''
+         WHERE company=? AND ats_job_id=? AND {kind} IS NOT NULL
+        """,
+        (company, ats_job_id),
+    )
+    return bool(cur.rowcount)
+
+
 def get_submission(
     conn: sqlite3.Connection, company: str, ats_job_id: str
 ) -> Optional[sqlite3.Row]:

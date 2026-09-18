@@ -10,12 +10,17 @@ repo that copies a document rather than deriving one.
 so a stored name goes on resolving forever while coming to mean a document you never sent.
 Copying is the only form of "this is what I sent" that survives the next rebuild.
 
-Two questions live here, and keeping them in one module is the point — the page that shows
+These live together, and keeping them in one module is the point — the page that shows
 you which resume is in effect and the freeze that records it must not be able to disagree,
 which is the rule `resumes.py` was extracted for:
 
     effective_resume / effective_letter   which document would go out right now
     freeze                                copy those, and write the row
+    drop_document                         take one back out: it never went
+
+The third is the correction the other two make necessary. A letter `coverletter build`
+wrote is in effect for a posting whether or not you attached it to the employer's form,
+so the freeze records it — and a record nobody can amend is one you learn to distrust.
 
 Everything is keyed on `(company, ats_job_id)`, so a manual application — no `postings`
 row at all — records exactly as well as a tracked one.
@@ -204,13 +209,51 @@ def freeze(
     }
 
 
+def drop_document(
+    conn: sqlite3.Connection, company: str, ats_job_id: str, kind: str
+) -> Optional[str]:
+    """Record that one frozen document did not go out. Returns the name dropped, or None.
+
+    The correction for the gap between "this tracker built a document" and "I attached
+    it" — a cover letter `coverletter build` wrote is *in effect* for a posting whether
+    or not you uploaded it to the employer's form, so the freeze records it. Left alone
+    it reads, months later, as a letter you sent.
+
+    It removes and never adds, which is why it is not scoped to `applied` the way "Update
+    what I submitted" is. That call rewrites the row from what is in effect *now*, so
+    after a reply it would be inventing history; this one can only ever say less than the
+    row already said, and the moment you notice the record is wrong is usually long after
+    someone has replied.
+
+    **The row goes first, then the bytes** — `_api_posting_letter_clear`'s rule. An
+    orphaned file under SUBMISSIONS_DIR is inert; a row naming a file that is not there
+    logs on every lookup and renders a download that 404s. A failed unlink is a log, not
+    an exception: the record is already correct.
+    """
+    if kind not in store.SUBMISSION_DOCUMENTS:
+        raise ValueError(f"unknown submission document {kind!r}")
+    row = store.get_submission(conn, company, ats_job_id)
+    if row is None:
+        return None
+    name, path = row[kind], archived_path(row, kind)
+    if not store.clear_submission_document(conn, company, ats_job_id, kind):
+        return None
+    if path is not None:
+        try:
+            path.unlink()
+        except OSError as exc:
+            log.warning("could not remove %s: %s", path, exc)
+    log.info("submission %s/%s: %s dropped (%s)", company, ats_job_id, kind, name)
+    return name
+
+
 def archived_path(row, kind: str) -> Optional[Path]:
     """Where one frozen document sits, from a submission row, or None.
 
     The single derivation the download route and the page both use — a second copy of this
     expression is how a link and a label come to mean different files.
     """
-    if row is None or kind not in ("resume", "letter"):
+    if row is None or kind not in store.SUBMISSION_DOCUMENTS:
         return None
     try:
         name = row[kind]
