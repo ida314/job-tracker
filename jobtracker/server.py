@@ -4307,6 +4307,12 @@ class Handler(BaseHTTPRequestHandler):
         Same validation as `/api/resume` — it is literally the same function — and the
         same ordering rule: the file lands before anything points at it.
 
+        The gate is `_known_posting`, the same one `/api/posting-letter` and
+        `/api/posting-answer` use. It read `postings` alone until 2026-09-20, so a manual
+        application — which has no posting row, and is the record you most want — was
+        refused here while the page rendered a live-looking upload button beside the two
+        writes that accepted it.
+
         It answers flatly, like its letter sibling, and deliberately does **not** re-plan.
         Tailing into `_rebuild_plan` and `setdefault("ok", True)` reported a write that had
         already been committed as a refusal: `setdefault` cannot overwrite an explicit
@@ -4321,11 +4327,7 @@ class Handler(BaseHTTPRequestHandler):
 
         conn = self._conn()
         try:
-            row = conn.execute(
-                "SELECT title FROM postings WHERE company=? AND ats_job_id=?",
-                (company, job_id),
-            ).fetchone()
-            if row is None:
+            if self._known_posting(conn, company, job_id) is None:
                 return {"ok": False, "error": "no such posting"}
             try:
                 blob, suffix = resumes.validate_upload(

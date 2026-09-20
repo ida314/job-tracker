@@ -373,7 +373,10 @@ the questions it asks beyond them, and — after applying — what you actually 
   a posting is not a tab, and a detail page with no way back is where that would be felt.
 - **It never joins `postings`.** A manual application has no posting row, and it is the one you
   most want a record of. Read `applications` first, `store.posting_detail` second, and 404 only
-  when both are empty.
+  when both are empty. **`_known_posting` is the single gate for all three of its writes** —
+  resume, letter, answer — and it resolves a pair through `postings` *or* `applications`. A
+  second inline `SELECT … FROM postings` is how the resume upload came to refuse a manual
+  entry that its two siblings accepted; a parity test now reads the gate off the source.
 - **Each of those writes answers for itself, flatly, and nothing after the commit may decide
   its answer.** The resume upload tailed into `_rebuild_plan` — prefill-era, and with prefill
   mothballed it can only ever refuse — under a `setdefault("ok", True)` that cannot overwrite

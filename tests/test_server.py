@@ -1363,6 +1363,35 @@ def test_clearing_a_posting_resume_falls_back_to_the_bank(tmp_path, monkeypatch)
     assert h._api_posting_resume_clear({"company": "Acme", "ats_job_id": "1"})["ok"] is False
 
 
+def test_a_manual_application_can_take_a_resume_override(tmp_path, monkeypatch):
+    """`_known_posting` is the one gate for all three of this page's writes. The resume
+    upload read `postings` alone until 2026-09-20, so a manual application — which has no
+    posting row, and is the record you most want — was refused here while the page
+    rendered a live-looking upload button, and while its two siblings accepted it."""
+    db = _fresh(tmp_path)
+    monkeypatch.setattr(config, "RESUMES_DIR", tmp_path / "resumes")
+    h = _handler_for(db, config.CRITERIA_YAML, _own_bank(tmp_path))
+    made = h._api_application({"company": "Some Startup",
+                               "title": "Backend Engineer (Referral)"})
+    job = made["ats_job_id"]
+    ident = {"company": "Some Startup", "ats_job_id": job}
+
+    res = h._api_posting_resume({**ident, "filename": "cv.pdf",
+                                 "content_b64": _b64(PDF)})
+    assert res["ok"] is True, res
+    # The two writes that already took it, asserted beside it: this is a parity bug.
+    assert h._api_posting_letter({**ident, "filename": "l.pdf",
+                                  "content_b64": _b64(PDF)})["ok"] is True
+    assert h._api_posting_answer({**ident, "question": "Why us?",
+                                  "answer": "because"})["ok"] is True
+
+    conn = store.connect(db)
+    assert store.get_posting_resume(conn, "Some Startup", job)["filename"] \
+        == res["filename"]
+    conn.close()
+    assert (tmp_path / "resumes" / res["filename"]).exists()
+
+
 def test_a_write_that_landed_must_not_report_as_a_refusal(tmp_path, monkeypatch):
     """The upload tailed into `_rebuild_plan` and `out.setdefault("ok", True)`, which
     cannot overwrite an explicit False. `_rebuild_plan` refuses whenever no form has been
@@ -1408,6 +1437,19 @@ def test_clearing_a_posting_resume_reports_ok_with_prefill_off(tmp_path, monkeyp
     assert store.get_posting_resume(conn, "Acme", "1") is None
     conn.close()
     assert not (tmp_path / "resumes" / res["filename"]).exists()
+
+
+def test_every_posting_write_gates_through_the_same_helper():
+    """Read off the source, because this drift is invisible from a passing test of any
+    one endpoint: each answers "is this a pair I may write against?" correctly for the
+    rows it was written against. Two implementations of that question is how the resume
+    upload came to refuse a manual application its two siblings accepted."""
+    import inspect
+
+    for name in ("_api_posting_resume", "_api_posting_letter", "_api_posting_answer"):
+        src = inspect.getsource(getattr(server.Handler, name))
+        assert "self._known_posting(conn, company, job_id) is None" in src, name
+        assert "FROM postings WHERE company" not in src, name
 
 
 def test_a_missing_override_file_reads_as_no_override_not_as_an_error(tmp_path, monkeypatch):

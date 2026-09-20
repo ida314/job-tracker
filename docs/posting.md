@@ -130,7 +130,18 @@ and the third is the one that bites:
 The `_letter` infix is what keeps it off the resume override for the same posting, which
 `stored_name` mints from the identical digest.
 
-### What each upload answers
+### What each upload gates on, and what it answers
+
+The two uploads are symmetric, and the symmetry is a thing that has to be maintained
+rather than a thing that holds by itself. Both `/api/posting-resume` and
+`/api/posting-letter` — and `/api/posting-answer` with them — gate on
+`Handler._known_posting`, which resolves a pair through `postings` **or**
+`applications`. That second half is the whole point: a manual application has no posting
+row, and it is the record you most want to keep a document against. Until 2026-09-20 the
+resume upload carried its own inline `SELECT … FROM postings`, so it answered "no such
+posting" for a manual entry while the page rendered the upload button and the other two
+writes took it. A parity test reads the gate off the source of all three, because the
+drift is invisible from a passing test of any one of them.
 
 Both answer flatly — `{"ok": true, "filename": …, "bytes": …}` for an upload,
 `{"ok": true, "detail": "removed"}` for a clear — and neither does anything after the
