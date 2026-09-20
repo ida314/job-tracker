@@ -4306,6 +4306,13 @@ class Handler(BaseHTTPRequestHandler):
 
         Same validation as `/api/resume` — it is literally the same function — and the
         same ordering rule: the file lands before anything points at it.
+
+        It answers flatly, like its letter sibling, and deliberately does **not** re-plan.
+        Tailing into `_rebuild_plan` and `setdefault("ok", True)` reported a write that had
+        already been committed as a refusal: `setdefault` cannot overwrite an explicit
+        False, and with prefill mothballed a posting has no learned form, so that call can
+        only ever refuse. The page's handler alerts and skips its reload on `!ok`, so the
+        override landed and the page went on saying it had not.
         """
         company = str(payload.get("company") or "")
         job_id = str(payload.get("ats_job_id") or "")
@@ -4333,18 +4340,17 @@ class Handler(BaseHTTPRequestHandler):
             conn.commit()
             log.info("resume for %s %s saved as %s (%d bytes)",
                      company, job_id, name, len(blob))
-            # Re-plan immediately, so the card can say what changed rather than telling
-            # you to wait for tonight.
-            out = self._rebuild_plan(conn, company, job_id)
-            out.setdefault("ok", True)
-            out["filename"] = name
-            out["bytes"] = len(blob)
-            return out
+            return {"ok": True, "filename": name, "bytes": len(blob)}
         finally:
             conn.close()
 
     def _api_posting_resume_clear(self, payload: dict) -> dict:
-        """Go back to the answer bank's resume for this posting."""
+        """Go back to the answer bank's resume for this posting.
+
+        Flat like `/api/posting-letter/clear`, and for `_api_posting_resume`'s reason: the
+        row is already gone by the time anything else could answer, so nothing after the
+        commit may decide what this endpoint reports.
+        """
         company = str(payload.get("company") or "")
         job_id = str(payload.get("ats_job_id") or "")
         if not company or not job_id:
@@ -4363,9 +4369,7 @@ class Handler(BaseHTTPRequestHandler):
                 path.unlink()
             except OSError:
                 log.warning("could not remove %s", path)
-            out = self._rebuild_plan(conn, company, job_id)
-            out.setdefault("ok", True)
-            return out
+            return {"ok": True, "detail": "removed"}
         finally:
             conn.close()
 

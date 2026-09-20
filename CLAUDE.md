@@ -374,6 +374,11 @@ the questions it asks beyond them, and — after applying — what you actually 
 - **It never joins `postings`.** A manual application has no posting row, and it is the one you
   most want a record of. Read `applications` first, `store.posting_detail` second, and 404 only
   when both are empty.
+- **Each of those writes answers for itself, flatly, and nothing after the commit may decide
+  its answer.** The resume upload tailed into `_rebuild_plan` — prefill-era, and with prefill
+  mothballed it can only ever refuse — under a `setdefault("ok", True)` that cannot overwrite
+  an explicit False. A file and a row that had landed were reported as a refusal, and the
+  page's handler skips its `location.reload()` on `!ok`, so the override stayed invisible.
 - **The question template seeds; it does not own.** `questions.merge` renders
   `question_template` beside `posting_answers` **without writing** — a GET that materialized
   rows would turn opening a page into a claim you had answered something. Saving one copies it

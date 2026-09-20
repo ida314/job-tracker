@@ -130,6 +130,19 @@ and the third is the one that bites:
 The `_letter` infix is what keeps it off the resume override for the same posting, which
 `stored_name` mints from the identical digest.
 
+### What each upload answers
+
+Both answer flatly — `{"ok": true, "filename": …, "bytes": …}` for an upload,
+`{"ok": true, "detail": "removed"}` for a clear — and neither does anything after the
+commit that could decide its answer. The resume half used to tail into
+`_rebuild_plan` and then `setdefault("ok", True)`, which cannot overwrite an explicit
+False; `_rebuild_plan` refuses whenever no application form has been learned, and with
+prefill mothballed none ever is, so every successful upload reported a refusal *after*
+writing the file and the row. `server._JS`'s `p-upload` handler alerts and skips its
+`location.reload()` on `!ok`, which is what made the page go on saying "your default,
+from the answer bank" over an override that had landed. `_rebuild_plan` still exists and
+`/apply` still calls it; what it may not do is answer for a write that already happened.
+
 ---
 
 ## The freeze

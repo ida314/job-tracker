@@ -1306,6 +1306,8 @@ def test_a_posting_resume_leaves_the_answer_bank_and_its_hash_alone(tmp_path, mo
 
     h._api_posting_resume({"company": "Acme", "ats_job_id": "1", "filename": "a.pdf",
                            "content_b64": _b64(PDF)})
+    # The upload itself no longer re-plans; ask for the plan the way `/apply` does.
+    h._api_prefill({"company": "Acme", "ats_job_id": "1"})
 
     assert bank_path.read_text() == before_text
     assert load_answers(bank_path).hash == before_hash
@@ -1314,7 +1316,7 @@ def test_a_posting_resume_leaves_the_answer_bank_and_its_hash_alone(tmp_path, mo
     conn.close()
 
 
-def test_uploading_a_posting_resume_replans_that_posting_only(tmp_path, monkeypatch):
+def test_a_posting_resume_reaches_that_posting_only(tmp_path, monkeypatch):
     db, h = _resume_handler(tmp_path, monkeypatch)
     conn = store.connect(db)
     _posting(conn, job="2", title="Platform Engineer")
@@ -1328,6 +1330,7 @@ def test_uploading_a_posting_resume_replans_that_posting_only(tmp_path, monkeypa
 
     res = h._api_posting_resume({"company": "Acme", "ats_job_id": "1",
                                  "filename": "a.pdf", "content_b64": _b64(PDF)})
+    h._api_prefill({"company": "Acme", "ats_job_id": "1"})
     conn = store.connect(db)
     mine = store.get_plan(conn, "Acme", "1")
     assert mine["resume_key"] == res["filename"]
@@ -1345,6 +1348,7 @@ def test_clearing_a_posting_resume_falls_back_to_the_bank(tmp_path, monkeypatch)
     res = h._api_posting_resume({"company": "Acme", "ats_job_id": "1",
                                  "filename": "a.pdf", "content_b64": _b64(PDF)})
     assert h._api_posting_resume_clear({"company": "Acme", "ats_job_id": "1"})["ok"] is True
+    h._api_prefill({"company": "Acme", "ats_job_id": "1"})
 
     conn = store.connect(db)
     assert store.get_posting_resume(conn, "Acme", "1") is None
@@ -1357,6 +1361,53 @@ def test_clearing_a_posting_resume_falls_back_to_the_bank(tmp_path, monkeypatch)
     assert not (tmp_path / "resumes" / res["filename"]).exists()
     # Clearing something that was never set is a refusal, not a silent success.
     assert h._api_posting_resume_clear({"company": "Acme", "ats_job_id": "1"})["ok"] is False
+
+
+def test_a_write_that_landed_must_not_report_as_a_refusal(tmp_path, monkeypatch):
+    """The upload tailed into `_rebuild_plan` and `out.setdefault("ok", True)`, which
+    cannot overwrite an explicit False. `_rebuild_plan` refuses whenever no form has been
+    learned — which with prefill mothballed is always — so a successful upload answered
+    ok:false, after the row and the file were already committed. The page's handler alerts
+    and skips its reload on that, leaving "your default, from the answer bank" printed
+    over an override that had landed."""
+    db = _fresh(tmp_path)
+    monkeypatch.setattr(config, "RESUMES_DIR", tmp_path / "resumes")
+    monkeypatch.setattr(config, "PREFILL_ENABLED", False)
+    conn = store.connect(db)
+    _posting(conn)          # a tracked posting, and deliberately no learned form
+    conn.commit()
+    conn.close()
+    h = _handler_for(db, config.CRITERIA_YAML, _own_bank(tmp_path))
+
+    res = h._api_posting_resume({"company": "Acme", "ats_job_id": "1",
+                                 "filename": "cv.pdf", "content_b64": _b64(PDF)})
+    assert res == {"ok": True, "filename": res.get("filename"), "bytes": len(PDF)}
+    conn = store.connect(db)
+    assert store.get_posting_resume(conn, "Acme", "1")["filename"] == res["filename"]
+    conn.close()
+    assert (tmp_path / "resumes" / res["filename"]).read_bytes() == PDF
+
+
+def test_clearing_a_posting_resume_reports_ok_with_prefill_off(tmp_path, monkeypatch):
+    """The clear tail had the same shape, and the row is gone by the time anything else
+    could answer for it."""
+    db = _fresh(tmp_path)
+    monkeypatch.setattr(config, "RESUMES_DIR", tmp_path / "resumes")
+    monkeypatch.setattr(config, "PREFILL_ENABLED", False)
+    conn = store.connect(db)
+    _posting(conn)
+    conn.commit()
+    conn.close()
+    h = _handler_for(db, config.CRITERIA_YAML, _own_bank(tmp_path))
+    res = h._api_posting_resume({"company": "Acme", "ats_job_id": "1",
+                                 "filename": "cv.pdf", "content_b64": _b64(PDF)})
+
+    assert h._api_posting_resume_clear({"company": "Acme", "ats_job_id": "1"}) \
+        == {"ok": True, "detail": "removed"}
+    conn = store.connect(db)
+    assert store.get_posting_resume(conn, "Acme", "1") is None
+    conn.close()
+    assert not (tmp_path / "resumes" / res["filename"]).exists()
 
 
 def test_a_missing_override_file_reads_as_no_override_not_as_an_error(tmp_path, monkeypatch):
