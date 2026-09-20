@@ -141,6 +141,16 @@ COVERLETTER_TEX = Path(
 # tailored resumes — nothing here is authored by hand and deleting it costs a rebuild.
 LETTERS_DIR = Path(os.environ.get("JOBTRACKER_LETTERS", ROOT / "data" / "letters"))
 
+# Where a saved document goes — the tailored resume, the cover letter, and the LaTeX
+# each is compiled from, four destinations set independently. Curated like the files
+# above and written by the Settings page on a click you made, the same standing as
+# keywords.yaml.
+#
+# Absent is a normal state and means all four fall back to $JOBTRACKER_DOWNLOAD_RESUME
+# and friends, then to ~/Downloads. See jobtracker/downloads.py, which owns the
+# precedence and is the only thing that reads it.
+DOWNLOADS_YAML = Path(os.environ.get("JOBTRACKER_DOWNLOADS", ROOT / "downloads.yaml"))
+
 # Which technologies `tailor` is allowed to write onto your resume. Curated like the
 # three above, and written by the Settings page on a click you made — the same standing
 # as companies.yaml, which /companies appends to.

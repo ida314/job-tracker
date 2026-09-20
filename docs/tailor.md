@@ -308,27 +308,28 @@ drawer under Today — carries a chip when `tailor` has proposed something, and 
 `↓`. The three picks carry the same `↓` — beside the cover letter's `✉` — on a documents
 line of their own (`_docs_line`, since 2026-09-11), rendered by the same `_tailor_control`
 and without `data-act`. Under `serve` only: the static dashboard renders no actions column,
-and the download is a `/api/` href, which is as dead in a mailed file as a button would be.
+and these POST to `/api/`, which is as dead in a mailed file as a button would be.
 
-The `↓` is a build button until the PDF exists and a download link afterwards, because
+The `↓` is a build button until the PDF exists and a save button afterwards, because
 nothing stores the path — `resume_suggestions` has no path column, so the file's own presence
 under `$JOBTRACKER_TAILORED` is what "built" means. Pressing it POSTs to `/api/tailor-build`,
 which compiles on a daemon thread and answers `building` / `ready` / `error`; the page polls
 the same endpoint, which starts at most one build per posting.
 
-Beside the `↓`, in both of its states, is `tex`: it copies the LaTeX the PDF is compiled
-from to the clipboard. `GET /api/tailored-tex` is a pure read through
-`server._tailored_source`, the same helper the build endpoint calls, so the clipboard and
-the PDF agree on which edits landed and which are held. It asks for no TeX engine, which is
-what makes it useful on a machine without tectonic. `serve` is usually plain http on a
-tailnet address — not a secure context, so `navigator.clipboard` is absent — and the
-handler falls back to a hidden-textarea `execCommand('copy')`, saying so if the browser
-refuses both. One caveat: a PDF built before a keyword ruling is not rebuilt by a plain
-`↓`, while the copy is always derived now, so the two can differ until Finish rebuilds it.
+Beside the `↓`, in both of its states, is `tex`: it saves the LaTeX the PDF is compiled
+from. Both go through `POST /api/download`, which writes the file into the folder Settings
+names for that kind and answers with the path — `docs/downloads.md` covers why the server
+writes it rather than the browser. The source is derived through `server._tailored_source`,
+the same helper the build endpoint calls, so the `.tex` on disk and the PDF agree on which
+edits landed and which are held; it asks for no TeX engine, which is what makes it useful
+on a machine without tectonic. `GET /api/tailored-tex` is still that pure read, for a
+`curl`. One caveat: a PDF built before a keyword ruling is not rebuilt by a plain `↓`,
+while the source is always derived now, so the two can differ until Finish rebuilds it.
 
-**This is not accepting.** A compile sends nothing to an employer and a downloaded PDF is a
-document you then read. Attaching one to an application is still `tailor build --attach`,
-after the diff has been read at `/apply`, which is where the reasoning is rendered.
+**This is not accepting.** A compile sends nothing to an employer, and a copy in a folder
+of yours is a document you then read. Attaching one to an application is still
+`tailor build --attach`, after the diff has been read at `/apply`, which is where the
+reasoning is rendered.
 
 Every refusal is named rather than generic, because the build runs where nothing can report
 back to the click: no suggestions, dismissed ones, no resume source, no edit that still

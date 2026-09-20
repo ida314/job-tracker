@@ -14,12 +14,13 @@ import threading
 import time
 import urllib.parse
 from html.parser import HTMLParser
+from pathlib import Path
 
 import pytest
 import yaml
 
-from jobtracker import (config, curation, dashboard, letter as letter_mod, models,
-                        resume, server, store)
+from jobtracker import (config, curation, dashboard, downloads as downloads_mod,
+                        letter as letter_mod, models, resume, server, store)
 from jobtracker.criteria import load_criteria
 
 # Titles, locations and URLs all arrive from third-party ATS APIs and are
@@ -146,7 +147,7 @@ def test_regressions_are_surfaced(criteria):
 # render_tuning it needs no socket: a Handler carries only the paths off .server.
 class _FakeServer:
     def __init__(self, db_path, criteria_path, answers_path=None, companies_path=None,
-                 keywords_path=None):
+                 keywords_path=None, downloads_path=None):
         self.db_path = db_path
         self.criteria_path = criteria_path
         # Like `answers_path`: `serve` only sets it when --keywords was passed, and the
@@ -158,13 +159,18 @@ class _FakeServer:
         # which needs a concrete path, so its tests pass one.
         self.companies_path = companies_path
         self.answers_path = answers_path or config.ANSWERS_YAML
+        # `keywords_path`'s rule again: `serve` only sets it when --downloads was passed.
+        # The save routes write to a real directory, so their tests always pass a
+        # concrete one — a default that fell through to the repo's file would put test
+        # documents in the developer's own ~/Downloads.
+        self.downloads_path = downloads_path or config.DOWNLOADS_YAML
 
 
 def _handler_for(db_path, criteria_path, answers_path=None, companies_path=None,
-                 keywords_path=None):
+                 keywords_path=None, downloads_path=None):
     h = server.Handler.__new__(server.Handler)
     h.server = _FakeServer(db_path, criteria_path, answers_path, companies_path,
-                           keywords_path)
+                           keywords_path, downloads_path)
     return h
 
 
@@ -4503,3 +4509,215 @@ def test_the_applications_page_sorts_by_query_and_the_bar_is_links(tmp_path):
     # An unknown key is the default view, and is never echoed back.
     assert 'data-sort="urgency" aria-pressed="true"' in junk
     assert "<script>" not in junk.replace("<script>", "", 1)
+
+
+# -- saving a document to a folder you chose -----------------------------------------
+# `/api/download` and `/api/download-dir`. The write path behind the actions cell's four
+# controls, and the Settings card that says where each of them puts things. Tested
+# through the handler methods rather than a socket, the way every other api method here
+# is.
+def _downloads_at(tmp_path, **kinds):
+    """A downloads.yaml pointing every kind at a directory under tmp_path."""
+    path = tmp_path / "downloads.yaml"
+    raw = {k: str(kinds.get(k, tmp_path / "out")) for k in downloads_mod.KINDS}
+    path.write_text(downloads_mod.render(raw))
+    return path
+
+
+def test_saving_a_built_resume_writes_it_where_settings_says(tmp_path, monkeypatch):
+    """The feature: a web page cannot aim a browser download, so the server writes the
+    file and names where it went."""
+    out = tmp_path / "tailored"
+    out.mkdir()
+    name = f"{resume.tailored_stem('Acme', '1')}.pdf"
+    (out / name).write_bytes(b"%PDF-1.4 hello")
+    monkeypatch.setattr(config, "TAILORED_DIR", out)
+    dest = tmp_path / "my resumes"
+
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML,
+                     downloads_path=_downloads_at(tmp_path, resume=dest))
+    res = h._api_download({"company": "Acme", "ats_job_id": "1", "kind": "resume"})
+
+    assert res["ok"] is True
+    assert res["path"] == str(dest / name)
+    assert (dest / name).read_bytes() == b"%PDF-1.4 hello"
+
+
+def test_each_kind_goes_to_its_own_folder(tmp_path, monkeypatch, template):
+    """Four destinations rather than one, because the PDF you attach to an employer's
+    form and the LaTeX you keep under version control do not belong together."""
+    db = _letter_db(tmp_path, template)
+    built = tmp_path / "letters"
+    built.mkdir()
+    lname = f"{letter_mod.letter_stem('Acme', '1')}.pdf"
+    (built / lname).write_bytes(b"%PDF letter")
+    monkeypatch.setattr(config, "LETTERS_DIR", built)
+
+    pdfs, texs = tmp_path / "pdfs", tmp_path / "texs"
+    h = _handler_for(db, config.CRITERIA_YAML,
+                     downloads_path=_downloads_at(tmp_path, letter=pdfs,
+                                                  letter_tex=texs))
+    assert h._api_download({"company": "Acme", "ats_job_id": "1",
+                            "kind": "letter"})["ok"] is True
+    assert h._api_download({"company": "Acme", "ats_job_id": "1",
+                            "kind": "letter_tex"})["ok"] is True
+
+    assert [f.name for f in pdfs.iterdir()] == [lname]
+    stem = letter_mod.letter_stem("Acme", "1")
+    assert [f.name for f in texs.iterdir()] == [f"{stem}.tex"]
+    assert r"\documentclass" in (texs / f"{stem}.tex").read_text()
+
+
+def test_saving_a_source_is_the_text_the_build_would_compile(tmp_path, monkeypatch):
+    """The same derivation `/api/tailored-tex` reads, so the file on your desk and the
+    PDF the `↓` saves cannot come to mean different documents."""
+    db = _tailor_db(tmp_path)
+    _with_resume(monkeypatch)
+    dest = tmp_path / "tex"
+    h = _handler_for(db, config.CRITERIA_YAML,
+                     downloads_path=_downloads_at(tmp_path, resume_tex=dest))
+    res = h._api_download({"company": "Acme", "ats_job_id": "1", "kind": "resume_tex"})
+
+    assert res["ok"] is True
+    assert Path(res["path"]).read_text() == "line 0\nline 1\n tailored"
+
+
+def test_saving_a_source_needs_no_tex_engine(tmp_path, monkeypatch):
+    """Tectonic is in the serve image only. The source is text, and on a machine that
+    cannot compile it this is the only half that can answer at all."""
+    db = _tailor_db(tmp_path)
+    started = _no_thread(monkeypatch)
+    _with_resume(monkeypatch, fmt=_FakeFormat(blocked="tectonic is not installed"))
+    h = _handler_for(db, config.CRITERIA_YAML,
+                     downloads_path=_downloads_at(tmp_path))
+    assert h._api_download({"company": "Acme", "ats_job_id": "1",
+                            "kind": "resume_tex"})["ok"] is True
+    assert started == []
+
+
+def test_saving_refuses_when_nothing_has_been_built(tmp_path, monkeypatch):
+    """Never built and built-then-deleted are the same fact, and the page's answer to
+    either is the build button. Nothing is written for either."""
+    monkeypatch.setattr(config, "TAILORED_DIR", tmp_path / "tailored")
+    dest = tmp_path / "out"
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML,
+                     downloads_path=_downloads_at(tmp_path, resume=dest))
+    res = h._api_download({"company": "Acme", "ats_job_id": "1", "kind": "resume"})
+    assert res["ok"] is False
+    assert "has been built" in res["error"]
+    assert not dest.exists()
+
+
+def test_saving_refuses_a_document_this_does_not_have(tmp_path):
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML,
+                     downloads_path=_downloads_at(tmp_path))
+    assert h._api_download({"company": "Acme", "ats_job_id": "1",
+                            "kind": "passport"})["ok"] is False
+    assert h._api_download({"company": "", "ats_job_id": "1",
+                            "kind": "resume"})["ok"] is False
+
+
+def test_saving_refuses_rather_than_guessing_when_the_file_will_not_parse(tmp_path,
+                                                                         monkeypatch):
+    """Putting a document somewhere other than where you said is the one failure this
+    feature has, so a destination nobody can be sure of is refused rather than quietly
+    replaced by ~/Downloads."""
+    out = tmp_path / "tailored"
+    out.mkdir()
+    (out / f"{resume.tailored_stem('Acme', '1')}.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(config, "TAILORED_DIR", out)
+    broken = tmp_path / "downloads.yaml"
+    broken.write_text("resume: [oh no\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML, downloads_path=broken)
+    res = h._api_download({"company": "Acme", "ats_job_id": "1", "kind": "resume"})
+    assert res["ok"] is False
+    assert "did not parse" in res["error"]
+    assert not (tmp_path / "Downloads").exists()
+
+
+def test_setting_a_destination_writes_the_file_and_keeps_its_comments(tmp_path,
+                                                                     monkeypatch):
+    """The same candidate-parse-backup-swap every curated file here gets, and the same
+    standing as `/api/keyword`: a click somebody made on a page they opened."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _downloads_at(tmp_path)
+    before = path.read_text()
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML, downloads_path=path)
+
+    res = h._api_download_dir({"kind": "letter_tex", "path": "~/tex"})
+    assert res["ok"] is True
+    assert res["path"] == "~/tex"
+    assert res["expanded"] == str(tmp_path / "tex")
+
+    after = path.read_text()
+    assert "letter_tex: '~/tex'" in after
+    assert all(line in after for line in before.splitlines() if line.startswith("#"))
+    assert downloads_mod.load_raw(path)["resume"] == str(tmp_path / "out")
+
+
+def test_a_refused_destination_writes_nothing(tmp_path, monkeypatch):
+    """A refused write writes nothing, the rule the applications endpoints already
+    follow — and here the old destination has to still be the one in force."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = _downloads_at(tmp_path)
+    before = path.read_text()
+    h = _handler_for(tmp_path / "x.db", config.CRITERIA_YAML, downloads_path=path)
+
+    for bad in ({"kind": "resume", "path": "somewhere/relative"},
+                {"kind": "resume", "path": ""},
+                {"kind": "passport", "path": "/tmp"}):
+        assert h._api_download_dir(bad)["ok"] is False
+    assert path.read_text() == before
+
+
+def test_the_settings_page_offers_every_kind_and_shows_where_it_expands_to(tmp_path,
+                                                                          monkeypatch):
+    """Four fields, each with its own Save — a shared one would let a typo in the third
+    box discard three good paths. The expansion is printed because `~` is the reason you
+    cannot tell at a glance whether two of these are the same folder."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for env in downloads_mod.ENV.values():
+        monkeypatch.delenv(env, raising=False)
+    path = tmp_path / "downloads.yaml"
+    path.write_text("letter: '~/work/letters'\n")
+
+    conn = store.connect(":memory:")
+    page = server.render_settings(conn, config.ANSWERS_YAML, downloads_path=path)
+    conn.close()
+
+    for kind in downloads_mod.KINDS:
+        assert f'class=dldir data-kind="{kind}"' in page, kind
+        assert f'class=save-dldir data-kind="{kind}"' in page, kind
+        assert html.escape(downloads_mod.LABELS[kind]) in page
+    assert page.count("class=save-dldir") == len(downloads_mod.KINDS)
+    assert 'value="~/work/letters"' in page
+    assert str(tmp_path / "work" / "letters") in page
+    # A default must never render as a decision somebody made.
+    assert "not set here, so the built-in default" in page
+
+
+def test_the_settings_page_renders_when_the_downloads_file_will_not_parse(tmp_path):
+    """The keywords banner's shape: this is the page you would open to fix it, so it has
+    to render — and it may not offer a one-click fix, because the writer splices into the
+    text it was handed."""
+    path = tmp_path / "downloads.yaml"
+    path.write_text("resume: [oh no\n")
+    conn = store.connect(":memory:")
+    page = server.render_settings(conn, config.ANSWERS_YAML, downloads_path=path)
+    conn.close()
+    assert "downloads.yaml did not parse" in page
+    assert "Fix it by hand" in page
+
+
+def test_the_save_handler_is_on_the_page_that_renders_the_field(tmp_path):
+    """The regression this repo already shipped: a button rendered by one file with its
+    handler in another file's script."""
+    conn = store.connect(":memory:")
+    page = server.render_settings(conn, config.ANSWERS_YAML,
+                                  downloads_path=tmp_path / "nope.yaml")
+    conn.close()
+    assert "class=save-dldir" in page
+    assert "button.save-dldir" in server._JS
+    assert "/api/download-dir" in server._JS

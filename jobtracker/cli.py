@@ -2526,6 +2526,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
         # bug this repo keeps finding in its own deployment.
         plugins_path=(Path(args.plugins) if getattr(args, "plugins", None)
                       else config.PLUGINS_YAML),
+        # Same reasoning as --plugins: one file, whichever door writes it. The Settings
+        # card and this flag have to name the same destinations, or a document is saved
+        # somewhere other than where the page says it went.
+        downloads_path=(Path(args.downloads) if getattr(args, "downloads", None)
+                        else config.DOWNLOADS_YAML),
     )
 
 
@@ -3001,6 +3006,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help=f"technologies tailor may use (default: {config.KEYWORDS_YAML})")
     sv.add_argument("--plugins", default=None,
                     help=f"which plugins are on (default: {config.PLUGINS_YAML})")
+    sv.add_argument("--downloads", default=None,
+                    help=f"where saved documents go (default: {config.DOWNLOADS_YAML})")
     sv.add_argument("--host", default="127.0.0.1",
                     help="default 127.0.0.1 — it has no auth and can edit criteria.yaml")
     sv.set_defaults(func=cmd_serve)

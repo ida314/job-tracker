@@ -295,10 +295,21 @@ proposed something, a chip and a way to get the compiled PDF.
 - **`resume.tailored_stem` / `tailored_path` are the single derivation.** Nothing stores the
   path; the file's existence is what "built" means. A second copy of that expression is how the
   button and the terminal come to mean different files.
-- **`tex` copies the source the `↓` compiles** — `GET /api/tailored-tex`, a pure read through
-  `server._tailored_source`, the one derivation `/api/tailor-build` also calls. It needs no TeX
-  engine. `serve` over tailnet http is not a secure context, so the handler falls back to
-  `execCommand('copy')`.
+- **All four controls are buttons and every one of them POSTs `/api/download`.** `↓` and `✉`
+  were `<a download>` and `tex`/`tex✉` went to the clipboard; a page cannot aim a browser
+  download and the clipboard is not a place, so the server writes the file into the directory
+  Settings names for that kind. A GET that wrote to your disk is one a prefetch could fire.
+  `SAVES` in `dashboard._JS` is the class→kind table, and **two classes resolving to one kind**
+  is the bug worth catching: the kind picks the filename as well as the folder, so the two PDFs
+  would overwrite each other. There is a test named after it.
+- **`tex` saves the source the `↓` compiles** — `server._tailored_source`, the one derivation
+  `/api/tailor-build` also calls, and it needs no TeX engine. `GET /api/tailored-tex` is still
+  that same pure read and is still the way to get the text without writing a file; nothing in
+  the UI calls it any more.
+- **Nothing is containment-checked on the way out.** That is the feature — the destination is a
+  directory you typed on a page you opened, and `downloads.resolve_dir` is its only check. What
+  stays bounded is the *name*: `tailored_stem`/`letter_stem` slug to `[a-z0-9_]`, so nothing
+  from a posting can contribute a path component.
 - **`/api/tailor-build` is start and poll at once**, idempotent, one build per posting, and a
   failure is reported once then cleared. Everything knowable is decided before the thread exists,
   and a refusal **names the missing engine** — an exception on a daemon thread reaches the log
@@ -880,7 +891,9 @@ The first model role that composes prose, so the bound is not the shape of the a
   reading the diff at `/apply`. **`--attach` writes the PDF into `RESUMES_DIR` as well as
   `TAILORED_DIR`** — `posting_resumes.filename` is resolved by every reader through
   `resumes.path_for`, so recording the tailored file's bare name left an override nothing could
-  open while the pick card printed its name off the row. **Building and downloading are not accepting** and are allowed from
+  open while the pick card printed its name off the row. **Building and saving a copy are not accepting** — a copy in a folder
+  of yours is not a document attached to a posting, and `tailor build --attach` is still the
+  only thing that makes one this posting's resume. Both are allowed from
   the actions cell and, under `serve`, from a Today card's documents line (`_docs_line`), which
   renders the actions cell's own `↓`/`✉` through `_tailor_control`/`_letter_control` with **no
   `data-act`** — that is what keeps `.pick [data-act]` meaning the three disposition buttons. The
@@ -931,13 +944,14 @@ composes a whole document, so `tailor`'s guard does not transfer — it is repla
 - **The actions cell's letter control is `✉`, not a second `↓`.** Two identical glyphs on
   one row is a cell you have to hover to read, and they fetch different documents.
   `interactive`-only, absent until a letter exists, and it carries no `data-act`.
-- **`tex✉` copies the source the `✉` compiles** — `GET /api/coverletter-tex`, a pure read
-  through `server._letter_source`, the one derivation `/api/coverletter-build` also calls.
-  It needs no TeX engine. The envelope is on the label for the same reason it is on the
-  download: the resume's `tex` sits two controls to its left in the same cell, and a bare
-  `tex` on each is the ambiguity that rule exists to prevent. One delegated handler serves
-  both copies, choosing the endpoint off the class and restoring the label it read from
-  the button rather than a hardcoded string.
+- **`tex✉` saves the source the `✉` compiles** — `server._letter_source`, the one
+  derivation `/api/coverletter-build` also calls. It needs no TeX engine. The envelope is
+  on the label for the same reason it is on the save button: the resume's `tex` sits two
+  controls to its left in the same cell, and a bare `tex` on each is the ambiguity that
+  rule exists to prevent. One delegated handler serves all four saves, taking the kind off
+  the class and restoring the label it read from the button rather than a hardcoded string
+  — and reading it from `data-glyph` for the two whose label is an entity, since
+  `textContent` would write `&darr;` back as five literal characters.
 - **`_LETTER_BUILDS` is its own dict, not a namespaced key in `_BUILDS`.** Both are keyed
   by posting and a posting can have both compiling at once; shared, the second start reads
   the first's "building" and the first success drops the entry, so a poll reports ready
@@ -951,6 +965,58 @@ composes a whole document, so `tailor`'s guard does not transfer — it is repla
 - **The guard is not a fact checker.** Grounding proves a paragraph can quote a real
   sentence, never that its claims follow from it. `denied` is the only bound; the rest is
   a prompt. Do not claim more for it.
+
+---
+
+## Where saved documents go
+
+`jobtracker/downloads.py`, `downloads.yaml`, a card on `/settings`, and `POST /api/download`
+/ `POST /api/download-dir`. `docs/downloads.md`. Four destinations, one per document this
+repo compiles for a posting, every one defaulting to `~/Downloads`.
+
+**It exists because a web page cannot aim a browser download.** `↓` and `✉` were
+`<a download>` links, so the file landed wherever the browser had been told to put things and
+nothing here had a say; `tex` and `tex✉` went to the clipboard, which is not a place you can
+open later. `serve` runs on your machine as you, so the server writes the file and names where
+it went.
+
+- **Four kinds, set independently** — `resume`, `letter`, `resume_tex`, `letter_tex`. The PDF
+  you attach to an employer's form and the LaTeX you keep under version control do not belong
+  in the same folder, and one "downloads" setting would make you choose.
+- **Precedence is file, then environment (`$JOBTRACKER_DOWNLOAD_*`), then `~/Downloads`.** The
+  file wins because it is what you typed on a page you opened — a setting the page cannot
+  change is one the page should not be showing you. The env layer is underneath so a container
+  or a service account, where `~/Downloads` is meaningless, has a default worth having.
+- **A path is stored as you wrote it**, `~` and all, and expanded at use. Expanding before the
+  write bakes one machine's home directory into a curated file.
+- **`downloads.yaml` is curation and gitignored** — four absolute paths on one machine, so it
+  is personal config like `plugins.yaml`, not portable curation like `keywords.yaml`. A sixth
+  file written by `serve` on a click, the same standing as the five in *Adding a company*;
+  DESIGN.md §2.3 is intact. The writer is line-oriented text surgery, `keywords.edit`'s reason:
+  the file is mostly the header explaining the four kinds.
+- **The card shows what the file says and nothing else.** `load_raw(path, fill=False)`, so an
+  empty box plus its placeholder is how "you have not set this" reads — a fallback rendered
+  into a text box comes back on the next save as a decision you never made, which is
+  `expected_board_name`'s rule.
+- **One Save per field.** A shared one would let a typo in the third box discard three good
+  paths; these are four independent decisions that happen to be rendered together.
+- **A malformed file refuses the save, it does not fall back.** Putting a document somewhere
+  other than where you said is the one failure this feature has. `/settings` still renders —
+  it is the page you would open to fix it — and offers no one-click fix, the plugins card's
+  caveat: `edit` splices into the text it was handed.
+- **The destination is not containment-checked and the filename is.** `resolve_dir` asks only
+  that a path is absolute and not an existing file; the name comes from `tailored_stem` /
+  `letter_stem`, which slug to `[a-z0-9_]`, so nothing from a posting can contribute a path
+  component.
+- **A missing directory is created; an existing file is replaced.** A destination you typed and
+  have not used yet is the ordinary case. The name is minted from the company and the job id,
+  so the only file it can land on is an earlier copy of the same document — and a browser's
+  `file (3).pdf` habit is exactly what makes you attach the wrong one.
+- **No new derivation.** The two PDFs are read through the checks `_send_tailored` /
+  `_send_coverletter` already make; the two sources come from `_tailored_source` /
+  `_letter_source`, the functions the build endpoints compile from.
+- **Saving is not accepting.** A copy in a folder of yours is not this posting's resume;
+  `tailor build --attach` is still the only thing that makes one.
 
 ---
 

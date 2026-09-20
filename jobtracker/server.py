@@ -32,6 +32,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
 import re
 import signal
 import sqlite3
@@ -50,6 +51,7 @@ from . import (
     config,
     curation,
     dashboard as dashboard_mod,
+    downloads as downloads_mod,
     keywords as kw_mod,
     letter as letter_mod,
     live,
@@ -313,7 +315,8 @@ def render_tuning(conn: sqlite3.Connection, criteria) -> str:
 
 def render_settings(conn: sqlite3.Connection, answers_path: Path,
                     keywords_path: Optional[Path] = None,
-                    plugins_path: Optional[Path] = None) -> str:
+                    plugins_path: Optional[Path] = None,
+                    downloads_path: Optional[Path] = None) -> str:
     """The answer bank and everything still unanswered. Pure read — never writes.
 
     The gap list is the machine's half of the conversation: every question an
@@ -346,6 +349,11 @@ def render_settings(conn: sqlite3.Connection, answers_path: Path,
     p.extend(_identity_card(answers))
     p.extend(_resume_card(answers))
     p.extend(_tailor_section(conn, keywords, kw_error))
+    # Under the tailor, because the thing it configures is where the tailor's output
+    # goes, and above the plugins for the page's own ordering rule — this is
+    # configuration rather than something waiting on you, and so is the switchboard,
+    # but a destination is answered in the same breath as "what did it build".
+    p.extend(_downloads_card(downloads_path))
     # Below the tailor, above the gap lists. It is configuration rather than something
     # waiting on you — the page's own ordering rule — but it belongs on the same page,
     # because "why did nothing happen last night" is answered here more often than
@@ -2392,6 +2400,92 @@ def _load_plugins_quietly(path: Optional[Path]):
         return {}, f"could not read plugins.yaml: {exc}"
 
 
+def _downloads_card(downloads_path: Optional[Path]) -> list:
+    """Where each of the four documents lands when you save it from a posting row.
+
+    The page half of `jobtracker/downloads.py`. Four fields rather than one, because the
+    PDF you attach to an employer's form and the `.tex` you keep under version control
+    do not belong in the same folder, and a single "downloads" setting would make you
+    choose.
+
+    Each field saves on its own. A shared Save would make one refused path — a typo in
+    the third box — discard three good ones, and these are four independent decisions
+    that happen to be rendered together.
+
+    Nothing here writes a document. This is the destination; the `↓`, `✉`, `tex` and
+    `tex✉` controls on a posting row are what put something at it, and they are there
+    rather than here because a document belongs to a posting and this page has none.
+    """
+    # Unfilled: the box shows what the file says and nothing else, so an empty one and
+    # its placeholder are how "you have not set this" reads. A fallback typed into the
+    # input would come back on the next save as a decision you never made.
+    raw, error = _load_downloads_quietly(downloads_path, fill=False)
+    path = downloads_path or config.DOWNLOADS_YAML
+    p = ["<h2 id=downloads>Where saved documents go</h2>"]
+    p.append(
+        "<p class=note>The four documents this repo compiles for a posting. Saving one "
+        "is the <code>&darr;</code>, <code>&#9993;</code>, <code>tex</code> and "
+        "<code>tex&#9993;</code> controls beside a posting; this is where each lands. "
+        f"Written to <code>{html.escape(str(path))}</code>.</p>"
+    )
+    if error:
+        # The keywords banner's shape and the plugins card's caveat: the fields below are
+        # showing a fallback, not a decision, and this page cannot offer to fix the file
+        # because `downloads.edit` splices into the text it was handed — a write over
+        # something nothing could parse would take the rest of it with it.
+        p.append(
+            f"<p class='banner bad'>downloads.yaml did not parse, so every field below "
+            f"is showing its fallback rather than your file — {html.escape(error)}. "
+            f"Saving one would splice into text nothing can read, so the fields are "
+            f"refused until it parses. Fix it by hand.</p>"
+        )
+
+    p.append("<div class=card>")
+    for kind in downloads_mod.KINDS:
+        value = html.escape(raw.get(kind, "") or "", quote=True)
+        safe = html.escape(kind, quote=True)
+        p.append(
+            f"<label class=field><span>{html.escape(downloads_mod.LABELS[kind])}</span>"
+            f'<input class=dldir data-kind="{safe}" type=text value="{value}" '
+            f'placeholder="{html.escape(downloads_mod.default_raw(kind), quote=True)}">'
+            "</label>"
+        )
+        p.append(
+            f'<div class=row><button class=save-dldir data-kind="{safe}">Save</button>'
+            f'<span class=note>{html.escape(_download_note(kind, raw.get(kind, "")))}'
+            "</span></div>"
+        )
+    p.append("</div>")
+    p.append(
+        "<p class=note>Absolute, or starting with <code>~</code>. The directory is "
+        "created the first time something is written into it, and a file already there "
+        "under the same name is replaced &mdash; the name is minted from the company and "
+        "the job id, so the only thing it can land on is an earlier copy of the same "
+        "document.</p>"
+    )
+    return p
+
+
+def _download_note(kind: str, value: str) -> str:
+    """The one line under a destination: where it expands to, or what it falls back to.
+
+    Expanded rather than echoed, because `~` is the whole reason a person cannot tell at
+    a glance whether two of these four are the same directory. Named as a fallback when
+    nothing in the file sets it, for `expected_board_name`'s rule: a default must never
+    render as a decision somebody made.
+    """
+    default = downloads_mod.default_raw(kind)
+    try:
+        where = str(downloads_mod.resolve_dir(value or default))
+    except downloads_mod.RefusedPath as exc:
+        return str(exc)
+    if not value:
+        env = downloads_mod.ENV[kind]
+        whence = f"${env}" if os.environ.get(env, "").strip() else "the built-in default"
+        return f"{where} — not set here, so {whence}"
+    return where
+
+
 def _plugins_card(plugins_path: Optional[Path]) -> list:
     """Every registered plugin, what it is, and the one switch that decides if it runs.
 
@@ -2751,6 +2845,25 @@ def _load_keywords_quietly(path: Optional[Path]):
         return kw_mod.Keywords(), str(exc)
 
 
+def _load_downloads_quietly(path: Optional[Path], fill: bool = True):
+    """(raw destinations, error|None). A broken file is a banner, not a 500.
+
+    `_load_keywords_quietly`'s shape and its reason: this is the page you would open to
+    fix the file, so it has to render. The fallback is the same one an absent file gets —
+    the environment, then `~/Downloads` — and the banner is what stops that reading as a
+    setting somebody chose.
+
+    Like the plugins card, it offers no one-click fix: `downloads.edit` splices into the
+    text it was handed, so writing over a file nothing could parse would take the rest of
+    it with it.
+    """
+    try:
+        return downloads_mod.load_raw(path or config.DOWNLOADS_YAML, fill=fill), None
+    except ValueError as exc:
+        fallback = {k: downloads_mod.default_raw(k) for k in downloads_mod.KINDS}
+        return (fallback if fill else {}), str(exc)
+
+
 def _load_answers_quietly(path: Path):
     """(Answers|None, error|None). A missing or broken file is a page, not a 500."""
     from .answers import load_answers
@@ -2771,7 +2884,8 @@ class TuningServer(HTTPServer):
                  companies_path: Optional[Path],
                  answers_path: Optional[Path] = None,
                  keywords_path: Optional[Path] = None,
-                 plugins_path: Optional[Path] = None) -> None:
+                 plugins_path: Optional[Path] = None,
+                 downloads_path: Optional[Path] = None) -> None:
         super().__init__(addr, handler)
         self.db_path = db_path
         self.criteria_path = criteria_path
@@ -2779,6 +2893,7 @@ class TuningServer(HTTPServer):
         self.answers_path = answers_path or config.ANSWERS_YAML
         self.keywords_path = keywords_path or config.KEYWORDS_YAML
         self.plugins_path = plugins_path or config.PLUGINS_YAML
+        self.downloads_path = downloads_path or config.DOWNLOADS_YAML
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2869,6 +2984,8 @@ class Handler(BaseHTTPRequestHandler):
                                      config.KEYWORDS_YAML)),
                         Path(getattr(self.server, "plugins_path",
                                      config.PLUGINS_YAML)),
+                        Path(getattr(self.server, "downloads_path",
+                                     config.DOWNLOADS_YAML)),
                     )
                 finally:
                     conn.close()
@@ -3013,6 +3130,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(self._api_tailor_build(payload))
             elif path == "/api/coverletter-build":
                 self._send_json(self._api_coverletter_build(payload))
+            elif path == "/api/download":
+                self._send_json(self._api_download(payload))
+            elif path == "/api/download-dir":
+                self._send_json(self._api_download_dir(payload))
             elif path == "/api/keyword":
                 self._send_json(self._api_keyword(payload))
             elif path == "/api/plugin":
@@ -3508,6 +3629,147 @@ class Handler(BaseHTTPRequestHandler):
             return kw_mod.load_keywords(path), None
         except ValueError as exc:
             return kw_mod.Keywords(), str(exc)
+
+    def _api_download(self, payload: dict) -> dict:
+        """Write one posting's document into that kind's configured directory.
+
+        The write the `↓`, `✉`, `tex` and `tex✉` controls make. It exists because a web
+        page cannot aim a browser download: those two used to be `<a download>` links
+        landing wherever the browser had been told to put things, and the `tex` pair went
+        to the clipboard, which is not a place. `serve` runs on your machine as you, so
+        the server writing the file and naming where it went is the honest form of "save
+        this to the path I chose".
+
+        **No new derivation.** The two PDFs are read off `tailored_path` / `letter_path`
+        with the containment check `_send_tailored` and `_send_coverletter` already make;
+        the two sources come from `_tailored_source` / `_letter_source`, which are the
+        same functions the build endpoints compile from. A second expression for "which
+        document is this" is how the button and the terminal come to mean different
+        files.
+
+        The destination is *not* containment-checked, and that is the feature: it is a
+        directory you typed on a page you opened, and the only check it gets is
+        `resolve_dir`'s — absolute, and not an existing file. The document's *name* is
+        still minted by `resumes.stored_name`, so nothing typed reaches a path component.
+
+        A POST rather than a GET, unlike every other route that hands over one of these:
+        this one writes to your filesystem, and a link that did that on navigation is one
+        a prefetch could fire.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or payload.get("job") or "")
+        kind = str(payload.get("kind") or "")
+        if not company or not job_id:
+            return {"ok": False, "error": "company and job are required"}
+        if kind not in downloads_mod.KINDS:
+            return {"ok": False, "error": f"unknown document {kind!r}"}
+
+        raw, error = _load_downloads_quietly(
+            Path(getattr(self.server, "downloads_path", config.DOWNLOADS_YAML))
+        )
+        if error:
+            # Refused rather than quietly falling back to ~/Downloads. A file that will
+            # not parse is a destination nobody can be sure of, and putting a document
+            # somewhere other than where you said is the one failure this feature has.
+            return {"ok": False,
+                    "error": f"downloads.yaml did not parse, so there is nowhere agreed "
+                             f"to put this — {error}"}
+
+        if kind in ("resume", "letter"):
+            blob, refusal = self._built_pdf(kind, company, job_id)
+        else:
+            blob, refusal = self._document_source(kind, company, job_id)
+        if refusal:
+            return refusal
+
+        name = downloads_mod.document_name(kind, company, job_id)
+        try:
+            target = downloads_mod.save(
+                downloads_mod.resolve_dir(raw[kind]), name, blob
+            )
+        except downloads_mod.RefusedPath as exc:
+            return {"ok": False, "error": str(exc)}
+        # The path, never the bytes: this log line is about a document of yours and the
+        # rule `state.db holds the text of personal mail` sets is the one that applies.
+        log.info("saved %s for %s/%s to %s", kind, company, job_id, target)
+        return {"ok": True, "kind": kind, "path": str(target), "name": name}
+
+    def _built_pdf(self, kind: str, company: str, job_id: str):
+        """`(bytes, None)` for one posting's compiled document, or `(None, refusal)`.
+
+        `_send_tailored` and `_send_coverletter`'s five steps, said once: derive the path,
+        check it is inside the directory that owns it, read it. Both callers describe the
+        same two failures — never built, or built and then deleted — and the page's answer
+        to either is the build button, which is why they share one message.
+        """
+        if kind == "resume":
+            path = resume_mod.tailored_path(company, job_id)
+            root, what = config.TAILORED_DIR, "tailored resume"
+        else:
+            path = letter_mod.letter_path(company, job_id)
+            root, what = config.LETTERS_DIR, "cover letter"
+        try:
+            inside = path.resolve().parent == root.resolve()
+        except OSError:
+            inside = False
+        if not inside:
+            return None, {"ok": False, "error": f"not a {what}"}
+        try:
+            return path.read_bytes(), None
+        except OSError:
+            return None, {"ok": False,
+                          "error": f"no {what} has been built for this job"}
+
+    def _document_source(self, kind: str, company: str, job_id: str):
+        """`(utf-8 bytes, None)` for one posting's LaTeX, or `(None, refusal)`.
+
+        The same derivation `/api/tailored-tex` and `/api/coverletter-tex` read, so the
+        file this writes and the source those hand back cannot disagree. Like them it
+        asks for no TeX engine: the source is text, and on a machine without tectonic it
+        is the only half of this that can answer at all.
+        """
+        if kind == "resume_tex":
+            source, refusal = self._tailored_source(company, job_id)
+        else:
+            source, refusal = self._letter_source(company, job_id)
+        if refusal:
+            return None, refusal
+        return source["tex"].encode("utf-8"), None
+
+    def _api_download_dir(self, payload: dict) -> dict:
+        """Set where one kind of document is saved to. The Settings card writes it.
+
+        The same candidate-parse-backup-swap every curated file here gets, and the same
+        standing as `/api/keyword` writing keywords.yaml: a scheduled run never touches
+        this file and this is a click somebody made on a page they opened. DESIGN.md §2.3
+        is intact.
+
+        One kind per call, because the card saves each field on its own — a shared write
+        would let a typo in the third box discard three good paths.
+
+        The file is re-read here rather than carried from the render, `/api/company`'s
+        rule: an edit made in your editor while the page sat open is one this must splice
+        into rather than clobber.
+        """
+        kind = str(payload.get("kind") or "")
+        raw = str(payload.get("path") or "")
+        if kind not in downloads_mod.KINDS:
+            return {"ok": False, "error": f"unknown document {kind!r}"}
+
+        path = Path(getattr(self.server, "downloads_path", config.DOWNLOADS_YAML))
+        existing = path.read_text() if path.exists() else ""
+        try:
+            body = downloads_mod.edit(existing, kind, raw)
+        except downloads_mod.RefusedPath as exc:
+            return {"ok": False, "error": str(exc)}
+
+        try:
+            safewrite.write_text(path, body, downloads_mod.load_downloads)
+        except safewrite.RefusedWrite as exc:
+            return {"ok": False, "error": f"refused invalid downloads.yaml: {exc}"}
+        where = downloads_mod.resolve_dir(raw)
+        log.info("%s saved to %s", kind, where)
+        return {"ok": True, "kind": kind, "path": raw.strip(), "expanded": str(where)}
 
     def _api_keyword(self, payload: dict) -> dict:
         """Rule on one technology: include it, exclude it, or take the ruling back.
@@ -6549,6 +6811,23 @@ document.addEventListener('click', async (e) => {
     location.reload();
     return;
   }
+  // -- where saved documents go ------------------------------------------------------
+  // One field per kind, and one Save per field: these are four independent decisions
+  // that happen to be rendered together, and a shared Save would let a typo in the third
+  // box discard three good paths. It reloads because the line under each field says
+  // where the path expands to and whether it is yours or a fallback, and all three of
+  // those are server-rendered from the file that was just written.
+  const dl = e.target.closest('button.save-dldir');
+  if (dl) {
+    const box = document.querySelector('input.dldir[data-kind="' + dl.dataset.kind + '"]');
+    dl.disabled = true;
+    const res = await post('/api/download-dir',
+                           {kind: dl.dataset.kind, path: box ? box.value : ''});
+    dl.disabled = false;
+    if (!res.ok) { alert(res.error); return; }
+    location.reload();
+    return;
+  }
   // -- the resume tailor's keyword lists --------------------------------------------
   // Include, exclude, and take it back. All three are one endpoint with an action,
   // because they are one decision with three answers, and a page that reloads after
@@ -6833,9 +7112,10 @@ def serve(db_path: Path, criteria_path: Path, companies_path: Optional[Path],
           host: str = "127.0.0.1", port: int = 8765,
           answers_path: Optional[Path] = None,
           keywords_path: Optional[Path] = None,
-          plugins_path: Optional[Path] = None) -> int:
+          plugins_path: Optional[Path] = None,
+          downloads_path: Optional[Path] = None) -> int:
     httpd = TuningServer((host, port), Handler, db_path, criteria_path, companies_path,
-                         answers_path, keywords_path, plugins_path)
+                         answers_path, keywords_path, plugins_path, downloads_path)
     log.info(
         "serving on http://%s:%d  (dashboard: /  tuning: /tuning  settings: /settings  "
         "health: /healthz /readyz)",

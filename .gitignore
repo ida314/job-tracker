@@ -31,6 +31,13 @@ plugins.yaml
 plugins.yaml.bak
 plugins.yaml.candidate
 
+# where saved documents go — four absolute paths on one machine, so this is personal
+# config like plugins.yaml rather than portable curation like keywords.yaml. Absent is
+# a normal state and means all four fall back to ~/Downloads. See docs/downloads.md.
+downloads.yaml
+downloads.yaml.bak
+downloads.yaml.candidate
+
 # safe-write leftovers from an interrupted criteria edit
 criteria.yaml.bak
 criteria.yaml.candidate

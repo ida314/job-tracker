@@ -344,15 +344,14 @@ td.act { text-align: right; }
    control over something that would refuse on click is the page disagreeing with
    itself. Warned rather than muted: it is a question addressed to you. */
 .act .theld { color: var(--warning); border-bottom: 1px dotted currentColor; cursor: help; }
-.act button, .act a.tailor-dl, .act a.letter-dl { appearance: none; background: var(--page);
+.act button { appearance: none; background: var(--page);
     color: var(--ink-2); border: 1px solid var(--grid); border-radius: 5px;
     font: inherit; font-size: 11px; line-height: 1.6; padding: 1px 7px; cursor: pointer;
     text-decoration: none; vertical-align: middle; }
-.act button:hover, .act a.tailor-dl:hover, .act a.letter-dl:hover {
-    color: var(--ink); border-color: var(--ink-2); }
+.act button:hover { color: var(--ink); border-color: var(--ink-2); }
 .act button[disabled] { opacity: .5; cursor: default; }
-.act .tailor-build, .act a.tailor-dl, .act .tailor-tex,
-.act .letter-build, .act a.letter-dl, .act .letter-tex { margin-right: 5px; }
+.act .tailor-build, .act .tailor-dl, .act .tailor-tex,
+.act .letter-build, .act .letter-dl, .act .letter-tex { margin-right: 5px; }
 
 /* -- grouped tables ------------------------------------------------------------------
    Rows render visible and JS collapses them on load — the `.tabs` rule applied to
@@ -859,10 +858,10 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
   var GIVE_UP_MS = 120000;
 
   var BUILDS = {
-    'tailor-build': {build: '/api/tailor-build', get: '/api/tailored',
-                     cls: 'tailor-dl', title: 'Download the tailored resume'},
-    'letter-build': {build: '/api/coverletter-build', get: '/api/coverletter',
-                     cls: 'letter-dl', title: 'Download the cover letter'}
+    'tailor-build': {build: '/api/tailor-build',
+                     cls: 'tailor-dl', title: 'Save the tailored resume'},
+    'letter-build': {build: '/api/coverletter-build',
+                     cls: 'letter-dl', title: 'Save the cover letter'}
   };
 
   function kindOf(b) {
@@ -870,15 +869,19 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
     return null;
   }
 
+  // The build button becomes the save button the server would have rendered had the PDF
+  // existed when the page was built — a button, not an `<a download>`, because the
+  // destination is the folder Settings names for this kind and only the server knows it.
+  // It keeps `data-glyph`, which is what the save handler restores the label from.
   function done(b, kind) {
-    var a = document.createElement('a');
-    a.className = kind.cls;
-    a.href = kind.get + '?company=' + encodeURIComponent(b.dataset.company)
-           + '&job=' + encodeURIComponent(b.dataset.job);
-    a.title = kind.title;
-    a.setAttribute('download', '');
-    a.innerHTML = b.dataset.glyph || '&darr;';
-    b.replaceWith(a);
+    var s = document.createElement('button');
+    s.className = kind.cls;
+    s.dataset.company = b.dataset.company;
+    s.dataset.job = b.dataset.job;
+    s.dataset.glyph = b.dataset.glyph || '&darr;';
+    s.title = kind.title;
+    s.innerHTML = s.dataset.glyph;
+    b.replaceWith(s);
   }
 
   function ask(b, kind, started) {
@@ -916,63 +919,64 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
     ask(b, kind, Date.now());
   });
 
-  // "tex" -> the tailored resume's LaTeX on the clipboard. A GET, because it is a read:
-  // nothing is compiled and nothing is written.
+  // Saving. Four controls, four kinds, one destination each: the two compiled PDFs and
+  // the two LaTeX sources they are compiled from. Every one POSTs `/api/download` and
+  // the server writes the file into the folder Settings names for that kind, then says
+  // where it went.
   //
-  // The async clipboard API exists only in a secure context, and `serve` is usually
-  // reached over plain http on a tailnet address, which is not one. So the fallback is
-  // the old hidden-textarea copy, which still works there as long as it runs close
-  // enough to the click to count as one. If both are refused the page says so rather
-  // than claiming "copied" over an empty clipboard.
-  function copyText(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-      return navigator.clipboard.writeText(text);
-    }
-    return new Promise(function (resolve, reject) {
-      var t = document.createElement('textarea');
-      t.value = text;
-      t.setAttribute('readonly', '');
-      t.style.position = 'fixed';
-      t.style.opacity = '0';
-      document.body.appendChild(t);
-      t.select();
-      var ok = false;
-      try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
-      t.remove();
-      if (ok) { resolve(); } else { reject(new Error('refused')); }
-    });
+  // A POST and not a link, which is the whole change here. `↓` and `✉` used to be
+  // `<a download>`, so the file landed wherever the browser had been told to put things;
+  // `tex` and `tex✉` went to the clipboard, which is not a place you can open later. A
+  // page cannot aim a browser download, so the server writes it — and a GET that wrote
+  // to your disk is one a prefetch could fire.
+  //
+  // One handler over a table of four rather than four copies of it. The kind comes off
+  // the class, and the label to restore is read from the button — the resume's says
+  // `tex`, the letter's `tex✉`, and the two PDFs say a glyph — so a hardcoded string
+  // would silently relabel three of the four.
+  var SAVES = {
+    'tailor-dl': 'resume',
+    'letter-dl': 'letter',
+    'tailor-tex': 'resume_tex',
+    'letter-tex': 'letter_tex'
+  };
+
+  function saveKind(b) {
+    for (var k in SAVES) { if (b.classList.contains(k)) return SAVES[k]; }
+    return null;
   }
 
-  // One handler for both documents. The endpoint comes off the class and the label to
-  // restore is read from the button rather than written here — the resume's says `tex`
-  // and the letter's `tex✉`, and a hardcoded string would silently relabel one of them
-  // the first time they diverged.
   document.addEventListener('click', function (e) {
-    var b = e.target.closest
-      ? e.target.closest('button.tailor-tex, button.letter-tex') : null;
+    var b = e.target.closest ? e.target.closest(
+      'button.tailor-dl, button.letter-dl, button.tailor-tex, button.letter-tex') : null;
     if (!b || b.disabled) return;
-    var was = b.textContent;
-    var url = b.classList.contains('letter-tex')
-      ? '/api/coverletter-tex' : '/api/tailored-tex';
-    function reset() { b.disabled = false; b.textContent = was; }
+    var kind = saveKind(b);
+    if (!kind) return;
+    // The glyph buttons carry their label as an entity, so restoring textContent would
+    // turn `&darr;` into the literal characters. Read the markup back for those and the
+    // text for the two that are words.
+    var was = b.dataset.glyph || b.textContent;
+    function reset() {
+      b.disabled = false;
+      if (b.dataset.glyph) { b.innerHTML = was; } else { b.textContent = was; }
+    }
     b.disabled = true;
     b.textContent = '…';
-    fetch(url + '?company=' + encodeURIComponent(b.dataset.company)
-          + '&job=' + encodeURIComponent(b.dataset.job), {cache: 'no-store'})
-      .then(function (r) { return r.json(); })
+    post('/api/download', {company: b.dataset.company, ats_job_id: b.dataset.job,
+                           kind: kind})
       .then(function (res) {
         if (!res.ok) {
           reset();
-          alert(res.error || 'could not derive the LaTeX');
+          alert(res.error || 'could not save it');
           return;
         }
-        return copyText(res.tex).then(function () {
-          b.textContent = 'copied';
-          setTimeout(reset, 1500);
-        }, function () {
-          reset();
-          alert('the browser refused to let this page write to the clipboard');
-        });
+        // Swapped in place, never a reload: a reload here would discard the typed
+        // filter and the scroll position, the rule the tracker button already follows.
+        // The path goes in the title rather than the label — a row is one line in a
+        // table thousands long, and a folder name is not the width of a glyph.
+        b.title = 'wrote ' + res.path;
+        b.textContent = 'saved';
+        setTimeout(reset, 1600);
       }).catch(function () {
         reset();
         alert('could not reach the server');
@@ -1664,13 +1668,20 @@ def _proposal(suggestions, key) -> tuple[int, str]:
 
 
 def _tailor_control(row, state, built) -> str:
-    """The `↓` — a build button until the tailored PDF exists, a download link after —
-    and beside it `tex`, which copies the LaTeX that PDF is compiled from.
+    """The `↓` — a build button until the tailored PDF exists, a save button after — and
+    beside it `tex`, which saves the LaTeX that PDF is compiled from.
 
     One rendering for both places it appears — the actions cell and a pick's documents
     line — so the classes the delegated handler in `_JS` selects cannot drift between
     them. Nothing for a dismissed proposal, which is a decision you made rather than work
     waiting. Callers decide the all-held case, because each says it differently.
+
+    **Both saves are buttons, not links, and that is the whole point of the feature.**
+    The `↓` was an `<a download>`, so the file landed wherever the browser had been told
+    to put things and nothing here had a say; `tex` went to the clipboard, which is not a
+    place at all. Each now POSTs `/api/download` and the server writes it into the
+    directory Settings names for that kind — the PDF and its source separately, because
+    they do not belong in the same folder.
 
     `tex` renders in both of the `↓`'s states: the source is derived on request, not read
     off the built file, so it needs neither a build nor a TeX engine.
@@ -1681,13 +1692,13 @@ def _tailor_control(row, state, built) -> str:
     j = html.escape(row["ats_job_id"], quote=True)
     copy = (
         f'<button class="tailor-tex" data-company="{c}" data-job="{j}" '
-        'title="Copy the tailored resume&#39;s LaTeX source">tex</button>'
+        'title="Save the tailored resume&#39;s LaTeX source">tex</button>'
     )
     if _track_cell_built(row, built):
         return (
-            f'<a class="tailor-dl" href="/api/tailored?company={_q(row["company"])}'
-            f'&amp;job={_q(row["ats_job_id"])}" '
-            'title="Download the tailored resume" download>&darr;</a>' + copy
+            f'<button class="tailor-dl" data-company="{c}" data-job="{j}" '
+            'data-glyph="&darr;" title="Save the tailored resume">&darr;</button>'
+            + copy
         )
     return (
         f'<button class="tailor-build" data-company="{c}" data-job="{j}" '
@@ -1696,14 +1707,15 @@ def _tailor_control(row, state, built) -> str:
 
 
 def _letter_control(row, letter_row, letters_built) -> str:
-    """The `✉` — build the cover letter, or download it once a current PDF exists — and
-    beside it `tex✉`, which copies the LaTeX that PDF is compiled from.
+    """The `✉` — build the cover letter, or save it once a current PDF exists — and
+    beside it `tex✉`, which saves the LaTeX that PDF is compiled from.
 
     An envelope rather than a second arrow: two identical `↓` side by side is a control
-    you have to hover to read, and these fetch different documents. The copy button
-    carries the same envelope for the same reason — in the actions cell nothing else
-    would distinguish it from the resume's `tex`, which sits two controls to its left.
-    Shared by the actions cell and a pick's documents line, `_tailor_control`'s reason.
+    you have to hover to read, and these write different documents to different folders.
+    The source button carries the same envelope for the same reason — in the actions cell
+    nothing else would distinguish it from the resume's `tex`, which sits two controls to
+    its left. Shared by the actions cell and a pick's documents line, `_tailor_control`'s
+    reason, and both of these are buttons for the reason set out there.
 
     `tex✉` renders in both of the `✉`'s states: the source is derived on request rather
     than read off a built file, so it needs neither a build nor a TeX engine.
@@ -1712,13 +1724,13 @@ def _letter_control(row, letter_row, letters_built) -> str:
     j = html.escape(row["ats_job_id"], quote=True)
     copy = (
         f'<button class="letter-tex" data-company="{c}" data-job="{j}" '
-        'title="Copy the cover letter&#39;s LaTeX source">tex&#9993;</button>'
+        'title="Save the cover letter&#39;s LaTeX source">tex&#9993;</button>'
     )
     if _letter_built(row, letters_built, letter_row):
         return (
-            f'<a class="letter-dl" href="/api/coverletter?company={_q(row["company"])}'
-            f'&amp;job={_q(row["ats_job_id"])}" '
-            'title="Download the cover letter" download>&#9993;</a>' + copy
+            f'<button class="letter-dl" data-company="{c}" data-job="{j}" '
+            'data-glyph="&#9993;" title="Save the cover letter">&#9993;</button>'
+            + copy
         )
     return (
         f'<button class="letter-build" data-company="{c}" data-job="{j}" '

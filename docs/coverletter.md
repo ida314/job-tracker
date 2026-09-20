@@ -3,7 +3,7 @@
 `coverletter` reads a posting's description and your resume, and writes the body
 paragraphs of a letter into the slots **your own template** marks out. `jobtracker
 coverletter build` compiles the result to a PDF. Nothing it produces reaches an employer
-until you download it and attach it yourself.
+until you save it and attach it yourself.
 
 It is the **sixth bounded model role** (DESIGN.md §8) and the second that composes prose,
 after `tailor`. It composes considerably more of a document than `tailor` does, so most
@@ -158,28 +158,27 @@ the tailored resume for the same posting; both are minted from the same
 `resumes.stored_name` pair.
 
 Under `serve`, every posting row that has a letter carries an **✉** in its actions cell —
-a build button until the PDF exists, a download link afterwards. It sits beside the
+a build button until the PDF exists, a save button afterwards. It sits beside the
 tailored resume's **↓** and follows the same two rules: absent entirely when nothing has
 been written, and interactive-only, because a dead button in a mailed file is worse than
 no button. The three Today picks carry the same pair on a line of their own, labelled
 *tailored resume* and *cover letter* — `dashboard._docs_line`, rendering the actions
 cell's controls through the same two helpers.
 
-Beside the **✉**, in both of its states, is **tex✉**: it copies the LaTeX the letter is
-compiled from to the clipboard. `GET /api/coverletter-tex` is a pure read through
-`server._letter_source`, the same helper the build endpoint calls, so the clipboard and
-the PDF are one derivation and cannot come to mean different letters. It asks for no TeX
-engine, which is what makes it useful on a machine without tectonic — and on this box the
-batch image is exactly that machine.
+Beside the **✉**, in both of its states, is **tex✉**: it saves the LaTeX the letter is
+compiled from. Both POST `/api/download`, which writes the file into the folder Settings
+names for that kind and answers with the path (`docs/downloads.md`). The source comes from
+`server._letter_source`, the same helper the build endpoint calls, so the `.tex` on disk
+and the PDF are one derivation and cannot come to mean different letters. It asks for no
+TeX engine, which is what makes it useful on a machine without tectonic — and on this box
+the batch image is exactly that machine.
 
-The envelope is part of the label, not decoration. The resume's copy button says `tex`
+The envelope is part of the label, not decoration. The resume's source button says `tex`
 and sits two controls to the left in the same actions cell, where nothing else would tell
 them apart; this is the `✉`-rather-than-a-second-`↓` rule applied to the second pair of
-controls. One delegated handler in `dashboard._JS` serves both copies — it picks the
-endpoint off the button's class and restores the label it read from the button, so the
-two cannot drift into relabelling each other. As with the resume, `serve` over tailnet
-http is not a secure context, so `navigator.clipboard` is absent and the handler falls
-back to a hidden-textarea `execCommand('copy')`, saying so if the browser refuses both.
+controls. One delegated handler in `dashboard._JS` serves all four saves — it takes the
+kind off the button's class and restores the label it read from the button, so they cannot
+drift into relabelling each other.
 
 **The date on the letter is the day it was compiled**, not the day you send it — `fill`
 takes `today` from the run that built the PDF, and a PDF that is already current is not

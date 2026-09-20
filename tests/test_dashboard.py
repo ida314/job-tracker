@@ -6,6 +6,7 @@ a row that carries the wrong tier and so hides under the wrong filter chip.
 """
 
 import json
+import re
 from pathlib import Path
 from unittest import mock
 
@@ -1001,9 +1002,14 @@ def test_a_dismissed_suggestion_shows_its_state_and_offers_no_build():
     assert "tailor-dl" not in panel
 
 
-def test_a_built_resume_renders_a_download_and_not_a_build_button():
+def test_a_built_resume_renders_a_save_button_and_not_a_build_button():
     """The file's own existence is what "built" means — nothing records the path. So the
-    cell asks the same question the download route will answer."""
+    cell asks the same question the save route will answer.
+
+    A button and not an `<a download>`: the destination is the folder Settings names for
+    this kind, and only the server knows it. A link would land the file wherever the
+    browser had been told to put things, which is the thing this feature exists to stop.
+    """
     conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
     _suggest(conn, "Acme", "1", 2)
     stem = resume.tailored_stem("Acme", "1")
@@ -1014,21 +1020,27 @@ def test_a_built_resume_renders_a_download_and_not_a_build_button():
     with mock.patch.object(dashboard, "_built_resumes", return_value={stem}):
         panel = _all_panel(dashboard.build_dashboard(
             conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
-    assert 'class="tailor-dl"' in panel
+    assert '<button class="tailor-dl" data-company="Acme" data-job="1"' in panel
     assert "tailor-build" not in panel
-    assert "/api/tailored?company=Acme&amp;job=1" in panel
+    assert "/api/tailored?" not in panel
+    assert "download>" not in panel
 
 
-def test_the_download_link_escapes_its_query_string():
-    """A company name is third-party text and lands in a URL and in markup at once."""
+def test_the_save_button_escapes_the_company_in_its_attributes():
+    """A company name is third-party text and now rides in an HTML attribute rather than
+    a query string — the script reads it back and puts it in the POST body.
+
+    The quote is the whole risk: unescaped, `A&B "Co"` closes `data-company` and
+    everything after it is markup the page did not mean to write."""
     conn = _matches(('A&B "Co"', "x/1", "Backend Engineer", "New York, NY"))
     _suggest(conn, 'A&B "Co"', "x/1", 1)
     stem = resume.tailored_stem('A&B "Co"', "x/1")
     with mock.patch.object(dashboard, "_built_resumes", return_value={stem}):
         panel = _all_panel(dashboard.build_dashboard(
             conn, [_company('A&B "Co"', 1)], "2026-07-22", interactive=True))
-    assert "A%26B%20%22Co%22" in panel
-    assert 'href="/api/tailored?company=A%26B%20%22Co%22&amp;job=x%2F1"' in panel
+    assert ('<button class="tailor-dl" data-company="A&amp;B &quot;Co&quot;" '
+            'data-job="x/1"') in panel
+    assert 'data-company="A&B "Co""' not in panel
 
 
 def test_the_tex_copy_sits_beside_the_resume_download_in_both_states():
@@ -1114,9 +1126,24 @@ def test_the_actions_controls_have_their_handlers_on_the_page_that_renders_them(
     for cls in ("track", "tailor-build", "tailor-tex", "letter-build", "letter-tex"):
         assert f'class="{cls}"' in doc, cls
         assert f"button.{cls}" in script, cls
-    for endpoint in ("/api/disposition", "/api/tailor-build", "/api/tailored",
-                     "/api/tailored-tex", "/api/coverletter-build", "/api/coverletter",
-                     "/api/coverletter-tex"):
+
+    # The two save buttons only exist once their PDFs do, so they need the built world —
+    # and they are the halves most likely to lose a handler, having been `<a download>`
+    # until the destination became a setting.
+    with mock.patch.object(dashboard, "_built_resumes",
+                           return_value={resume.tailored_stem("Acme", "1")}), \
+         mock.patch.object(dashboard, "_built_letters",
+                           return_value={letter_mod.letter_stem("Acme", "1"):
+                                         "2026-07-22"}):
+        built = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                          interactive=True)
+    built_script = built[built.rindex("<script>"):built.rindex("</script>")]
+    for cls in ("tailor-dl", "letter-dl"):
+        assert f'class="{cls}"' in built, cls
+        assert f"button.{cls}" in built_script, cls
+
+    for endpoint in ("/api/disposition", "/api/tailor-build", "/api/coverletter-build",
+                     "/api/download"):
         assert endpoint in script, endpoint
     assert doc.count("<script>") == 1
 
@@ -1143,9 +1170,10 @@ def test_the_letter_control_is_absent_until_one_is_written():
     assert 'class="letter-build"' in panel
 
 
-def test_a_built_letter_renders_a_download_and_not_a_build_button():
+def test_a_built_letter_renders_a_save_button_and_not_a_build_button():
     """The file's own existence is what "built" means — nothing stores the path, so the
-    cell asks exactly the question the download route will answer."""
+    cell asks exactly the question the save route will answer. A button rather than a
+    link, `_tailor_control`'s reason."""
     conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
     _letter(conn, "Acme", "1")
     stem = letter_mod.letter_stem("Acme", "1")
@@ -1153,9 +1181,10 @@ def test_a_built_letter_renders_a_download_and_not_a_build_button():
                            return_value={stem: "2026-07-22"}):
         panel = _all_panel(dashboard.build_dashboard(
             conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
-    assert 'class="letter-dl"' in panel
+    assert '<button class="letter-dl" data-company="Acme" data-job="1"' in panel
     assert "letter-build" not in panel
-    assert "/api/coverletter?company=Acme&amp;job=1" in panel
+    assert "/api/coverletter?" not in panel
+    assert "download>" not in panel
 
 
 def test_a_stale_letter_pdf_offers_the_build_button_not_a_download():
@@ -1222,9 +1251,10 @@ def test_a_pick_offers_both_documents_like_the_rest_of_the_ranking():
                                          "2026-07-22"}):
         block = _docs_block(_picks_only(dashboard.build_dashboard(
             conn, companies, "2026-07-22", interactive=True)))
-    assert 'href="/api/tailored?company=Acme&amp;job=1"' in block
-    assert 'href="/api/coverletter?company=Acme&amp;job=1"' in block
+    assert '<button class="tailor-dl" data-company="Acme" data-job="1"' in block
+    assert '<button class="letter-dl" data-company="Acme" data-job="1"' in block
     assert "-build" not in block
+    assert "href=" not in block
 
 
 def test_a_picks_documents_are_serve_only_and_never_a_disposition():
@@ -1263,8 +1293,13 @@ def test_a_pick_offers_the_letter_alone_when_the_resume_was_dismissed():
     assert 'class="letter-build"' in block
 
 
-def test_the_two_documents_never_share_a_download_url():
-    """One posting, two files, two routes. Sharing either would hand over the wrong one."""
+def test_the_four_save_controls_never_share_a_kind():
+    """One posting, four documents, four destinations. Two controls resolving to one kind
+    would put a document in the folder the other one names — and the two PDFs would
+    overwrite each other, since the kind is also what picks the filename.
+
+    The URL used to be what told them apart. Now it is the class, read back by `SAVES` in
+    the one delegated handler, so that table is the thing worth pinning."""
     conn = _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
     _suggest(conn, "Acme", "1", 2)
     _letter(conn, "Acme", "1")
@@ -1275,8 +1310,13 @@ def test_the_two_documents_never_share_a_download_url():
                                          "2026-07-22"}):
         panel = _all_panel(dashboard.build_dashboard(
             conn, [_company("Acme", 1)], "2026-07-22", interactive=True))
-    assert "/api/tailored?company=Acme&amp;job=1" in panel
-    assert "/api/coverletter?company=Acme&amp;job=1" in panel
+    for cls in ("tailor-dl", "letter-dl", "tailor-tex", "letter-tex"):
+        assert f'class="{cls}"' in panel, cls
+
+    pairs = dict(re.findall(r"'([a-z-]+)': '([a-z_]+)'", dashboard._JS))
+    assert pairs == {"tailor-dl": "resume", "letter-dl": "letter",
+                     "tailor-tex": "resume_tex", "letter-tex": "letter_tex"}
+    assert len(set(pairs.values())) == 4
 
 
 def test_the_actions_cell_never_carries_a_disposition_attribute():
