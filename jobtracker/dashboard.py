@@ -68,6 +68,7 @@ _CSS = """
   /* The two radii everything interactive or card-shaped takes. Badges keep their own. */
   --radius-card:    10px;
   --radius-control: 6px;
+  --image-outline:  oklch(0 0 0 / 0.1);
   --page:        #f9f9f7;
   --surface:     #fcfcfb;
   --ink:         #0b0b0b;
@@ -91,6 +92,7 @@ _CSS = """
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
+    --image-outline: oklch(1 0 0 / 0.1);
     --page:    #0d0d0d;
     --surface: #1a1a19;
     --ink:     #ffffff;
@@ -110,6 +112,7 @@ _CSS = """
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --image-outline: oklch(1 0 0 / 0.1);
   --page:    #0d0d0d;
   --surface: #1a1a19;
   --ink:     #ffffff;

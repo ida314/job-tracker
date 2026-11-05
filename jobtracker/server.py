@@ -5849,7 +5849,7 @@ gap:1.2rem;align-items:start}
 .phead{display:flex;gap:.6rem;align-items:center;font-weight:600;
 margin:.2rem 0 .6rem;flex-wrap:wrap}
 .phead .ago{font-weight:400;font-size:.8rem;opacity:.7;margin-left:auto}
-#preview{border:1px solid rgba(127,127,127,.35);border-radius:var(--radius-control);
+#preview{outline:1px solid var(--image-outline);outline-offset:-1px;border-radius:var(--radius-control);
 background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
 /* Two ways to look at a page several thousand pixels tall. `fit` scales all of it into
    view — every field at once, the state of the form at a glance. `actual` is full width
