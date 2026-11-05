@@ -53,3 +53,12 @@ def test_hover_only_applies_to_a_pointer_that_can_hover():
     one: a button you had just tapped went on looking disabled."""
     for name, css in SHEETS.items():
         assert ":hover" not in _without_hover_queries(_without_comments(css)), name
+
+
+def test_a_disabled_button_looks_disabled():
+    """The generic rule sets `color: inherit`, which beats the browser's own grey, so with no
+    state of its own a disabled button was identical to a live one — and still dimmed on
+    hover, as if it would do something."""
+    assert "button:disabled{opacity:.5;cursor:default}" in server._EXTRA_CSS
+    assert "button:not(:disabled):hover" in server._EXTRA_CSS
+    assert "button:hover" not in server._EXTRA_CSS

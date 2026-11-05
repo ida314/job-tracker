@@ -5767,7 +5767,7 @@ border-left:4px solid #dc2626;border-radius:6px;background:rgba(220,38,38,.05)}
 .flag .quote{margin-top:.35rem;font-size:.88rem;opacity:.85}
 .flag .row{display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap}
 .flag button{padding:.35rem .7rem;border-radius:5px;border:1px solid currentColor;
-background:transparent;color:inherit;font:inherit;font-size:.85rem;cursor:pointer}
+background:transparent;color:inherit;font:inherit;font-size:.85rem}
 .flag button.kw-allow{border-color:#16a34a;color:#16a34a}
 .flag button.kw-deny{border-color:#dc2626;color:#dc2626}
 
@@ -5780,7 +5780,7 @@ background:transparent;color:inherit;font:inherit;font-size:.85rem;cursor:pointe
 .card.plugin .row{margin-top:0;flex-wrap:wrap}
 .card.plugin button{align-self:flex-start;margin-top:.5rem;padding:.3rem .7rem;
 border-radius:5px;border:1px solid currentColor;background:transparent;color:inherit;
-font:inherit;font-size:.85rem;cursor:pointer}
+font:inherit;font-size:.85rem}
 .pill{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
 padding:.1rem .45rem;border-radius:999px;border:1px solid currentColor}
 .pill.ok{color:#16a34a}
@@ -5829,7 +5829,8 @@ max-width:100%}
 line-height:20px;white-space:nowrap}
 .appform .danger{margin-left:auto}
 .app .danger{border-color:rgba(220,53,69,.6);opacity:.75}
-@media (hover:hover){.app .danger:hover{opacity:1;color:#dc3545}}
+@media (hover:hover){.app .danger:not(:disabled):hover{opacity:1;color:#dc3545}}
+.app .danger:disabled{opacity:.5}
 /* A proposal from the mailbox. Marked as unwritten — the border is the reminder that
    nothing on this card has touched your application history yet. */
 .app.prop{border-left:3px solid var(--accent)}
@@ -5992,7 +5993,8 @@ background:transparent;color:inherit;font:inherit}
 .note{opacity:.75;font-size:.9rem}
 button{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
 background:transparent;color:inherit;font:inherit}
-@media (hover:hover){button:hover{opacity:.7}}
+@media (hover:hover){button:not(:disabled):hover{opacity:.7}}
+button:disabled{opacity:.5;cursor:default}
 """
 
 # Every control on the apply page has its handler here, in the file that renders it.
