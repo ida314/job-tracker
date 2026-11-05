@@ -155,3 +155,9 @@ def test_the_letter_glyph_asks_for_its_text_form():
     for path in SOURCES:
         text = path.read_text()
         assert text.count("&#9993;") == (1 if path.name == "dashboard.py" else 0), path.name
+
+
+def test_the_file_input_text_uses_the_page_font():
+    """Theming the button left "No file chosen" beside it in Arial. Zero specificity, so
+    `.pfile` and `.pick .resume input` still choose the size."""
+    assert ":where(input[type=file]) { font: inherit; }" in dashboard._CSS

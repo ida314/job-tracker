@@ -320,6 +320,8 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 
 /* The file input's own button, which the browser draws grey and in its own font otherwise —
    beside themed buttons on every pick card and on /posting. */
+/* `:where`, so a page's own class still sets the size. */
+:where(input[type=file]) { font: inherit; }
 input[type=file]::file-selector-button { appearance: none; font: inherit; font-size: 11.5px;
     background: var(--page); color: var(--ink-2); border: 1px solid var(--rule);
     border-radius: var(--radius-control); padding: 3px 9px; margin-inline-end: 8px; cursor: pointer; }
