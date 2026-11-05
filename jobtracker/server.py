@@ -5751,13 +5751,13 @@ _SETTINGS_CSS = """
 .gap .ask{font-weight:600;margin-bottom:.2rem}
 .gap .row{display:flex;gap:.5rem;margin-top:.5rem}
 .gap .answer{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit}
 .card{padding:.8rem .9rem;margin:.5rem 0;border:1px solid rgba(127,127,127,.35);border-radius:var(--radius-card)}
 .card .row{display:flex;gap:.5rem;margin-top:.8rem;align-items:center}
 .field{display:flex;align-items:center;gap:.6rem;margin:.25rem 0}
 .field>span{flex:0 0 11rem;font-size:.9rem;opacity:.85}
 .field input{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit}
 .req{color:#d97706;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
 
 .flag{padding:.75rem .9rem;margin:.5rem 0;border:1px solid rgba(220,38,38,.4);
@@ -5766,8 +5766,7 @@ border-left:4px solid #dc2626;border-radius:var(--radius-card);background:rgba(2
 .flag .why{margin-top:.35rem;font-size:.9rem}
 .flag .quote{margin-top:.35rem;font-size:.88rem;opacity:.85}
 .flag .row{display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap}
-.flag button{padding:.35rem .7rem;border-radius:var(--radius-control);border:1px solid currentColor;
-background:transparent;color:inherit;font:inherit;font-size:.85rem}
+.flag button{padding:.35rem .7rem;border-radius:var(--radius-control);font:inherit;font-size:.85rem}
 .flag button.kw-allow{border-color:#16a34a;color:#16a34a}
 .flag button.kw-deny{border-color:#dc2626;color:#dc2626}
 
@@ -5779,8 +5778,7 @@ background:transparent;color:inherit;font:inherit;font-size:.85rem}
 .card.plugin.disabled{border-left:4px solid rgba(127,127,127,.5);opacity:.85}
 .card.plugin .row{margin-top:0;flex-wrap:wrap}
 .card.plugin button{align-self:flex-start;margin-top:.5rem;padding:.3rem .7rem;
-border-radius:var(--radius-control);border:1px solid currentColor;background:transparent;color:inherit;
-font:inherit;font-size:.85rem}
+border-radius:var(--radius-control);font:inherit;font-size:.85rem}
 .pill{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
 padding:.1rem .45rem;border-radius:999px;border:1px solid currentColor}
 .pill.ok{color:#16a34a}
@@ -5798,7 +5796,7 @@ border-radius:999px;border:1px solid rgba(127,127,127,.5);font-size:.85rem}
 cursor:pointer;opacity:.5;padding:0 .35rem;line-height:1}
 @media (hover:hover){.chip button:hover{opacity:1}}
 .kwbox{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit}
 """
 
 # Only the editable half. Everything that decides how an application *looks* — the
@@ -5811,7 +5809,7 @@ border-radius:var(--radius-card)}
 gap:.6rem;margin-top:.7rem}
 .addapp label{display:flex;flex-direction:column;gap:.25rem;font-size:.82rem;opacity:.85}
 .addapp input,.addapp select{padding:.35rem .5rem;
-border-radius:var(--radius-control);border:1px solid currentColor;background:transparent;color:inherit;
+border-radius:var(--radius-control);border:1px solid var(--muted);background:transparent;color:inherit;
 font:inherit;font-size:.88rem;min-width:0}
 /* One compact row under each application, at the size of the text around it. Labels sit
    beside their field rather than above it, which is most of the height saved. */
@@ -5819,7 +5817,7 @@ font:inherit;font-size:.88rem;min-width:0}
 font-size:12px}
 .appform label{display:flex;align-items:center;gap:.3rem;color:var(--muted)}
 .appform input,.appform select{padding:1px 5px;height:22px;border-radius:var(--radius-control);
-border:1px solid var(--rule);background:transparent;color:var(--ink);font:inherit;
+border:1px solid var(--muted);background:transparent;color:var(--ink);font:inherit;
 font-size:12px;min-width:0}
 .appform .appnote{flex:0 1 13rem;width:13rem}
 .appform .appnextnote{flex:0 1 8rem;width:8rem}
@@ -5873,7 +5871,7 @@ border-radius:var(--radius-card)}
 .lf .lab{font-size:.86rem;margin-bottom:.35rem;display:flex;gap:.45rem;
 align-items:baseline;flex-wrap:wrap}
 .lf .lv,.lf input[type=file]{width:100%;padding:.35rem .5rem;border-radius:var(--radius-control);
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit;
 font-size:.9rem}
 .lf textarea.lv{resize:vertical}
 .lf .cbx{display:flex;gap:.4rem;align-items:center;font-size:.9rem}
@@ -5881,11 +5879,11 @@ font-size:.9rem}
 .lf .bank{display:flex;gap:.4rem;align-items:center;margin-top:.45rem;font-size:.78rem;
 opacity:.85;flex-wrap:wrap}
 .lf .bank .bankkey{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:var(--radius-control);
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit;
 font-size:.78rem}
 .lf .bank input[type=checkbox]{width:auto}
 .bank .bankval{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:var(--radius-control);
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit;
 font-size:.78rem}
 /* One question, several boxes. The block is what makes "How did you hear about us?"
    read as a question with nine answers rather than as nine questions. */
@@ -5922,8 +5920,8 @@ padding:.05rem .4rem;border-radius:99px}
 .viewwin{font-weight:600}
 /* A link that acts as a button. `button{}` above styles the element, not the role, so
    without this "Open application" renders as bare underlined text in a row of buttons. */
-a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid currentColor;
-background:transparent;color:inherit;font:inherit;font-size:.9rem;text-decoration:none}
+a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid var(--rule);
+background:var(--page);color:var(--ink-2);font:inherit;font-size:.9rem;text-decoration:none}
 @media (hover:hover){a.btn:hover{opacity:.7}}
 #resetmsg{margin-left:0}
 .phead .note{font-weight:400;font-size:.8rem}
@@ -5985,13 +5983,13 @@ font-size:.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .rules.reject .chip{border-color:#dc3545}
 .rules.accept .chip{border-color:#0f5132}
 .addbox{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap}
-.addbox input{padding:.25rem .5rem;border-radius:var(--radius-control);border:1px solid var(--rule);
+.addbox input{padding:.25rem .5rem;border-radius:var(--radius-control);border:1px solid var(--muted);
 background:transparent;color:inherit;font:inherit;min-width:16rem}
-select{padding:.2rem .4rem;border-radius:var(--radius-control);border:1px solid currentColor;
+select{padding:.2rem .4rem;border-radius:var(--radius-control);border:1px solid var(--muted);
 background:transparent;color:inherit;font:inherit}
 .note{opacity:.75;font-size:.9rem}
-button{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid currentColor;
-background:transparent;color:inherit;font:inherit}
+button{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid var(--rule);
+background:var(--page);color:var(--ink-2);font:inherit}
 @media (hover:hover){button:not(:disabled):hover{opacity:.7}}
 button:disabled{opacity:.5;cursor:default}
 """

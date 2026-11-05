@@ -118,3 +118,16 @@ def test_every_control_takes_the_control_radius():
             found = re.search(r"border-radius:\s*([^;}]+)", body)
             if found and CONTROL.search(selector):
                 assert found.group(1).strip() == "var(--radius-control)", (name, selector)
+
+
+FIELD = re.compile(r"(^|[\s,.])(input|select|textarea)\b|\.answer\b|\.kwbox\b|\.lv\b|\.bankkey\b|\.bankval\b|\.qq\b")
+
+
+def test_a_field_edge_clears_three_to_one():
+    """`currentColor` drew near-black boxes on some pages and `--rule`, about 1.7:1 on the page,
+    drew barely visible ones on others. An input's edge is what says it is an input."""
+    for name, css in SHEETS.items():
+        for selector, body in _rules(css):
+            found = re.search(r"border:\s*1px solid ([^;}]+)", body)
+            if found and FIELD.search(selector) and "::file-selector-button" not in selector:
+                assert found.group(1).strip() == "var(--muted)", (name, selector)

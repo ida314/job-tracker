@@ -171,7 +171,7 @@ a { color: var(--link); text-decoration: none; }
            margin: 20px 0 6px; }
 .filters input[type=search], .filters select {
   font: inherit; font-size: 13.5px; padding: 6px 10px; border-radius: var(--radius-control);
-  border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
+  border: 1px solid var(--muted); background: var(--surface); color: var(--ink);
 }
 .filters input[type=search] { min-width: 250px; }
 /* The filter chip. Not `.chip`, which is a plain text token on /tuning and /settings: both
