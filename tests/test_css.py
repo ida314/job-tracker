@@ -131,3 +131,13 @@ def test_a_field_edge_clears_three_to_one():
             found = re.search(r"border:\s*1px solid ([^;}]+)", body)
             if found and FIELD.search(selector) and "::file-selector-button" not in selector:
                 assert found.group(1).strip() == "var(--muted)", (name, selector)
+
+
+def test_hover_does_not_dim_a_control():
+    """Dimming on hover says "less available" at the moment you reach for it, and it is what a
+    disabled button looks like. Hover darkens the text and the edge."""
+    for name, css in SHEETS.items():
+        for selector, body in _rules(css):
+            found = re.search(r"opacity:\s*([\d.]+)", body)
+            if ":hover" in selector and found:
+                assert float(found.group(1)) == 1, (name, selector)

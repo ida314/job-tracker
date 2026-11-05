@@ -182,6 +182,7 @@ a { color: var(--link); text-decoration: none; }
         user-select: none; }
 .fchip[aria-pressed="true"] { background: var(--ink); color: var(--page);
                              border-color: var(--ink); }
+@media (hover: hover) { .fchip:not([aria-pressed="true"]):hover { color: var(--ink); border-color: var(--ink-2); } }
 .count { font-size: 12.5px; color: var(--muted); margin-left: auto;
          font-variant-numeric: tabular-nums; }
 
@@ -274,7 +275,8 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .act button { appearance: none; background: var(--page); color: var(--ink-2);
                     border-color: var(--rule); font: inherit;
                     font-size: 12.5px; line-height: 1.4; cursor: pointer; }
-@media (hover: hover) { .pick .act button:hover { color: var(--ink); border-color: var(--ink-2); } }
+@media (hover: hover) { .pick .act button:not([disabled]):hover { color: var(--ink); border-color: var(--ink-2); }
+  .pick .act a.apply:hover { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); } }
 .pick .act button[disabled] { opacity: .5; cursor: default; }
 /* Whatever came back from /api/apply-to. Written by JS into an empty server-rendered
    node, so a page with JS off never shows a stray empty line. */
@@ -293,7 +295,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
                        border: 1px solid var(--rule); border-radius: var(--radius-control);
                        padding: 3px 9px; font: inherit; font-size: 11.5px;
                        cursor: pointer; }
-@media (hover: hover) { .pick .resume button:hover { color: var(--ink); border-color: var(--ink-2); } }
+@media (hover: hover) { .pick .resume button:not([disabled]):hover { color: var(--ink); border-color: var(--ink-2); } }
 .pick .resume button[disabled] { opacity: .5; cursor: default; }
 
 /* A pick's two documents: the same `↓` and `✉` the actions cell carries, each beside a
@@ -304,7 +306,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
     color: var(--ink-2); border: 1px solid var(--rule); border-radius: var(--radius-control);
     padding: 1px 9px; margin-left: 4px; font: inherit; font-size: 12px;
     cursor: pointer; text-decoration: none; }
-@media (hover: hover) { .pick .docs button:hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); } }
+@media (hover: hover) { .pick .docs button:not([disabled]):hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); } }
 .pick .docs button[disabled] { opacity: .5; cursor: default; }
 .pick .docs .tailor-tex, .pick .docs .letter-tex { margin-left: 4px; }
 
@@ -369,7 +371,7 @@ td.act { text-align: right; }
     color: var(--ink-2); border: 1px solid var(--grid); border-radius: var(--radius-control);
     font: inherit; font-size: 11px; line-height: 1.6; padding: 1px 7px; cursor: pointer;
     text-decoration: none; vertical-align: middle; }
-@media (hover: hover) { .act button:hover { color: var(--ink); border-color: var(--ink-2); } }
+@media (hover: hover) { .act button:not([disabled]):hover { color: var(--ink); border-color: var(--ink-2); } }
 .act button[disabled] { opacity: .5; cursor: default; }
 .act .tailor-build, .act .tailor-dl, .act .tailor-tex,
 .act .letter-build, .act .letter-dl, .act .letter-tex { margin-right: 5px; }
@@ -393,6 +395,8 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 .js-groups .cotoggle { display: inline-block; appearance: none; background: none;
                        border: 0; padding: 0 0 0 10px; color: var(--accent);
                        font: inherit; font-size: 12.5px; cursor: pointer; }
+
+@media (hover: hover) { .js-groups .cotoggle:hover { text-decoration: underline; } }
 
 /* The applications view bar. In the static file it only works with the script, so it
    is hidden until the script says it is running — the same rule as .tabs. */

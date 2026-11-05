@@ -614,6 +614,7 @@ _POSTING_CSS = """
 .dnone{font-size:.8rem;color:var(--muted);font-style:italic}
 .ddl{text-decoration:none;border:1px solid var(--rule);border-radius:var(--radius-control);
         padding:.05rem .4rem;color:inherit}
+@media (hover:hover){.applybar .apply:hover,.ddl:hover{text-decoration:none;color:var(--ink);border-color:var(--ink-2)}}
 .pfile{font-size:.75rem;max-width:13rem}
 .q{display:grid;grid-template-columns:1fr;gap:.3rem;padding:.55rem 0;
         border-top:1px solid var(--grid)}
@@ -5769,6 +5770,7 @@ border-left:4px solid #dc2626;border-radius:var(--radius-card);background:rgba(2
 .flag button{padding:.35rem .7rem;border-radius:var(--radius-control);font:inherit;font-size:.85rem}
 .flag button.kw-allow{border-color:#16a34a;color:#16a34a}
 .flag button.kw-deny{border-color:#dc2626;color:#dc2626}
+@media (hover:hover){.flag button.kw-allow:not(:disabled):hover,.flag button.kw-deny:not(:disabled):hover{background:color-mix(in srgb,currentColor 10%,transparent)}}
 
 /* The plugin switchboard. The card's own border carries the state, so the page can be
    read at a glance without parsing every pill — an enabled feed and a disabled one
@@ -5922,7 +5924,7 @@ padding:.05rem .4rem;border-radius:99px}
    without this "Open application" renders as bare underlined text in a row of buttons. */
 a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid var(--rule);
 background:var(--page);color:var(--ink-2);font:inherit;font-size:.9rem;text-decoration:none}
-@media (hover:hover){a.btn:hover{opacity:.7}}
+@media (hover:hover){a.btn:hover{color:var(--ink);border-color:var(--ink-2)}}
 #resetmsg{margin-left:0}
 .phead .note{font-weight:400;font-size:.8rem}
 
@@ -5990,7 +5992,7 @@ background:transparent;color:inherit;font:inherit}
 .note{opacity:.75;font-size:.9rem}
 button{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid var(--rule);
 background:var(--page);color:var(--ink-2);font:inherit}
-@media (hover:hover){button:not(:disabled):hover{opacity:.7}}
+@media (hover:hover){button:not(:disabled):hover{color:var(--ink);border-color:var(--ink-2)}}
 button:disabled{opacity:.5;cursor:default}
 """
 
