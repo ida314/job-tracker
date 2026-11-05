@@ -146,3 +146,12 @@ def test_hover_does_not_dim_a_control():
 def test_a_scrolling_panel_does_not_scroll_the_page_behind_it():
     assert "overscroll-behavior:contain" in server._POSTING_CSS.split(".jd{", 1)[1].split("}", 1)[0]
     assert "overscroll-behavior:contain" in server._APPLY_CSS.split("#shotbox{", 1)[1].split("}", 1)[0]
+
+
+def test_the_letter_glyph_asks_for_its_text_form():
+    """Some platforms draw a bare U+2709 as a colour emoji, which ignores `color`. One constant,
+    so a copy added later cannot quietly be the bare one."""
+    assert dashboard.LETTER_GLYPH == "&#9993;&#xFE0E;"
+    for path in SOURCES:
+        text = path.read_text()
+        assert text.count("&#9993;") == (1 if path.name == "dashboard.py" else 0), path.name

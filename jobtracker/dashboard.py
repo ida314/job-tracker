@@ -62,6 +62,11 @@ MANUAL_INTERVAL_DAYS = 7
 #
 # Each band ships a paired ink because the ramp crosses the light/dark text flip at a
 # different band in each mode: light runs dark→light, dark runs light→dark.
+# The cover letter's mark, with the variation selector that asks for the text form. Without it
+# some platforms draw U+2709 as a colour emoji, which ignores `color` and so every state a
+# button's colour carries.
+LETTER_GLYPH = "&#9993;&#xFE0E;"
+
 _CSS = """
 :root {
   color-scheme: light;
@@ -1752,17 +1757,17 @@ def _letter_control(row, letter_row, letters_built) -> str:
     j = html.escape(row["ats_job_id"], quote=True)
     copy = (
         f'<button class="letter-tex" data-company="{c}" data-job="{j}" '
-        'title="Save the cover letter&#39;s LaTeX source">tex&#9993;</button>'
+        f'title="Save the cover letter&#39;s LaTeX source">tex{LETTER_GLYPH}</button>'
     )
     if _letter_built(row, letters_built, letter_row):
         return (
             f'<button class="letter-dl" data-company="{c}" data-job="{j}" '
-            'data-glyph="&#9993;" title="Save the cover letter">&#9993;</button>'
+            f'data-glyph="{LETTER_GLYPH}" title="Save the cover letter">{LETTER_GLYPH}</button>'
             + copy
         )
     return (
         f'<button class="letter-build" data-company="{c}" data-job="{j}" '
-        'data-glyph="&#9993;" title="Build the cover letter">&#9993;</button>' + copy
+        f'data-glyph="{LETTER_GLYPH}" title="Build the cover letter">{LETTER_GLYPH}</button>' + copy
     )
 
 

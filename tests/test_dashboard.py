@@ -1099,7 +1099,7 @@ def test_the_two_tex_copies_are_told_apart_without_hovering():
     cell = panel[panel.index('<td class="act">'):]
     cell = cell[:cell.index("</td>")]
     assert ">tex</button>" in cell
-    assert ">tex&#9993;</button>" in cell
+    assert f">tex{dashboard.LETTER_GLYPH}</button>" in cell
     assert cell.count(">tex</button>") == 1
     assert "data-act" not in cell
 

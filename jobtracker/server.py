@@ -873,13 +873,13 @@ def _posting_documents(conn, company: str, ats_job_id: str, answers) -> list:
     if letter_kind == "override":
         out.append(
             f'<a class="ddl" href="/api/document?company={qc}&amp;job={qj}&amp;kind=letter" '
-            'download>&#9993;</a>'
+            f'download>{dashboard_mod.LETTER_GLYPH}</a>'
         )
     elif letter_kind == "generated":
         # The existing route, which serves what `coverletter build` compiled.
         out.append(
             f'<a class="ddl" href="/api/coverletter?company={qc}&amp;job={qj}" '
-            'download>&#9993;</a>'
+            f'download>{dashboard_mod.LETTER_GLYPH}</a>'
         )
     out.append(
         '<input type="file" class="pfile" data-kind="letter" accept=".pdf,.docx" '
@@ -1075,7 +1075,7 @@ def _submitted_block(conn, company: str, ats_job_id: str, app) -> list:
         day = apps_mod.day_of(row["submitted_at"]) or ""
         out.append(f'<div class="shead">Submitted <strong>{html.escape(day)}</strong></div>')
         for kind, label, glyph in (("resume", "Resume", "&darr;"),
-                                   ("letter", "Cover letter", "&#9993;")):
+                                   ("letter", "Cover letter", dashboard_mod.LETTER_GLYPH)):
             name, word = row[kind], row[f"{kind}_kind"]
             if not name:
                 out.append(f'<div class="sdoc"><span class="dlabel">{label}</span>'
@@ -2425,8 +2425,8 @@ def _downloads_card(downloads_path: Optional[Path]) -> list:
     p = ["<h2 id=downloads>Where saved documents go</h2>"]
     p.append(
         "<p class=note>The four documents this repo compiles for a posting. Saving one "
-        "is the <code>&darr;</code>, <code>&#9993;</code>, <code>tex</code> and "
-        "<code>tex&#9993;</code> controls beside a posting; this is where each lands. "
+        "is the <code>&darr;</code>, <code>" + dashboard_mod.LETTER_GLYPH + "</code>, <code>tex</code> and "
+        "<code>tex" + dashboard_mod.LETTER_GLYPH + "</code> controls beside a posting; this is where each lands. "
         f"Written to <code>{html.escape(str(path))}</code>.</p>"
     )
     if error:
