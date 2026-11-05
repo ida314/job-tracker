@@ -62,3 +62,10 @@ def test_a_disabled_button_looks_disabled():
     assert "button:disabled{opacity:.5;cursor:default}" in server._EXTRA_CSS
     assert "button:not(:disabled):hover" in server._EXTRA_CSS
     assert "button:hover" not in server._EXTRA_CSS
+
+
+def test_no_rounded_table_collapses_its_borders():
+    """A radius on a collapsed table is undefined: Chromium drops the border ring and Firefox
+    leaves square nubs at the corners. `table` carries the radius, so nothing may collapse."""
+    for name, css in SHEETS.items():
+        assert "border-collapse:collapse" not in css.replace(" ", ""), name

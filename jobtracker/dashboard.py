@@ -176,7 +176,9 @@ a { color: var(--link); text-decoration: none; }
          font-variant-numeric: tabular-nums; }
 
 /* --- tables ---------------------------------------------------------------- */
-table { width: 100%; border-collapse: collapse; background: var(--surface);
+/* `separate`, because a radius on a collapsed table is undefined: Chromium drops the border
+   ring and Firefox leaves square nubs at the corners. */
+table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface);
         border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 th { text-align: left; font-size: 11.5px; text-transform: uppercase;
      letter-spacing: 0.05em; color: var(--muted); font-weight: 600;

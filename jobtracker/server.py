@@ -651,7 +651,7 @@ _COMPANIES_CSS = """
 .coresult pre{overflow-x:auto;font-size:.75rem;margin:.5rem 0 0;white-space:pre;
         max-height:22rem}
 .coresult.bad{border-color:var(--critical)}
-.cotable{width:100%;border-collapse:collapse;font-size:.85rem}
+.cotable{width:100%;font-size:.85rem}
 .cotable td,.cotable th{padding:.3rem .5rem;border-bottom:1px solid var(--grid);
         text-align:left}
 .cotable .muted{color:var(--muted)}
