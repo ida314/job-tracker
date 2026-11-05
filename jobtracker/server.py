@@ -597,62 +597,62 @@ _POSTING_CSS = """
 .pmeta .quiet{color:var(--muted);font-style:italic}
 .applybar{margin:.2rem 0 1.2rem}
 .applybar .apply{display:inline-block;padding:.45rem .9rem;border-radius:7px;
-        border:1px solid var(--line);background:var(--card);color:inherit;
+        border:1px solid var(--rule);background:var(--surface);color:inherit;
         text-decoration:none;font-weight:600}
-.pblock{border:1px solid var(--line);border-radius:10px;padding:.85rem 1rem;
-        margin:.9rem 0;background:var(--card)}
+.pblock{border:1px solid var(--border);border-radius:10px;padding:.85rem 1rem;
+        margin:.9rem 0;background:var(--surface)}
 .pblock h2{margin:0 0 .6rem;font-size:.95rem}
 .pblock .terms,.pblock .why{font-size:.85rem;color:var(--muted);margin:.15rem 0}
 .jd{white-space:pre-wrap;font-size:.83rem;line-height:1.5;max-height:26rem;
-        overflow-y:auto;margin-top:.5rem;color:var(--fg)}
+        overflow-y:auto;margin-top:.5rem;color:var(--ink)}
 .doc,.sdoc{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;
-        padding:.4rem 0;border-top:1px solid var(--line)}
+        padding:.4rem 0;border-top:1px solid var(--grid)}
 .doc:first-of-type,.sdoc:first-of-type{border-top:0}
 .dlabel{min-width:6.5rem;font-weight:600;font-size:.85rem}
 .dname{font-family:ui-monospace,monospace;font-size:.8rem}
 .dkind{font-size:.75rem;color:var(--muted)}
 .dnone{font-size:.8rem;color:var(--muted);font-style:italic}
-.ddl{text-decoration:none;border:1px solid var(--line);border-radius:5px;
+.ddl{text-decoration:none;border:1px solid var(--rule);border-radius:5px;
         padding:.05rem .4rem;color:inherit}
 .pfile{font-size:.75rem;max-width:13rem}
 .q{display:grid;grid-template-columns:1fr;gap:.3rem;padding:.55rem 0;
-        border-top:1px solid var(--line)}
+        border-top:1px solid var(--grid)}
 .q:first-of-type{border-top:0}
 .q.seeded{opacity:.85}
-.qq,.qa{font:inherit;font-size:.85rem;padding:.35rem;border:1px solid var(--line);
-        border-radius:6px;background:var(--bg);color:var(--fg);width:100%;
+.qq,.qa{font:inherit;font-size:.85rem;padding:.35rem;border:1px solid var(--muted);
+        border-radius:6px;background:var(--page);color:var(--ink);width:100%;
         box-sizing:border-box}
 .qa{resize:vertical}
 .qacts{display:flex;gap:.4rem;align-items:center}
 .qseed{font-size:.72rem;color:var(--muted);font-style:italic;margin-right:auto}
-.sub{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--line);border-radius:8px}
+.sub{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--rule);border-radius:8px}
 .shead{font-size:.85rem;margin-bottom:.35rem}
 .sqa{display:grid;grid-template-columns:1fr;gap:.15rem;margin-top:.4rem}
 .sq{font-size:.8rem;font-weight:600}
 .sa{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin-bottom:.4rem}
-.qsec .danger,.aprow .danger{color:var(--warn)}
+.qsec .danger,.aprow .danger{color:var(--critical)}
 @media (max-width:620px){.dlabel{min-width:auto}}
 """
 
 _COMPANIES_CSS = """
-.cocard{border:1px solid var(--line);border-radius:10px;padding:1rem;margin:1rem 0;
-        background:var(--card)}
+.cocard{border:1px solid var(--border);border-radius:10px;padding:1rem;margin:1rem 0;
+        background:var(--surface)}
 .cocard .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
         gap:.6rem .9rem;margin-top:.7rem}
 .cocard label{display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;
         color:var(--muted)}
 .cocard input,.cocard select,.cocard textarea{font:inherit;font-size:.85rem;padding:.35rem;
-        border:1px solid var(--line);border-radius:6px;background:var(--bg);
-        color:var(--fg)}
+        border:1px solid var(--muted);border-radius:6px;background:var(--page);
+        color:var(--ink)}
 .cocard textarea{min-height:3.4rem;resize:vertical}
 .cocard .wide{grid-column:1/-1}
 .hint{font-size:.75rem;color:var(--muted);margin:.15rem 0 0}
-.coresult{margin-top:.9rem;padding:.7rem;border-radius:8px;border:1px solid var(--line)}
+.coresult{margin-top:.9rem;padding:.7rem;border-radius:8px;border:1px solid var(--border)}
 .coresult pre{overflow-x:auto;font-size:.75rem;margin:.5rem 0 0;white-space:pre;
         max-height:22rem}
-.coresult.bad{border-color:var(--warn)}
+.coresult.bad{border-color:var(--critical)}
 .cotable{width:100%;border-collapse:collapse;font-size:.85rem}
-.cotable td,.cotable th{padding:.3rem .5rem;border-bottom:1px solid var(--line);
+.cotable td,.cotable th{padding:.3rem .5rem;border-bottom:1px solid var(--grid);
         text-align:left}
 .cotable .muted{color:var(--muted)}
 """
