@@ -83,3 +83,9 @@ def test_the_submission_record_is_not_the_page_subtitle():
     """`dashboard._CSS` `.sub` is a grey 13px subtitle, and its colour and size leaked into
     /posting's record of what you sent when that block shared the name."""
     assert not re.search(r"(^|[\s,])\.sub\b", _without_comments(server._POSTING_CSS))
+
+
+def test_the_filter_chip_inherits_the_page_font():
+    """A `<button>` does not inherit a font by default; this one computed to Arial, the only
+    control on the page that did."""
+    assert "font: inherit" in dashboard._CSS.split(".fchip {", 1)[1].split("}", 1)[0]

@@ -170,7 +170,7 @@ a { color: var(--link); text-decoration: none; }
 /* The filter chip. Not `.chip`, which is a plain text token on /tuning and /settings: both
    stylesheets load together there, and this rule's pointer and `user-select: none` reached
    tokens that do nothing when clicked and could not be selected to copy. */
-.fchip { font-size: 12.5px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
+.fchip { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
         border: 1px solid var(--rule); background: var(--surface); color: var(--ink-2);
         user-select: none; }
 .fchip[aria-pressed="true"] { background: var(--ink); color: var(--page);
