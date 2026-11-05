@@ -604,7 +604,7 @@ _POSTING_CSS = """
 .pblock h2{margin:0 0 .6rem;font-size:.95rem}
 .pblock .terms,.pblock .why{font-size:.85rem;color:var(--muted);margin:.15rem 0}
 .jd{white-space:pre-wrap;font-size:.83rem;line-height:1.5;max-height:26rem;
-        overflow-y:auto;margin-top:.5rem;color:var(--ink)}
+        overflow-y:auto;overscroll-behavior:contain;margin-top:.5rem;color:var(--ink)}
 .doc,.sdoc{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;
         padding:.4rem 0;border-top:1px solid var(--grid)}
 .doc:first-of-type,.sdoc:first-of-type{border-top:0}
@@ -5855,7 +5855,7 @@ background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
    view — every field at once, the state of the form at a glance. `actual` is full width
    and legible, and it is the *box* that scrolls, never the document, so the field list
    beside it does not move while you look. */
-#shotbox{max-height:78vh;overflow:auto}
+#shotbox{max-height:78vh;overflow:auto;overscroll-behavior:contain}
 #preview.fit{width:auto;max-width:100%;max-height:78vh;object-fit:contain;
 cursor:zoom-in}
 #preview.actual{width:100%;height:auto;cursor:zoom-out}

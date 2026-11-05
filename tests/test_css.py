@@ -141,3 +141,8 @@ def test_hover_does_not_dim_a_control():
             found = re.search(r"opacity:\s*([\d.]+)", body)
             if ":hover" in selector and found:
                 assert float(found.group(1)) == 1, (name, selector)
+
+
+def test_a_scrolling_panel_does_not_scroll_the_page_behind_it():
+    assert "overscroll-behavior:contain" in server._POSTING_CSS.split(".jd{", 1)[1].split("}", 1)[0]
+    assert "overscroll-behavior:contain" in server._APPLY_CSS.split("#shotbox{", 1)[1].split("}", 1)[0]
