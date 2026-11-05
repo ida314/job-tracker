@@ -625,7 +625,7 @@ _POSTING_CSS = """
 .qa{resize:vertical}
 .qacts{display:flex;gap:.4rem;align-items:center}
 .qseed{font-size:.72rem;color:var(--muted);font-style:italic;margin-right:auto}
-.sub{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--rule);border-radius:8px}
+.subrec{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--rule);border-radius:8px}
 .shead{font-size:.85rem;margin-bottom:.35rem}
 .sqa{display:grid;grid-template-columns:1fr;gap:.15rem;margin-top:.4rem}
 .sq{font-size:.8rem;font-weight:600}
@@ -1067,7 +1067,7 @@ def _submitted_block(conn, company: str, ats_job_id: str, app) -> list:
     c = html.escape(company, quote=True)
     j = html.escape(ats_job_id, quote=True)
     row = store.get_submission(conn, company, ats_job_id)
-    out = ['<div class="sub">']
+    out = ['<div class="subrec">']
     if row is None:
         out.append('<div class="dnone">Nothing was recorded about what you sent.</div>')
     else:

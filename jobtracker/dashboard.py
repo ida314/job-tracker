@@ -167,10 +167,13 @@ a { color: var(--link); text-decoration: none; }
   border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
 }
 .filters input[type=search] { min-width: 250px; }
-.chip { font-size: 12.5px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
+/* The filter chip. Not `.chip`, which is a plain text token on /tuning and /settings: both
+   stylesheets load together there, and this rule's pointer and `user-select: none` reached
+   tokens that do nothing when clicked and could not be selected to copy. */
+.fchip { font-size: 12.5px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
         border: 1px solid var(--rule); background: var(--surface); color: var(--ink-2);
         user-select: none; }
-.chip[aria-pressed="true"] { background: var(--ink); color: var(--page);
+.fchip[aria-pressed="true"] { background: var(--ink); color: var(--page);
                              border-color: var(--ink); }
 .count { font-size: 12.5px; color: var(--muted); margin-left: auto;
          font-variant-numeric: tabular-nums; }
@@ -719,7 +722,7 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
   var q = scope.querySelector('[data-f="q"]');
   var atsSel = scope.querySelector('[data-f="ats"]');   // absent on a panel with no ATS
   var locSel = scope.querySelector('[data-f="loc"]');   // absent when no criteria were passed
-  var chips = Array.prototype.slice.call(scope.querySelectorAll('.chip[data-attr]'));
+  var chips = Array.prototype.slice.call(scope.querySelectorAll('.fchip[data-attr]'));
 
   // Chips group by the row attribute they read (tier, source). Within a group any pressed
   // chip admits a row; across groups every group must. A group with nothing pressed is off.
@@ -2115,7 +2118,7 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
     for t in tiers:
         label = f"T{t}" if t != "—" else "untiered"
         parts.append(
-            f'<button type="button" class="chip" data-attr="tier" '
+            f'<button type="button" class="fchip" data-attr="tier" '
             f'data-val="{html.escape(str(t))}" '
             f'aria-pressed="false">{html.escape(label)}</button>'
         )
@@ -2316,7 +2319,7 @@ def _board_filters(parts, rows, labels, criteria=None) -> None:
         parts.append("</select>")
     for source in sources:
         parts.append(
-            f'<button type="button" class="chip" data-attr="src" '
+            f'<button type="button" class="fchip" data-attr="src" '
             f'data-val="{html.escape(source, quote=True)}" '
             f'aria-pressed="false">{html.escape(source)}</button>'
         )

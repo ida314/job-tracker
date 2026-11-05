@@ -69,3 +69,17 @@ def test_no_rounded_table_collapses_its_borders():
     leaves square nubs at the corners. `table` carries the radius, so nothing may collapse."""
     for name, css in SHEETS.items():
         assert "border-collapse:collapse" not in css.replace(" ", ""), name
+
+
+def test_the_filter_chip_rule_cannot_reach_a_text_token():
+    """/tuning and /settings load `dashboard._CSS` and render `.chip` as plain text. The filter
+    chip's pointer and `user-select: none` merged onto those, so a token looked clickable and
+    could not be selected to copy."""
+    assert not re.search(r"(^|[\s,])\.chip\b", _without_comments(dashboard._CSS))
+    assert "user-select" in dashboard._CSS.split(".fchip {", 1)[1].split("}", 1)[0]
+
+
+def test_the_submission_record_is_not_the_page_subtitle():
+    """`dashboard._CSS` `.sub` is a grey 13px subtitle, and its colour and size leaked into
+    /posting's record of what you sent when that block shared the name."""
+    assert not re.search(r"(^|[\s,])\.sub\b", _without_comments(server._POSTING_CSS))
