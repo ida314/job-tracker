@@ -89,3 +89,9 @@ def test_the_filter_chip_inherits_the_page_font():
     """A `<button>` does not inherit a font by default; this one computed to Arial, the only
     control on the page that did."""
     assert "font: inherit" in dashboard._CSS.split(".fchip {", 1)[1].split("}", 1)[0]
+
+
+def test_the_file_input_button_is_themed():
+    """Left to the browser it is a grey native button in its own font, and in dark mode a grey
+    slab, beside themed buttons on every pick card."""
+    assert "::file-selector-button {" in dashboard._CSS

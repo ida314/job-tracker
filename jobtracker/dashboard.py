@@ -301,6 +301,15 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .docs button[disabled] { opacity: .5; cursor: default; }
 .pick .docs .tailor-tex, .pick .docs .letter-tex { margin-left: 4px; }
 
+/* The file input's own button, which the browser draws grey and in its own font otherwise —
+   beside themed buttons on every pick card and on /posting. */
+input[type=file]::file-selector-button { appearance: none; font: inherit; font-size: 11.5px;
+    background: var(--page); color: var(--ink-2); border: 1px solid var(--rule);
+    border-radius: 6px; padding: 3px 9px; margin-inline-end: 8px; cursor: pointer; }
+@media (hover: hover) { input[type=file]:not(:disabled)::file-selector-button:hover {
+    color: var(--ink); border-color: var(--ink-2); } }
+input[type=file]:disabled::file-selector-button { opacity: .5; cursor: default; }
+
 /* The rest of the ranking. A <details>, so it opens with no script at all — and not a
    table, so the filter JS can never reach into the Today tab. */
 .rest { margin: 0 0 26px; }
