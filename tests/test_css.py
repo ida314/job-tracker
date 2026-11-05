@@ -95,3 +95,9 @@ def test_the_file_input_button_is_themed():
     """Left to the browser it is a grey native button in its own font, and in dark mode a grey
     slab, beside themed buttons on every pick card."""
     assert "::file-selector-button {" in dashboard._CSS
+
+
+def test_the_nav_is_styled_on_the_pages_that_load_only_the_base_sheet():
+    """`/` and `/jobboards` load `dashboard._CSS` alone, and every page renders `_NAV`."""
+    assert ".nav {" in dashboard._CSS
+    assert ".nav{" not in server._EXTRA_CSS

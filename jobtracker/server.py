@@ -5965,7 +5965,6 @@ _EXTRA_CSS = """
    rather than a tint, so the two are distinguishable at a glance on the same page. */
 .flagbanner{border-left:4px solid #dc2626;background:rgba(220,38,38,.1);font-weight:600}
 
-.nav{margin:0 0 1rem;font-size:.9rem}
 .banner{padding:.6rem .8rem;border-radius:6px;font-weight:600}
 .banner.ok{background:#0f5132;color:#d1e7dd}
 .banner.bad{background:#58151c;color:#f8d7da}

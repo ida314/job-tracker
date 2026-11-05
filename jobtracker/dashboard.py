@@ -138,6 +138,10 @@ h2 { font-size: 15px; font-weight: 650; margin: 34px 0 10px; letter-spacing: -0.
 a { color: var(--link); text-decoration: none; }
 @media (hover: hover) { a:hover { text-decoration: underline; } }
 
+/* Here and not in `server._EXTRA_CSS`: `/` and `/jobboards` load this sheet alone, so the nav
+   was a different size and spacing on those two pages than on the rest. */
+.nav { margin: 0 0 1rem; font-size: .9rem; }
+
 /* --- stat tiles ------------------------------------------------------------ */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
          gap: 10px; margin-top: 18px; }
