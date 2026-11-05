@@ -235,6 +235,8 @@ disagree about what is on it.
 - **Every `var(--x)` has to resolve.** With no fallback, one undefined name makes the whole
   `border:` shorthand compute to `0 none` — no error, no log, and a form with invisible fields
   reads as a minimal one. The tokens are in `dashboard._CSS`, the one sheet every page loads.
+- **`:hover` lives inside `@media (hover: hover)`.** On touch it latches after a tap, so a dimming
+  hover leaves a button you just pressed looking disabled.
 - **Escape everything.** Titles and locations come from third-party APIs; URLs get a scheme check
   too, or a `javascript:` href executes on click.
 - **Location sorts, never filters.** The dropdown defaults to "Anywhere".

@@ -136,7 +136,7 @@ h2 { font-size: 15px; font-weight: 650; margin: 34px 0 10px; letter-spacing: -0.
 .sub { color: var(--ink-2); font-size: 13px; margin: 0 0 4px; }
 .note { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
 a { color: var(--link); text-decoration: none; }
-a:hover { text-decoration: underline; }
+@media (hover: hover) { a:hover { text-decoration: underline; } }
 
 /* --- stat tiles ------------------------------------------------------------ */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -184,7 +184,7 @@ th { text-align: left; font-size: 11.5px; text-transform: uppercase;
 td { padding: 9px 12px; border-bottom: 1px solid var(--grid); font-size: 13.5px;
      vertical-align: top; }
 tr:last-child td { border-bottom: none; }
-tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+@media (hover: hover) { tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); } }
 td.co { font-weight: 550; white-space: nowrap; }
 td.loc, td.why { color: var(--ink-2); font-size: 12.5px; }
 td.seen { color: var(--muted); font-size: 12.5px; white-space: nowrap;
@@ -220,7 +220,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
        color: var(--muted); font: inherit; font-size: 14px; padding: 8px 14px;
        cursor: pointer; margin-bottom: -1px; }
-.tab:hover { color: var(--ink-2); }
+@media (hover: hover) { .tab:hover { color: var(--ink-2); } }
 .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent);
                              font-weight: 600; }
 .tab .n { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 5px; }
@@ -238,7 +238,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick > :not(.rank) { grid-column: 2; }
 .pick h3 { margin: 0 0 3px; font-size: 17px; line-height: 1.3; }
 .pick h3 a { color: var(--ink); text-decoration: none; }
-.pick h3 a:hover { text-decoration: underline; }
+@media (hover: hover) { .pick h3 a:hover { text-decoration: underline; } }
 .pick .meta { color: var(--muted); font-size: 12.5px; margin-bottom: 8px;
               display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .pick .why { font-size: 13.5px; color: var(--ink-2); line-height: 1.5;
@@ -262,7 +262,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .act button { appearance: none; background: var(--page); color: var(--ink-2);
                     border-color: var(--rule); font: inherit;
                     font-size: 12.5px; line-height: 1.4; cursor: pointer; }
-.pick .act button:hover { color: var(--ink); border-color: var(--ink-2); }
+@media (hover: hover) { .pick .act button:hover { color: var(--ink); border-color: var(--ink-2); } }
 .pick .act button[disabled] { opacity: .5; cursor: default; }
 /* Whatever came back from /api/apply-to. Written by JS into an empty server-rendered
    node, so a page with JS off never shows a stray empty line. */
@@ -281,7 +281,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
                        border: 1px solid var(--rule); border-radius: 6px;
                        padding: 3px 9px; font: inherit; font-size: 11.5px;
                        cursor: pointer; }
-.pick .resume button:hover { color: var(--ink); border-color: var(--ink-2); }
+@media (hover: hover) { .pick .resume button:hover { color: var(--ink); border-color: var(--ink-2); } }
 .pick .resume button[disabled] { opacity: .5; cursor: default; }
 
 /* A pick's two documents: the same `↓` and `✉` the actions cell carries, each beside a
@@ -292,7 +292,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
     color: var(--ink-2); border: 1px solid var(--rule); border-radius: 6px;
     padding: 1px 9px; margin-left: 4px; font: inherit; font-size: 12px;
     cursor: pointer; text-decoration: none; }
-.pick .docs button:hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); }
+@media (hover: hover) { .pick .docs button:hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); } }
 .pick .docs button[disabled] { opacity: .5; cursor: default; }
 .pick .docs .tailor-tex, .pick .docs .letter-tex { margin-left: 4px; }
 
@@ -301,7 +301,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .rest { margin: 0 0 26px; }
 .rest > summary { cursor: pointer; font-size: 13px; color: var(--ink-2);
                   padding: 8px 0; }
-.rest > summary:hover { color: var(--ink); }
+@media (hover: hover) { .rest > summary:hover { color: var(--ink); } }
 .restlist { list-style: none; margin: 8px 0 0; padding: 0; }
 .restlist li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 9px;
                padding: 4px 0; border-top: 1px solid var(--grid); font-size: 13px; }
@@ -348,7 +348,7 @@ td.act { text-align: right; }
     color: var(--ink-2); border: 1px solid var(--grid); border-radius: 5px;
     font: inherit; font-size: 11px; line-height: 1.6; padding: 1px 7px; cursor: pointer;
     text-decoration: none; vertical-align: middle; }
-.act button:hover { color: var(--ink); border-color: var(--ink-2); }
+@media (hover: hover) { .act button:hover { color: var(--ink); border-color: var(--ink-2); } }
 .act button[disabled] { opacity: .5; cursor: default; }
 .act .tailor-build, .act .tailor-dl, .act .tailor-tex,
 .act .letter-build, .act .letter-dl, .act .letter-tex { margin-right: 5px; }
@@ -384,7 +384,7 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 .sortchip { font-size: 12.5px; padding: 3px 10px; border-radius: 999px;
             border: 1px solid var(--rule); background: var(--surface);
             color: var(--ink-2); text-decoration: none; }
-.sortchip:hover { text-decoration: none; border-color: var(--ink-2); }
+@media (hover: hover) { .sortchip:hover { text-decoration: none; border-color: var(--ink-2); } }
 .sortchip[aria-pressed="true"] { background: var(--ink); color: var(--page);
                                  border-color: var(--ink); }
 
@@ -408,7 +408,7 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 .app.done   { opacity: .78; }
 .app h3 { margin: 0 0 1px; font-size: 13.5px; line-height: 1.35; font-weight: 600; }
 .app h3 a { color: var(--ink); text-decoration: none; }
-.app h3 a:hover { text-decoration: underline; }
+@media (hover: hover) { .app h3 a:hover { text-decoration: underline; } }
 .app .co { color: var(--ink-2); font-weight: 400; }
 .app .meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap;
              gap: 2px 6px; align-items: center; font-variant-numeric: tabular-nums; }

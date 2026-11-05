@@ -5796,7 +5796,7 @@ border-radius:999px;border:1px solid rgba(127,127,127,.5);font-size:.85rem}
 .chip.no{border-color:rgba(220,38,38,.55);opacity:.85}
 .chip button{appearance:none;background:transparent;border:0;color:inherit;font:inherit;
 cursor:pointer;opacity:.5;padding:0 .35rem;line-height:1}
-.chip button:hover{opacity:1}
+@media (hover:hover){.chip button:hover{opacity:1}}
 .kwbox{flex:1;padding:.3rem .5rem;border-radius:5px;
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 """
@@ -5829,7 +5829,7 @@ max-width:100%}
 line-height:20px;white-space:nowrap}
 .appform .danger{margin-left:auto}
 .app .danger{border-color:rgba(220,53,69,.6);opacity:.75}
-.app .danger:hover{opacity:1;color:#dc3545}
+@media (hover:hover){.app .danger:hover{opacity:1;color:#dc3545}}
 /* A proposal from the mailbox. Marked as unwritten — the border is the reminder that
    nothing on this card has touched your application history yet. */
 .app.prop{border-left:3px solid var(--accent)}
@@ -5923,7 +5923,7 @@ padding:.05rem .4rem;border-radius:99px}
    without this "Open application" renders as bare underlined text in a row of buttons. */
 a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
 background:transparent;color:inherit;font:inherit;font-size:.9rem;text-decoration:none}
-a.btn:hover{opacity:.7}
+@media (hover:hover){a.btn:hover{opacity:.7}}
 #resetmsg{margin-left:0}
 .phead .note{font-weight:400;font-size:.8rem}
 
@@ -5992,7 +5992,7 @@ background:transparent;color:inherit;font:inherit}
 .note{opacity:.75;font-size:.9rem}
 button{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
 background:transparent;color:inherit;font:inherit}
-button:hover{opacity:.7}
+@media (hover:hover){button:hover{opacity:.7}}
 """
 
 # Every control on the apply page has its handler here, in the file that renders it.
