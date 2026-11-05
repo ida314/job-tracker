@@ -65,6 +65,9 @@ MANUAL_INTERVAL_DAYS = 7
 _CSS = """
 :root {
   color-scheme: light;
+  /* The two radii everything interactive or card-shaped takes. Badges keep their own. */
+  --radius-card:    10px;
+  --radius-control: 6px;
   --page:        #f9f9f7;
   --surface:     #fcfcfb;
   --ink:         #0b0b0b;
@@ -145,7 +148,7 @@ a { color: var(--link); text-decoration: none; }
 /* --- stat tiles ------------------------------------------------------------ */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
          gap: 10px; margin-top: 18px; }
-.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
         padding: 13px 15px; }
 .tile .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em;
            color: var(--muted); }
@@ -153,7 +156,7 @@ a { color: var(--link); text-decoration: none; }
 .tile .n { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
 
 /* --- tier bar chart -------------------------------------------------------- */
-.chart { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+.chart { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
          padding: 15px 17px; margin-top: 12px; }
 .bar-row { display: grid; grid-template-columns: 74px 1fr 42px; align-items: center;
            gap: 10px; margin: 7px 0; }
@@ -167,7 +170,7 @@ a { color: var(--link); text-decoration: none; }
 .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
            margin: 20px 0 6px; }
 .filters input[type=search], .filters select {
-  font: inherit; font-size: 13.5px; padding: 6px 10px; border-radius: 8px;
+  font: inherit; font-size: 13.5px; padding: 6px 10px; border-radius: var(--radius-control);
   border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
 }
 .filters input[type=search] { min-width: 250px; }
@@ -186,7 +189,7 @@ a { color: var(--link); text-decoration: none; }
 /* `separate`, because a radius on a collapsed table is undefined: Chromium drops the border
    ring and Firefox leaves square nubs at the corners. */
 table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface);
-        border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+        border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; }
 th { text-align: left; font-size: 11.5px; text-transform: uppercase;
      letter-spacing: 0.05em; color: var(--muted); font-weight: 600;
      padding: 9px 12px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
@@ -200,7 +203,7 @@ td.seen { color: var(--muted); font-size: 12.5px; white-space: nowrap;
           font-variant-numeric: tabular-nums; }
 .empty { padding: 18px; color: var(--muted); font-size: 13.5px; text-align: center;
          background: var(--surface); border: 1px solid var(--border);
-         border-radius: 10px; }
+         border-radius: var(--radius-card); }
 
 /* --- chips / badges -------------------------------------------------------- */
 .tier { display: inline-block; min-width: 26px; text-align: center; padding: 2px 6px;
@@ -236,7 +239,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 
 /* -- today's picks ---------------------------------------------------------------- */
 .picks { display: grid; gap: 14px; margin: 6px 0 26px; }
-.pick { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+.pick { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
         padding: 16px 18px; display: grid; grid-template-columns: 34px 1fr; gap: 0 14px; }
 .pick .rank { font-size: 26px; font-weight: 700; color: var(--rule); line-height: 1;
               grid-column: 1; grid-row: 1; }
@@ -264,7 +267,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
    line-height. Without the transparent border the anchor sits 2px shorter than its
    neighbours. */
 .pick .act a.apply, .pick .act button { display: inline-flex; align-items: center;
-                     border: 1px solid transparent; border-radius: 6px; padding: 6px 11px;
+                     border: 1px solid transparent; border-radius: var(--radius-control); padding: 6px 11px;
                      line-height: 1.4; white-space: nowrap; }
 .pick .act a.apply { background: var(--accent); color: #fcfcfb; text-decoration: none;
                      padding-inline: 14px; font-size: 13px; font-weight: 600; }
@@ -287,7 +290,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .resume .rname.own { color: var(--ink-2); }
 .pick .resume input[type=file] { font: inherit; font-size: 11.5px; max-width: 210px; }
 .pick .resume button { appearance: none; background: var(--page); color: var(--ink-2);
-                       border: 1px solid var(--rule); border-radius: 6px;
+                       border: 1px solid var(--rule); border-radius: var(--radius-control);
                        padding: 3px 9px; font: inherit; font-size: 11.5px;
                        cursor: pointer; }
 @media (hover: hover) { .pick .resume button:hover { color: var(--ink); border-color: var(--ink-2); } }
@@ -298,7 +301,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .docs { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
               margin-top: 6px; font-size: 12px; color: var(--muted); }
 .pick .docs button, .pick .docs a { appearance: none; background: var(--page);
-    color: var(--ink-2); border: 1px solid var(--rule); border-radius: 6px;
+    color: var(--ink-2); border: 1px solid var(--rule); border-radius: var(--radius-control);
     padding: 1px 9px; margin-left: 4px; font: inherit; font-size: 12px;
     cursor: pointer; text-decoration: none; }
 @media (hover: hover) { .pick .docs button:hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); } }
@@ -309,7 +312,7 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
    beside themed buttons on every pick card and on /posting. */
 input[type=file]::file-selector-button { appearance: none; font: inherit; font-size: 11.5px;
     background: var(--page); color: var(--ink-2); border: 1px solid var(--rule);
-    border-radius: 6px; padding: 3px 9px; margin-inline-end: 8px; cursor: pointer; }
+    border-radius: var(--radius-control); padding: 3px 9px; margin-inline-end: 8px; cursor: pointer; }
 @media (hover: hover) { input[type=file]:not(:disabled)::file-selector-button:hover {
     color: var(--ink); border-color: var(--ink-2); } }
 input[type=file]:disabled::file-selector-button { opacity: .5; cursor: default; }
@@ -363,7 +366,7 @@ td.act { text-align: right; }
    itself. Warned rather than muted: it is a question addressed to you. */
 .act .theld { color: var(--warning); border-bottom: 1px dotted currentColor; cursor: help; }
 .act button { appearance: none; background: var(--page);
-    color: var(--ink-2); border: 1px solid var(--grid); border-radius: 5px;
+    color: var(--ink-2); border: 1px solid var(--grid); border-radius: var(--radius-control);
     font: inherit; font-size: 11px; line-height: 1.6; padding: 1px 7px; cursor: pointer;
     text-decoration: none; vertical-align: middle; }
 @media (hover: hover) { .act button:hover { color: var(--ink); border-color: var(--ink-2); } }
@@ -408,7 +411,7 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 
 /* "Your inbox says something happened." Only rendered when there is something. */
 .banner.mail { background: var(--surface); border: 1px solid var(--border);
-               border-left: 3px solid var(--accent); border-radius: 8px;
+               border-left: 3px solid var(--accent); border-radius: var(--radius-card);
                padding: 9px 13px; font-size: 13px; margin: 10px 0 14px; }
 
 /* -- applications ------------------------------------------------------------------ */
@@ -418,7 +421,7 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 .apps { display: grid; gap: 6px; margin: 6px 0 22px; }
 /* Body-text sized. A list you scan every morning, so a row is a line of text with its
    controls under it, not a card with a form in it. */
-.app { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+.app { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
        padding: 7px 12px; font-size: 13px; }
 /* The left rule is the section's urgency, carried onto every row in it. */
 .app.urgent { border-left: 3px solid var(--serious); }

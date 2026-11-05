@@ -596,10 +596,10 @@ _POSTING_CSS = """
 .pmeta{margin:.1rem 0 .9rem;display:flex;flex-wrap:wrap;gap:.4rem .55rem;align-items:center}
 .pmeta .quiet{color:var(--muted);font-style:italic}
 .applybar{margin:.2rem 0 1.2rem}
-.applybar .apply{display:inline-block;padding:.45rem .9rem;border-radius:7px;
+.applybar .apply{display:inline-block;padding:.45rem .9rem;border-radius:var(--radius-control);
         border:1px solid var(--rule);background:var(--surface);color:inherit;
         text-decoration:none;font-weight:600}
-.pblock{border:1px solid var(--border);border-radius:10px;padding:.85rem 1rem;
+.pblock{border:1px solid var(--border);border-radius:var(--radius-card);padding:.85rem 1rem;
         margin:.9rem 0;background:var(--surface)}
 .pblock h2{margin:0 0 .6rem;font-size:.95rem}
 .pblock .terms,.pblock .why{font-size:.85rem;color:var(--muted);margin:.15rem 0}
@@ -612,7 +612,7 @@ _POSTING_CSS = """
 .dname{font-family:ui-monospace,monospace;font-size:.8rem}
 .dkind{font-size:.75rem;color:var(--muted)}
 .dnone{font-size:.8rem;color:var(--muted);font-style:italic}
-.ddl{text-decoration:none;border:1px solid var(--rule);border-radius:5px;
+.ddl{text-decoration:none;border:1px solid var(--rule);border-radius:var(--radius-control);
         padding:.05rem .4rem;color:inherit}
 .pfile{font-size:.75rem;max-width:13rem}
 .q{display:grid;grid-template-columns:1fr;gap:.3rem;padding:.55rem 0;
@@ -620,12 +620,12 @@ _POSTING_CSS = """
 .q:first-of-type{border-top:0}
 .q.seeded{opacity:.85}
 .qq,.qa{font:inherit;font-size:.85rem;padding:.35rem;border:1px solid var(--muted);
-        border-radius:6px;background:var(--page);color:var(--ink);width:100%;
+        border-radius:var(--radius-control);background:var(--page);color:var(--ink);width:100%;
         box-sizing:border-box}
 .qa{resize:vertical}
 .qacts{display:flex;gap:.4rem;align-items:center}
 .qseed{font-size:.72rem;color:var(--muted);font-style:italic;margin-right:auto}
-.subrec{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--rule);border-radius:8px}
+.subrec{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--rule);border-radius:var(--radius-control)}
 .shead{font-size:.85rem;margin-bottom:.35rem}
 .sqa{display:grid;grid-template-columns:1fr;gap:.15rem;margin-top:.4rem}
 .sq{font-size:.8rem;font-weight:600}
@@ -635,19 +635,19 @@ _POSTING_CSS = """
 """
 
 _COMPANIES_CSS = """
-.cocard{border:1px solid var(--border);border-radius:10px;padding:1rem;margin:1rem 0;
+.cocard{border:1px solid var(--border);border-radius:var(--radius-card);padding:1rem;margin:1rem 0;
         background:var(--surface)}
 .cocard .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
         gap:.6rem .9rem;margin-top:.7rem}
 .cocard label{display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;
         color:var(--muted)}
 .cocard input,.cocard select,.cocard textarea{font:inherit;font-size:.85rem;padding:.35rem;
-        border:1px solid var(--muted);border-radius:6px;background:var(--page);
+        border:1px solid var(--muted);border-radius:var(--radius-control);background:var(--page);
         color:var(--ink)}
 .cocard textarea{min-height:3.4rem;resize:vertical}
 .cocard .wide{grid-column:1/-1}
 .hint{font-size:.75rem;color:var(--muted);margin:.15rem 0 0}
-.coresult{margin-top:.9rem;padding:.7rem;border-radius:8px;border:1px solid var(--border)}
+.coresult{margin-top:.9rem;padding:.7rem;border-radius:var(--radius-control);border:1px solid var(--border)}
 .coresult pre{overflow-x:auto;font-size:.75rem;margin:.5rem 0 0;white-space:pre;
         max-height:22rem}
 .coresult.bad{border-color:var(--critical)}
@@ -5750,23 +5750,23 @@ _SETTINGS_CSS = """
 .gap{padding:.7rem .9rem;margin:.5rem 0;border-left:3px solid #d97706;background:rgba(217,119,6,.07)}
 .gap .ask{font-weight:600;margin-bottom:.2rem}
 .gap .row{display:flex;gap:.5rem;margin-top:.5rem}
-.gap .answer{flex:1;padding:.3rem .5rem;border-radius:5px;
+.gap .answer{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
-.card{padding:.8rem .9rem;margin:.5rem 0;border:1px solid rgba(127,127,127,.35);border-radius:6px}
+.card{padding:.8rem .9rem;margin:.5rem 0;border:1px solid rgba(127,127,127,.35);border-radius:var(--radius-card)}
 .card .row{display:flex;gap:.5rem;margin-top:.8rem;align-items:center}
 .field{display:flex;align-items:center;gap:.6rem;margin:.25rem 0}
 .field>span{flex:0 0 11rem;font-size:.9rem;opacity:.85}
-.field input{flex:1;padding:.3rem .5rem;border-radius:5px;
+.field input{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 .req{color:#d97706;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
 
 .flag{padding:.75rem .9rem;margin:.5rem 0;border:1px solid rgba(220,38,38,.4);
-border-left:4px solid #dc2626;border-radius:6px;background:rgba(220,38,38,.05)}
+border-left:4px solid #dc2626;border-radius:var(--radius-card);background:rgba(220,38,38,.05)}
 .flag .term{font-weight:700;font-size:1.05rem;letter-spacing:.01em}
 .flag .why{margin-top:.35rem;font-size:.9rem}
 .flag .quote{margin-top:.35rem;font-size:.88rem;opacity:.85}
 .flag .row{display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap}
-.flag button{padding:.35rem .7rem;border-radius:5px;border:1px solid currentColor;
+.flag button{padding:.35rem .7rem;border-radius:var(--radius-control);border:1px solid currentColor;
 background:transparent;color:inherit;font:inherit;font-size:.85rem}
 .flag button.kw-allow{border-color:#16a34a;color:#16a34a}
 .flag button.kw-deny{border-color:#dc2626;color:#dc2626}
@@ -5779,7 +5779,7 @@ background:transparent;color:inherit;font:inherit;font-size:.85rem}
 .card.plugin.disabled{border-left:4px solid rgba(127,127,127,.5);opacity:.85}
 .card.plugin .row{margin-top:0;flex-wrap:wrap}
 .card.plugin button{align-self:flex-start;margin-top:.5rem;padding:.3rem .7rem;
-border-radius:5px;border:1px solid currentColor;background:transparent;color:inherit;
+border-radius:var(--radius-control);border:1px solid currentColor;background:transparent;color:inherit;
 font:inherit;font-size:.85rem}
 .pill{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
 padding:.1rem .45rem;border-radius:999px;border:1px solid currentColor}
@@ -5797,7 +5797,7 @@ border-radius:999px;border:1px solid rgba(127,127,127,.5);font-size:.85rem}
 .chip button{appearance:none;background:transparent;border:0;color:inherit;font:inherit;
 cursor:pointer;opacity:.5;padding:0 .35rem;line-height:1}
 @media (hover:hover){.chip button:hover{opacity:1}}
-.kwbox{flex:1;padding:.3rem .5rem;border-radius:5px;
+.kwbox{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 """
 
@@ -5806,19 +5806,19 @@ border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 # this page also loads, so the read-only tab and this page cannot drift apart.
 _APPS_CSS = """
 .addapp{padding:.9rem 1rem;margin:.6rem 0 1.4rem;border:1px solid rgba(127,127,127,.35);
-border-radius:8px}
+border-radius:var(--radius-card)}
 .addapp .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
 gap:.6rem;margin-top:.7rem}
 .addapp label{display:flex;flex-direction:column;gap:.25rem;font-size:.82rem;opacity:.85}
 .addapp input,.addapp select{padding:.35rem .5rem;
-border-radius:5px;border:1px solid currentColor;background:transparent;color:inherit;
+border-radius:var(--radius-control);border:1px solid currentColor;background:transparent;color:inherit;
 font:inherit;font-size:.88rem;min-width:0}
 /* One compact row under each application, at the size of the text around it. Labels sit
    beside their field rather than above it, which is most of the height saved. */
 .appform{display:flex;flex-wrap:wrap;gap:.3rem .9rem;margin-top:.35rem;align-items:center;
 font-size:12px}
 .appform label{display:flex;align-items:center;gap:.3rem;color:var(--muted)}
-.appform input,.appform select{padding:1px 5px;height:22px;border-radius:4px;
+.appform input,.appform select{padding:1px 5px;height:22px;border-radius:var(--radius-control);
 border:1px solid var(--rule);background:transparent;color:var(--ink);font:inherit;
 font-size:12px;min-width:0}
 .appform .appnote{flex:0 1 13rem;width:13rem}
@@ -5849,7 +5849,7 @@ gap:1.2rem;align-items:start}
 .phead{display:flex;gap:.6rem;align-items:center;font-weight:600;
 margin:.2rem 0 .6rem;flex-wrap:wrap}
 .phead .ago{font-weight:400;font-size:.8rem;opacity:.7;margin-left:auto}
-#preview{border:1px solid rgba(127,127,127,.35);border-radius:6px;
+#preview{border:1px solid rgba(127,127,127,.35);border-radius:var(--radius-control);
 background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
 /* Two ways to look at a page several thousand pixels tall. `fit` scales all of it into
    view — every field at once, the state of the form at a glance. `actual` is full width
@@ -5869,10 +5869,10 @@ cursor:zoom-in}
 .phase .pill{padding:.1rem .5rem;border-radius:99px;background:rgba(127,127,127,.18);
 font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
 .lf{padding:.55rem .7rem;margin:.45rem 0;border:1px solid rgba(127,127,127,.3);
-border-radius:6px}
+border-radius:var(--radius-card)}
 .lf .lab{font-size:.86rem;margin-bottom:.35rem;display:flex;gap:.45rem;
 align-items:baseline;flex-wrap:wrap}
-.lf .lv,.lf input[type=file]{width:100%;padding:.35rem .5rem;border-radius:5px;
+.lf .lv,.lf input[type=file]{width:100%;padding:.35rem .5rem;border-radius:var(--radius-control);
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
 font-size:.9rem}
 .lf textarea.lv{resize:vertical}
@@ -5880,17 +5880,17 @@ font-size:.9rem}
 .lf .cbx .lv{width:auto}
 .lf .bank{display:flex;gap:.4rem;align-items:center;margin-top:.45rem;font-size:.78rem;
 opacity:.85;flex-wrap:wrap}
-.lf .bank .bankkey{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:4px;
+.lf .bank .bankkey{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:var(--radius-control);
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
 font-size:.78rem}
 .lf .bank input[type=checkbox]{width:auto}
-.bank .bankval{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:4px;
+.bank .bankval{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:var(--radius-control);
 border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
 font-size:.78rem}
 /* One question, several boxes. The block is what makes "How did you hear about us?"
    read as a question with nine answers rather than as nine questions. */
 .lfg{padding:.55rem .7rem;margin:.45rem 0;border:1px solid rgba(127,127,127,.3);
-border-radius:6px}
+border-radius:var(--radius-card)}
 .lfg .lgh{font-size:.86rem;margin-bottom:.35rem;display:flex;gap:.45rem;
 align-items:baseline;flex-wrap:wrap;font-weight:600}
 .lfg .bank{display:flex;gap:.4rem;align-items:center;margin:.3rem 0 .5rem;
@@ -5922,7 +5922,7 @@ padding:.05rem .4rem;border-radius:99px}
 .viewwin{font-weight:600}
 /* A link that acts as a button. `button{}` above styles the element, not the role, so
    without this "Open application" renders as bare underlined text in a row of buttons. */
-a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
+a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid currentColor;
 background:transparent;color:inherit;font:inherit;font-size:.9rem;text-decoration:none}
 @media (hover:hover){a.btn:hover{opacity:.7}}
 #resetmsg{margin-left:0}
@@ -5941,7 +5941,7 @@ color:#dc2626;font-weight:700;margin-bottom:.2rem}
 padding-top:1rem}
 .pane.tailor h2{font-size:1rem;margin:0 0 .6rem}
 .pane.tailor h2 .note{font-weight:400;font-size:.8rem;opacity:.75;margin-left:.4rem}
-.sg{border:1px solid rgba(127,127,127,.25);border-radius:6px;padding:.5rem .6rem;
+.sg{border:1px solid rgba(127,127,127,.25);border-radius:var(--radius-card);padding:.5rem .6rem;
 margin-bottom:.5rem}
 .sg-sec{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;opacity:.6}
 .sg-was,.sg-now{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -5965,7 +5965,7 @@ _EXTRA_CSS = """
    rather than a tint, so the two are distinguishable at a glance on the same page. */
 .flagbanner{border-left:4px solid #dc2626;background:rgba(220,38,38,.1);font-weight:600}
 
-.banner{padding:.6rem .8rem;border-radius:6px;font-weight:600}
+.banner{padding:.6rem .8rem;border-radius:var(--radius-card);font-weight:600}
 .banner.ok{background:#0f5132;color:#d1e7dd}
 .banner.bad{background:#58151c;color:#f8d7da}
 /* Switched off is neither of the two above. Green would read as "it worked" and red as
@@ -5985,12 +5985,12 @@ font-size:.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .rules.reject .chip{border-color:#dc3545}
 .rules.accept .chip{border-color:#0f5132}
 .addbox{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap}
-.addbox input{padding:.25rem .5rem;border-radius:5px;border:1px solid var(--rule);
+.addbox input{padding:.25rem .5rem;border-radius:var(--radius-control);border:1px solid var(--rule);
 background:transparent;color:inherit;font:inherit;min-width:16rem}
-select{padding:.2rem .4rem;border-radius:5px;border:1px solid currentColor;
+select{padding:.2rem .4rem;border-radius:var(--radius-control);border:1px solid currentColor;
 background:transparent;color:inherit;font:inherit}
 .note{opacity:.75;font-size:.9rem}
-button{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
+button{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid currentColor;
 background:transparent;color:inherit;font:inherit}
 @media (hover:hover){button:not(:disabled):hover{opacity:.7}}
 button:disabled{opacity:.5;cursor:default}

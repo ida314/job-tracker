@@ -101,3 +101,20 @@ def test_the_nav_is_styled_on_the_pages_that_load_only_the_base_sheet():
     """`/` and `/jobboards` load `dashboard._CSS` alone, and every page renders `_NAV`."""
     assert ".nav {" in dashboard._CSS
     assert ".nav{" not in server._EXTRA_CSS
+
+
+def _rules(css: str):
+    """`(selector, declarations)` for each rule, descending into at-rules."""
+    return re.findall(r"([^{}]+)\{([^{}]*)\}", _without_comments(css))
+
+
+CONTROL = re.compile(r"(^|[\s,.])(button|input|select|textarea)\b|\.ddl\b|\.apply\b|a\.btn\b|\.kwbox\b")
+
+
+def test_every_control_takes_the_control_radius():
+    """Controls had four radii (7, 6, 5, 4px) depending on which page's sheet drew them."""
+    for name, css in SHEETS.items():
+        for selector, body in _rules(css):
+            found = re.search(r"border-radius:\s*([^;}]+)", body)
+            if found and CONTROL.search(selector):
+                assert found.group(1).strip() == "var(--radius-control)", (name, selector)
