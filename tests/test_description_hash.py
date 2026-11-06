@@ -73,7 +73,7 @@ def _seed(conn, descriptions: dict):
     ]
     store.sync_postings(conn, "Acme", postings, TODAY)
     for jid, text in descriptions.items():
-        store.set_description(conn, "Acme", jid, text)
+        store.set_description(conn, "Acme", jid, text, "ats")
         store.record_verdict(conn, Verdict("Acme", jid, Decision.MATCH, "r", "rules"), TODAY)
     conn.commit()
 
@@ -136,7 +136,7 @@ def test_description_upgrade_rejudges():
     row = conn.execute("SELECT description_hash FROM rankings").fetchone()
     assert row["description_hash"] == store.description_hash(BLURB)
 
-    store.set_description(conn, "Acme", "1", PROSE)
+    store.set_description(conn, "Acme", "1", PROSE, "ats")
     conn.commit()
     units = _pending(conn, "judge")
     assert list(units) == ["1"]
@@ -176,7 +176,7 @@ def test_upgrade_does_not_mass_rejudge_existing_rankings(tmp_path, caplog):
     assert not any("stamped" in r.getMessage() for r in caplog.records)
 
     # And the stamp is a real one: a later change still re-asks.
-    store.set_description(conn, "Acme", "2", PROSE + " Updated.")
+    store.set_description(conn, "Acme", "2", PROSE + " Updated.", "ats")
     conn.commit()
     for task in ("judge", "tailor", "coverletter"):
         assert list(_pending(conn, task)) == ["2"], task
@@ -191,7 +191,7 @@ def test_tailor_unit_pending_again_after_description_change():
     _answer_everything(conn, ["1"])
     assert _pending(conn, "tailor") == {}
 
-    store.set_description(conn, "Acme", "1", PROSE)
+    store.set_description(conn, "Acme", "1", PROSE, "ats")
     conn.commit()
     units = _pending(conn, "tailor")
     assert list(units) == ["1"]
@@ -223,7 +223,7 @@ def test_other_postings_not_rekeyed():
     conn.commit()
 
     before = {t: _pending(conn, t) for t in ("judge", "tailor", "coverletter")}
-    store.set_description(conn, "Acme", "1", PROSE + " And more.")
+    store.set_description(conn, "Acme", "1", PROSE + " And more.", "ats")
     conn.commit()
     after = {t: _pending(conn, t) for t in ("judge", "tailor", "coverletter")}
 
@@ -234,7 +234,7 @@ def test_other_postings_not_rekeyed():
 
     # And with answers on file, only the changed posting comes back.
     _answer_everything(conn, ["1", "2"])
-    store.set_description(conn, "Acme", "1", PROSE + " Once more.")
+    store.set_description(conn, "Acme", "1", PROSE + " Once more.", "ats")
     conn.commit()
     for task in before:
         assert list(_pending(conn, task)) == ["1"], task
@@ -257,7 +257,7 @@ def test_a_unit_set_aside_on_the_blurb_is_retried_on_the_prose():
     conn.commit()
     assert unit.ident in store.blocked_units(conn, "judge", MAX_ATTEMPTS)
 
-    store.set_description(conn, "Acme", "1", PROSE)
+    store.set_description(conn, "Acme", "1", PROSE, "ats")
     conn.commit()
     (fresh,) = get_task("judge").pending(conn, _ctx())
     assert fresh.ident not in store.blocked_units(conn, "judge", MAX_ATTEMPTS)

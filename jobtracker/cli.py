@@ -1440,7 +1440,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
 def _read_only_rows(db_path: Path) -> tuple[list, dict]:
     """Every posting, and the overrides, read through a `mode=ro` URI.
 
-    Deliberately not `store.connect()`: connecting migrates, and a replay is evidence
+    Deliberately not `store.connect`: connecting migrates, and a replay is evidence
     gathered *before* a change — it must be safe to point at a copy of a production
     database, or at one you cannot write. A database that predates `decided_by` reads
     as human overrides, the same rule `apply_override` applies to a row without it.
