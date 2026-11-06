@@ -392,6 +392,13 @@ td.act { text-align: right; }
 .dupchip { font-size: 11px; color: var(--muted); border-bottom: 1px dotted currentColor; }
 .appliedchip { font-size: 11px; color: var(--good); }
 .bt th.src, .bt td.src { white-space: nowrap; }
+/* A row judged from a feed's listing fields rather than the posting's text. Outlined in
+   the warning colour, not filled: it is a caveat on the row, never a status, and the word
+   is printed — colour is reinforcement. Its score is capped in `rank.score_posting`. */
+.thin { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; padding: 1px 6px; border-radius: 999px; vertical-align: 2px;
+  border: 1px dashed var(--warning); color: var(--ink-2); background: var(--page);
+  white-space: nowrap; }
 .act .tchip, .act .tracked, .act .theld { display: inline-block; font-size: 11px;
     color: var(--muted);
                              vertical-align: middle; }
@@ -1344,7 +1351,7 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
         parts.append(
             f'<li><span class="rn">{n}</span>{_source_badge(row, by_name)}'
             f'<span class="role"><a {_posting_attrs(row, interactive)}>'
-            f'{html.escape(_role_of(row))}</a> '
+            f'{html.escape(_role_of(row))}</a>{_thin_chip(row)} '
             f'<span class="cobadge">{html.escape(employer)}</span></span>'
             f'<span class="meta">{" · ".join(bits)}</span>{act}</li>'
         )
@@ -1367,7 +1374,7 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
     parts.append('<div class="pick-head">')
     parts.append(
         f'<h3><a {_posting_attrs(row, interactive)}>'
-        f'{html.escape(row["title"])}</a></h3>'
+        f'{html.escape(row["title"])}</a>{_thin_chip(row)}</h3>'
     )
     # Under `serve` the card's controls sit behind one menu, beside the title. The static
     # file has only the Apply link, and a menu holding one link would be a click for
@@ -1722,6 +1729,17 @@ def _tag_chip(origin: str, labels: dict) -> str:
     label = labels.get(origin, origin)
     return (f'<span class="srctag" title="imported from {html.escape(origin, quote=True)}">'
             f"{html.escape(label)}</span>")
+
+
+def _thin_chip(row) -> str:
+    """The `thin` chip, with its leading space, or "" for a row with real text.
+
+    One definition for every surface that shows a role — picks, the drawer, both postings
+    tables — so "thin" cannot come to mean two things. `rank.is_thin` is the test.
+    """
+    if not rank_mod.is_thin(row):
+        return ""
+    return f' <span class="thin" title="{html.escape(rank_mod.THIN_WHY, quote=True)}">thin</span>'
 
 
 def _source_badge(row, by_name, labels=None) -> str:
@@ -2293,7 +2311,7 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
                 f'data-search="{html.escape(search)}">'
             )
             parts.append(f'<td><a {_posting_attrs(r, interactive)}>'
-                         f'{html.escape(r["title"])}</a></td>')
+                         f'{html.escape(r["title"])}</a>{_thin_chip(r)}</td>')
             # The NYC pin is a marker on the single most-preferred band, not a per-row
             # colored scale — four location colors beside seven tier chips would be noise.
             pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
@@ -2464,7 +2482,7 @@ def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactiv
             f'data-search="{html.escape(search)}">'
         )
 
-        chips = _tag_chip(origin, labels)
+        chips = _tag_chip(origin, labels) + _thin_chip(row)
         twin = company_keys.get(row["dedupe_key"] if "dedupe_key" in row.keys() else None)
         if twin is not None:
             # Not a warning and not a removal: the employer's own board carries this req

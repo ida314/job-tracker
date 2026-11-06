@@ -1521,7 +1521,7 @@ def open_postings_by_verdict(conn: sqlite3.Connection, decision: str) -> list[sq
             """
             SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
                    p.first_seen, p.posted_on, p.origin, p.employer, p.dedupe_key,
-                   v.reason,
+                   p.description_source, v.reason,
                    COALESCE(
                      (SELECT ai.status FROM applications ai
                        WHERE ai.company=p.company AND ai.ats_job_id=p.ats_job_id),

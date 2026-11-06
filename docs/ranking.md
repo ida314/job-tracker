@@ -123,6 +123,10 @@ a row is thin, so its answer about the text it saw stays an honest one and the c
 on its own the night real prose replaces the stub. An unjudged thin row still scores
 `None`: thinness caps a judgment, it never invents one.
 
+The row says so wherever its role is shown — picks, the drawer, both postings tables —
+with a `thin` chip titled *"judged from the feed's listing fields, not the posting's
+text"*.
+
 ## Two absences, handled deliberately
 
 Both of these would otherwise look exactly like a working ranking, which is why each
