@@ -25,6 +25,8 @@ Subcommands:
   serve         the same view, plus editing: decisions, criteria, dispositions
   report        re-render the latest state from state.db without fetching
   rematch       re-apply criteria to stored postings without fetching
+  audit-pins    remove the model's pins nothing on the page supports (llm pins
+                only, never yours); dry unless --write, then re-derives from the rules
   eval          replay criteria against your recorded judgments
   decide        record a judgment on one posting; --pin makes it an override
   apply         record an application and its outcome; --manual for an untracked job
@@ -1175,6 +1177,73 @@ def cmd_rematch(args: argparse.Namespace) -> int:
         b, a = before.get(verdict, 0), after.get(verdict, 0)
         arrow = f"  {b} → {a}" + (f"  ({a - b:+d})" if a != b else "")
         print(f"  {verdict:<10}{arrow}")
+    return 0
+
+
+# -- audit-pins --------------------------------------------------------------------
+_AUDIT_SAMPLES = 20
+
+
+def cmd_audit_pins(args: argparse.Namespace) -> int:
+    """Remove the model's pins that nothing on the page supports. Dry unless --write.
+
+    A one-off, by hand — never called from `check`, `work` or `prepare`. It sees only
+    `decided_by = 'llm'` overrides (`store.llm_pins`), so a human ruling is never a
+    candidate. A cleared pin's verdict is re-derived from the title by `match()` alone,
+    exactly what `check` would do to an unpinned posting; the model is not asked again.
+    `decisions`, `applications`, `rankings` and `level_readings` are not touched — an
+    application against a cleared posting is still an application.
+    """
+    from . import audit
+    from .models import Posting
+
+    criteria = load_criteria(args.criteria)
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
+    findings = audit.classify_pins(store.llm_pins(conn), criteria)
+    kept = [f for f in findings if f.action == audit.KEEP]
+    cleared = [f for f in findings if f.action == audit.CLEAR]
+
+    mode = "" if args.write else "  (dry run — nothing written; --write applies)"
+    print(f"audited {len(findings)} llm pin(s){mode}")
+    for label, bucket in (("kept", kept), ("cleared → will re-derive", cleared)):
+        print(f"  {label:<26}{len(bucket)}")
+    for label, bucket in (("kept", kept), ("cleared → will re-derive", cleared)):
+        if not bucket:
+            continue
+        print(f"\n{label} — up to {_AUDIT_SAMPLES} of {len(bucket)}:")
+        for f in bucket[:_AUDIT_SAMPLES]:
+            print(f"  {f.company:<18} {f.title[:52]:<52} {f.kind}/{f.decision:<8} {f.why}")
+
+    if not args.write:
+        conn.close()
+        return 0
+
+    today = _today()
+    moved = 0
+    for f in cleared:
+        row = conn.execute(
+            "SELECT title, url, location, posted_at, posted_on FROM postings "
+            "WHERE company=? AND ats_job_id=?",
+            (f.company, f.ats_job_id),
+        ).fetchone()
+        before = conn.execute(
+            "SELECT verdict FROM verdicts WHERE company=? AND ats_job_id=?",
+            (f.company, f.ats_job_id),
+        ).fetchone()
+        store.clear_override(conn, f.company, f.ats_job_id)
+        verdict = match(Posting(
+            company=f.company, ats_job_id=f.ats_job_id, title=row["title"],
+            url=row["url"], location=row["location"] or "",
+            posted_at=row["posted_at"], posted_on=row["posted_on"],
+        ), criteria)
+        store.record_verdict(conn, verdict, today)
+        if before is None or before["verdict"] != verdict.decision.value:
+            moved += 1
+    conn.commit()
+    conn.close()
+
+    log.info("audit-pins cleared %d llm pin(s); %d verdict(s) moved", len(cleared), moved)
+    print(f"\ncleared {len(cleared)} pin(s); {moved} verdict(s) moved on re-derivation")
     return 0
 
 
@@ -3021,6 +3090,16 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--db", default=None)
     rm.add_argument("--since", default=None)
     rm.set_defaults(func=cmd_rematch)
+
+    au = sub.add_parser(
+        "audit-pins",
+        help="remove model pins nothing on the page supports (dry unless --write)",
+    )
+    au.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    au.add_argument("--db", default=None)
+    au.add_argument("--write", action="store_true",
+                    help="clear the pins and re-derive their verdicts from the rules")
+    au.set_defaults(func=cmd_audit_pins)
 
     def _llm_flags(parser) -> None:
         # One transport now, so there is no --llm-provider: the router is the thing that

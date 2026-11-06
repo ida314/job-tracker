@@ -165,6 +165,43 @@ rematched 8637 open postings (2 override(s) applied)
 
 Overrides are re-applied on every rematch, so pinned postings keep your verdict.
 
+## Auditing the model's pins: `jobtracker audit-pins`
+
+The `level` task pins every verdict it reaches, because `check` would otherwise
+re-derive the title's verdict overnight and erase it. Pins written before readings were
+grounded have nothing behind them, and the worst of them are invisible: an `entry` pin
+on a job board row whose "description" is employer, location and a date, and a
+`not_entry` reject, which no page renders. `audit-pins` decides which stay.
+
+| Pin | Kept if | Otherwise |
+|---|---|---|
+| `entry`, `description_source = 'feed'` | the rules, from the title alone, reach the pinned verdict | cleared |
+| `not_entry`, any source | its quote (after `llm:not_entry:`) occurs in the title or description | cleared |
+| `entry`, `ats`/`prose`, with a quote | its quote occurs in the title or description | cleared |
+| `entry`, `ats`/`prose`, no quote | always — real prose was read, before quotes were stored | — |
+
+"Occurs" is `level.grounded`, the check the reading passed when it was made:
+whitespace-normalized and casefolded. Two cases the table does not name are **kept**,
+because the side to err on is the one that removes nothing on a guess: an `entry` pin
+with no quote and no recorded source, and a reason in a shape the audit does not
+recognise.
+
+```sh
+jobtracker audit-pins            # dry: counts per bucket and up to 20 titles each
+jobtracker audit-pins --write    # clear, then re-derive each cleared row with match()
+```
+
+- **It can only see `llm` pins.** `decided_by = 'llm'` is in the SQL, so a human
+  ruling is never in the list it chooses from. It is the only bulk remover of model
+  pins.
+- **A cleared pin re-derives from the rules, not the model.** `match()` writes a
+  `decided_by = 'rules'` verdict for each cleared row and nothing else; the run logs
+  how many moved.
+- **It leaves the outer loop alone.** `decisions`, `applications`, `rankings` and
+  `level_readings` are untouched; a cleared posting you applied to is still an
+  application.
+- **By hand only.** Nothing in `check`, `work` or `prepare` calls it.
+
 ## Doing it in a browser
 
 ```sh
