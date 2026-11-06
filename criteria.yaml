@@ -31,6 +31,17 @@ level_include:
   - "Software Engineer I"
   - junior
   - grad
+  # `grad` is anchored on alphanumeric boundaries, so it does not fire inside
+  # "Graduate" (the 'u' fails the lookahead) — "Graduate Software Engineer" sat in
+  # UNCERTAIN, and a 2026-11-05 replay of live titles found many Simplify rows shaped
+  # like it, 212 of them pinned by the model on what a title token answers. The
+  # lookbehind keeps it out of "Undergraduate" and "Postgraduate". A graduate title
+  # with no engineering signal ("Commercial Graduate Trainee") REJECTs through the
+  # non-engineering gate, which is correct. Checked 2026-11-06 on the laptop copy
+  # (9,150 postings): no employer name contains "graduate", and no title moved — the
+  # copy predates the Simplify import. Plurals still walk through: "2027 Graduates"
+  # stays UNCERTAIN, the safe direction.
+  - graduate
 
 # Hard disqualifiers in a title -> REJECT. Order-independent; first hit wins the reason.
 # Short tokens (ii, iii, vp) are matched on alphanumeric boundaries so "ii" does not

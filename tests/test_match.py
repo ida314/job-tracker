@@ -88,6 +88,19 @@ def test_swe_i_not_matched_by_engineer_ii(criteria):
     assert v.decision is Decision.REJECT and v.reason == "excluded_title:ii"
 
 
+def test_graduate_is_a_level_token(criteria):
+    # `grad` cannot fire inside "Graduate"; the whole word is its own token.
+    v = match(_p("Graduate Software Engineer", "NYC"), criteria)
+    assert v.decision is Decision.MATCH and v.reason == "level:graduate+eng:generic"
+    # No engineering signal: the non-engineering gate rejects it, as it should.
+    v = match(_p("Commercial Graduate Trainee", "NYC"), criteria)
+    assert v.decision is Decision.REJECT
+    assert v.reason == "non_engineering_role:level=graduate"
+    # The lookbehind keeps it out of a longer word.
+    v = match(_p("Undergraduate Software Engineer", "NYC"), criteria)
+    assert v.decision is Decision.UNCERTAIN
+
+
 def test_verdict_carries_identity(criteria):
     v = match(_p("Senior Engineer"), criteria)
     assert v.company == "Acme" and v.ats_job_id == "1" and v.decided_by == "rules"
