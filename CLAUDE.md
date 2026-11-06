@@ -781,6 +781,9 @@ uncertain list a row is in: `feed`, `read`, `signal`, and the two folds, `no_sig
 - **It is never `data-filterable` beside another panel** — one `[data-filter-scope]`, one search
   box, one table. The board-noise fold is a sibling `tbody.sub` the stylesheet hides while the
   no-signal fold is closed; `data-closed="1"` on each fold, `.closed` still JS-owned.
+- **`/api/decision/clear` only removes a human decision.** It deletes the `decisions` row,
+  drops the pin only if `decided_by` is `human`, and re-derives the verdict with `match()` under
+  whatever pin is left. No decision is a refusal with every table untouched.
 
 ---
 

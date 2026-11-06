@@ -6,6 +6,7 @@ own table, and the Today count is the length of the same list.
 """
 
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -228,3 +229,101 @@ def test_review_page_survives_an_empty_corpus(criteria):
     markup = _markup(_page(store.connect(":memory:"), criteria))
     assert "Nothing uncertain is open" in markup
     assert "<table" not in markup
+
+
+# -- undoing a ruling --------------------------------------------------------------------
+def _db(tmp_path):
+    path = tmp_path / "state.db"
+    conn = store.connect(path)
+    _post(conn, "Acme", "new", "Software Engineer")
+    _post(conn, "Simplify New-Grad-Positions", "s1", "Klaviyo — Software Engineer",
+          origin="simplify", employer="Klaviyo")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _handler(path):
+    h = server.Handler.__new__(server.Handler)
+    h.server = SimpleNamespace(db_path=path, criteria_path=config.CRITERIA_YAML)
+    return h
+
+
+def _tables(path):
+    conn = store.connect(path)
+    try:
+        return tuple(
+            [tuple(r) for r in conn.execute(f"SELECT * FROM {t} ORDER BY 1, 2")]
+            for t in ("decisions", "overrides", "verdicts")
+        )
+    finally:
+        conn.close()
+
+
+def test_decision_clear_refuses_when_nothing_to_clear(tmp_path):
+    path = _db(tmp_path)
+    # a pin with no decision behind it: nothing here is a ruling this undo may remove
+    conn = store.connect(path)
+    store.set_override(conn, "Acme", "new", "match", TODAY, reason="manual")
+    conn.commit()
+    conn.close()
+    before = _tables(path)
+
+    res = _handler(path)._api_decision_clear({"company": "Acme", "ats_job_id": "new"})
+    assert res["ok"] is False and "no ruling" in res["error"]
+    res = _handler(path)._api_decision_clear({"company": "Acme", "ats_job_id": "nope"})
+    assert res["ok"] is False
+    assert _tables(path) == before
+
+
+def test_decision_clear_never_clears_an_llm_override(tmp_path):
+    """A decision recorded without a pin (`decide` without --pin), on a posting the model
+    pinned. Undoing the decision removes the decision; the model's pin is not a ruling
+    this undoes, and the verdict re-derived after it still follows that pin."""
+    path = _db(tmp_path)
+    conn = store.connect(path)
+    store.record_decision(conn, "Acme", "new", "Software Engineer", "match", TODAY)
+    store.set_override(conn, "Acme", "new", "reject", TODAY, reason="llm:senior",
+                       decided_by="llm")
+    conn.commit()
+    conn.close()
+
+    res = _handler(path)._api_decision_clear({"company": "Acme", "ats_job_id": "new"})
+    assert res["ok"] is True and res["decisions"] == 0
+
+    conn = store.connect(path)
+    pin = conn.execute("SELECT decision, decided_by FROM overrides").fetchone()
+    assert tuple(pin) == ("reject", "llm")
+    v = conn.execute("SELECT verdict, decided_by FROM verdicts WHERE ats_job_id='new'"
+                     ).fetchone()
+    assert tuple(v) == ("reject", "llm")
+    conn.close()
+
+
+def test_a_human_ruling_undone_is_uncertain_again_and_unpinned(tmp_path):
+    path = _db(tmp_path)
+    before = _tables(path)
+    h = _handler(path)
+    assert h._api_decision({"company": "Acme", "ats_job_id": "new",
+                            "decision": "reject"})["ok"]
+    res = h._api_decision_clear({"company": "Acme", "ats_job_id": "new"})
+    assert res["ok"] is True and res["verdict"] == "uncertain"
+    after = _tables(path)
+    assert after[0] == [] and after[1] == []
+    # the verdict is the rules' again; the other row was never touched
+    verdicts = {r[1]: r for r in after[2]}
+    assert verdicts["new"][2] == "uncertain" and verdicts["new"][4] == "rules"
+    assert verdicts["s1"] == {r[1]: r for r in before[2]}["s1"]
+
+
+def test_rule_undo_rule_leaves_exactly_one_decision(tmp_path):
+    """The done condition: a click, its undo, then the other button."""
+    path = _db(tmp_path)
+    h = _handler(path)
+    ident = {"company": "Acme", "ats_job_id": "new"}
+    assert h._api_decision({**ident, "decision": "match"})["decisions"] == 1
+    assert h._api_decision_clear(ident)["decisions"] == 0
+    assert h._api_decision({**ident, "decision": "reject"})["decisions"] == 1
+    decisions, overrides, _ = _tables(path)
+    assert [(d[0], d[1], d[4]) for d in decisions] == [("Acme", "new", "reject")]
+    assert [(o[0], o[1], o[2]) for o in overrides] == [("Acme", "new", "reject")]

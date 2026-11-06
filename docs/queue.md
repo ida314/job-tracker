@@ -101,6 +101,25 @@ child under an absent parent is a fold nobody can open.
 - **At phone width each row wraps** into a line of its cells; every display rule there is
   `:not([hidden])`, or it would outrank `tr[hidden]` and a filtered row would stay.
 
+### Undoing a ruling
+
+```
+undo           POST /api/decision/clear  {company, ats_job_id}
+```
+
+The inverse of `/api/decision`, for the `/review` rulings that are still to come.
+
+- **`/api/decision/clear` undoes only what you did.** It deletes the posting's `decisions`
+  row, clears the pin **only if `decided_by` is `human`**, and re-derives the verdict with
+  `match()` and whatever pin remains on top — so a decision recorded beside a model pin
+  leaves that pin, and the verdict, alone. No decision to clear, or no such posting, is
+  `ok:false` with every table untouched; a `criteria.yaml` that does not parse refuses
+  before anything is deleted.
+- **An undo does not bring back a model pin the ruling replaced.** `set_override` overwrote
+  it; the verdict after the undo is the rules' alone. `level` does not re-ask while its
+  stored reading stands on the same text, so the posting stays uncertain until the next
+  ruling or a description upgrade.
+
 ## The dashboard's Uncertain tables
 
 The company pages and job boards each keep their Uncertain table as the full record of the
