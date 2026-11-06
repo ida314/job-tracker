@@ -97,18 +97,33 @@ child under an absent parent is a fold nobody can open.
 - **Today's count is `len(review_split(...).recent)`**, the same split the page renders, so
   the number and the list it links to cannot disagree. With no criteria there are no lanes
   and the line is absent, never a guessed zero.
-- **No buttons yet.** The actions column is a later change.
+- **Two rulings on every row**, the folds included — folding is display, never a judgement.
+  See *Ruling from `/review`* below.
 - **At phone width each row wraps** into a line of its cells; every display rule there is
   `:not([hidden])`, or it would outrank `tr[hidden]` and a filtered row would stay.
 
-### Undoing a ruling
+### Ruling from `/review`
+
+Under `serve` each row ends in a cell with **Worth a look** (`button.rv-yes`) and **Not for
+me** (`button.rv-no`). They exist because without a one-click ruling `decisions` stays empty
+and `jobtracker eval` has nothing to protect a criteria edit with.
 
 ```
+Worth a look   POST /api/decision        {company, ats_job_id, decision: "match"}
+Not for me     POST /api/decision        {company, ats_job_id, decision: "reject"}
 undo           POST /api/decision/clear  {company, ats_job_id}
 ```
 
-The inverse of `/api/decision`, for the `/review` rulings that are still to come.
-
+- **No new write path.** `/api/decision` records the decision, pins `override:manual` as
+  `human`, and writes the verdict, the same three writes `/tuning`'s buttons make.
+- **The cell is server-rendered whole.** Both buttons and both chips ("✓ worth a look ·
+  undo", "✓ not for me · undo", each with its own `button.rv-undo`) are in the markup, the
+  chips `hidden`; the script in `dashboard._REVIEW_JS` only moves `hidden` inside that cell.
+  So every control the page can show is one a parity test can see
+  (`test_review_buttons_have_handlers_and_no_data_act`). None carries `data-act`.
+- **It never reloads.** A ruled row stays where it is until the next render, so a misclick is
+  fixed in place; after that it is gone, because it is no longer uncertain. A refusal is an
+  `alert` and changes nothing on the page.
 - **`/api/decision/clear` undoes only what you did.** It deletes the posting's `decisions`
   row, clears the pin **only if `decided_by` is `human`**, and re-derives the verdict with
   `match()` and whatever pin remains on top — so a decision recorded beside a model pin
@@ -119,6 +134,10 @@ The inverse of `/api/decision`, for the `/review` rulings that are still to come
   it; the verdict after the undo is the rules' alone. `level` does not re-ask while its
   stored reading stands on the same text, so the posting stays uncertain until the next
   ruling or a description upgrade.
+- **A match ruling is a `match` verdict now**, so `ranked_matches` reads it and it is
+  eligible for the picks on the next `rank`, unscored until `judge` has read it.
+- **Not on the dashboard's Uncertain tables and not in the static file**, and no bulk "rule
+  all like this": one ruling is one row in the corpus `eval` replays, which is the point.
 
 ## The dashboard's Uncertain tables
 

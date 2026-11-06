@@ -219,19 +219,52 @@ def test_review_is_in_the_nav_after_job_boards():
     assert nav.index('href="/jobboards"') < nav.index('href="/review"')
 
 
-def test_review_page_has_no_buttons_yet(conn, criteria):
-    markup = _markup(_page(conn, criteria))
+# -- rulings ---------------------------------------------------------------------------
+def test_review_buttons_have_handlers_and_no_data_act(conn, criteria):
+    """The parity rule: a button's handler ships in the page that renders it. The rulings
+    are rendered by `dashboard`, so `dashboard._REVIEW_JS` is the script that must answer
+    them — and it is on `/review` alone, never in the static file."""
+    page = _page(conn, criteria)
+    markup = _markup(page)
+    script = page[page.rindex("<script>"):]
+    rendered = set(re.findall(r'<button[^>]*class="([^"]+)"', markup))
+    assert rendered == {"cotoggle", "rv-yes", "rv-no", "rv-undo"}
+    rulings = {c for c in rendered if c.startswith("rv-")}
+    assert set(re.findall(r"button\.(rv-[a-z]+)", script)) == rulings
+    assert set(re.findall(r"button\.(rv-[a-z]+)", dashboard._REVIEW_JS)) == rulings
+    assert "'/api/decision'" in script and "'/api/decision/clear'" in script
+    # swaps in place, never reloads
+    assert "location.reload" not in dashboard._REVIEW_JS
+    # `data-act` keeps meaning exactly the three disposition buttons on a pick
     assert "data-act" not in markup
-    assert not re.search(r"<button(?![^>]*class=\"cotoggle\")", markup)
+
+    # every row gets the rulings, the folds included: folding is not a judgement
+    rows = re.findall(r"<tr data-lane=[^>]*>.*?</tr>", markup, re.S)
+    assert len(rows) == 5
+    for row in rows:
+        assert row.count('class="rv-yes"') == 1 and row.count('class="rv-no"') == 1
+        assert row.count('class="rv-undo"') == 2
+    assert 'data-company="Target Tech" data-job="tt"' in _tbody(markup, "grp noise sub")
+    # both chips start hidden, so the cell first shows the two buttons
+    assert len(re.findall(r'<span class="rvdone" data-ruled="(match|reject)" hidden>',
+                          markup)) == 10
+    # a fold head spans the extra column
+    assert '<th colspan="6" scope="colgroup">' in markup
+    assert 'colspan="5"' not in markup
+
+    # not in the static file, and not on the dashboard's own Uncertain tables
+    def bare(doc):
+        return re.sub(r"<(style|script)>.*?</\1>", "", doc, flags=re.S)
+
+    for interactive in (True, False):
+        doc = dashboard.build_dashboard(conn, COMPANIES, TODAY, criteria,
+                                        interactive=interactive)
+        assert "rv-" not in bare(doc) and "button.rv-yes" not in doc
+    boards = server.render_job_boards(conn, COMPANIES, TODAY, criteria)
+    assert "rv-" not in bare(boards) and "button.rv-yes" not in boards
+    assert "rv-yes" not in dashboard._JS
 
 
-def test_review_page_survives_an_empty_corpus(criteria):
-    markup = _markup(_page(store.connect(":memory:"), criteria))
-    assert "Nothing uncertain is open" in markup
-    assert "<table" not in markup
-
-
-# -- undoing a ruling --------------------------------------------------------------------
 def _db(tmp_path):
     path = tmp_path / "state.db"
     conn = store.connect(path)
@@ -327,3 +360,45 @@ def test_rule_undo_rule_leaves_exactly_one_decision(tmp_path):
     decisions, overrides, _ = _tables(path)
     assert [(d[0], d[1], d[4]) for d in decisions] == [("Acme", "new", "reject")]
     assert [(o[0], o[1], o[2]) for o in overrides] == [("Acme", "new", "reject")]
+
+
+def test_ruled_row_leaves_review_on_next_render(tmp_path, criteria):
+    path = _db(tmp_path)
+    conn = store.connect(path)
+    assert "job=new" in _markup(_page(conn, criteria))
+    conn.close()
+
+    assert _handler(path)._api_decision({"company": "Acme", "ats_job_id": "new",
+                                         "decision": "match"})["ok"]
+    conn = store.connect(path)
+    markup = _markup(_page(conn, criteria))
+    assert "job=new" not in markup and "job=s1" in markup
+    conn.close()
+
+    # and an undo puts it back
+    assert _handler(path)._api_decision_clear({"company": "Acme",
+                                               "ats_job_id": "new"})["ok"]
+    conn = store.connect(path)
+    assert "job=new" in _markup(_page(conn, criteria))
+    conn.close()
+
+
+def test_match_ruling_feeds_eval(tmp_path, criteria):
+    """The reason the buttons exist: a ruling is a row in the corpus `eval` replays."""
+    from jobtracker import tuning
+
+    path = _db(tmp_path)
+    assert _handler(path)._api_decision({"company": "Acme", "ats_job_id": "new",
+                                         "decision": "match"})["ok"]
+    conn = store.connect(path)
+    report = tuning.evaluate(store.all_decisions(conn), criteria)
+    conn.close()
+    assert report.total == 1
+    # the rules still say uncertain: unresolved, never a regression
+    assert report.ok and len(report.unresolved) == 1
+
+
+def test_review_page_survives_an_empty_corpus(criteria):
+    markup = _markup(_page(store.connect(":memory:"), criteria))
+    assert "Nothing uncertain is open" in markup
+    assert "<table" not in markup

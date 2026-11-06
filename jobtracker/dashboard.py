@@ -450,6 +450,16 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 tbody.grp.sub tr.cohead th { padding-left: 28px; font-weight: 500; }
 .rv .rvnone td { color: var(--muted); text-align: center; }
 .rv td.emp .cobadge { white-space: normal; }
+/* The rulings cell. Both chips are server-rendered and start `hidden`. No rule here sets
+   `display` on a chip or a button, and the one below says `hidden` outright with an
+   element in its selector, so it outranks any class-only `display:` a later edit adds —
+   an author `display` beats the attribute, and a chip that ignored it would read as a
+   ruling you never made. */
+td.rvact [hidden] { display: none; }
+.rvact .rv-yes { margin-right: 5px; }
+.act .rvdone { font-size: 11px; color: var(--ink-2); vertical-align: middle; }
+.act .rvdone[data-ruled="match"] { color: var(--good); }
+.act .rvdone .rv-undo { margin-left: 2px; }
 /* At phone width the five columns do not fit, and a page that scrolls sideways is the
    failure. Each row becomes a wrapped line of its cells. `:not([hidden])` on every
    display rule, or the rule would outrank `tr[hidden]` and a filtered row would stay. */
@@ -463,6 +473,7 @@ tbody.grp.sub tr.cohead th { padding-left: 28px; font-weight: 500; }
   .rv tr.cohead th { flex: 1 1 100%; display: block; white-space: normal; }
   .rv td { display: block; padding: 0; border: 0; }
   .rv td.role { flex: 1 1 100%; }
+  .rv td.act { flex: 1 1 100%; text-align: left; padding-top: 4px; }
 }
 
 /* The applications view bar. In the static file it only works with the script, so it
@@ -1099,6 +1110,76 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
   });
 })();
 
+"""
+
+# `/review`'s rulings, emitted by `server.render_review` alone. Its own block rather than
+# a part of `_JS`: the static file carries `_JS` and has no `/review`, so a handler there
+# would be one for a button the file can never render. It lives here because the button
+# does — `_review_rulings` — and a button's handler belongs to the file that renders it.
+_REVIEW_JS = """
+// Worth a look / Not for me, and the undo. Delegated, like the actions cell: the folds
+// hold hundreds of rows, and one listener is also what keeps working as buttons hide.
+//
+// Every control is server-rendered; this only moves `hidden` inside one cell and never
+// reloads. A ruled row stays where it is, so a misclick is fixable in place, and it is
+// off the list at the next render because it is no longer uncertain.
+(function () {
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); });
+  }
+
+  // `ruled` is the decision whose chip shows, or '' for the two buttons.
+  function show(cell, ruled) {
+    cell.querySelectorAll('button.rv-yes, button.rv-no').forEach(function (x) {
+      x.hidden = ruled !== '';
+    });
+    cell.querySelectorAll('.rvdone').forEach(function (c) {
+      c.hidden = c.dataset.ruled !== ruled;
+    });
+  }
+
+  function busy(cell, on) {
+    cell.querySelectorAll('button').forEach(function (x) { x.disabled = on; });
+  }
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest) return;
+    var yes = e.target.closest('button.rv-yes');
+    var no = e.target.closest('button.rv-no');
+    var undo = e.target.closest('button.rv-undo');
+    var b = yes || no || undo;
+    if (!b) return;
+    var cell = b.closest('td.rvact');
+    if (!cell) return;
+    var ident = {company: b.dataset.company, ats_job_id: b.dataset.job};
+    var req;
+    var after;
+    if (undo) {
+      req = post('/api/decision/clear', ident);
+      after = '';
+    } else {
+      after = yes ? 'match' : 'reject';
+      ident.decision = after;
+      req = post('/api/decision', ident);
+    }
+    busy(cell, true);
+    req.then(function (res) {
+      busy(cell, false);
+      if (!res.ok) {
+        alert(res.error || 'could not record that');
+        return;
+      }
+      show(cell, after);
+    }).catch(function () {
+      busy(cell, false);
+      alert('could not reach the server');
+    });
+  });
+})();
 """
 
 
@@ -2862,8 +2943,12 @@ def _review_body(split, labels, criteria, interactive, days) -> list:
 
     parts.append('<table class="rv" data-filterable data-count-target="review-count" '
                  'data-empty-target="review-empty">')
+    # The rulings column exists only under `serve`, header and cells from the one flag,
+    # and every colspan below is counted from it, so a fold head always spans the row.
+    cols = 6 if interactive else 5
     parts.append("<thead><tr><th>Role</th><th>Employer</th><th>Location</th>"
-                 "<th>Why it is here</th><th>First seen</th></tr></thead>")
+                 "<th>Why it is here</th><th>First seen</th>"
+                 + ("<th>Your call</th>" if interactive else "") + "</tr></thead>")
     # The default view is a plain tbody, never `.grp`: the script collapses every group
     # on load, and this is the part that must stay open.
     parts.append('<tbody class="recent">')
@@ -2872,7 +2957,7 @@ def _review_body(split, labels, criteria, interactive, days) -> list:
             parts.append(_review_row(placed, labels, criteria, interactive))
     else:
         parts.append(
-            f'<tr class="rvnone"><td colspan="5">Nothing new in the last {days} days.'
+            f'<tr class="rvnone"><td colspan="{cols}">Nothing new in the last {days} days.'
             "</td></tr>"
         )
     parts.append("</tbody>")
@@ -2882,7 +2967,7 @@ def _review_body(split, labels, criteria, interactive, days) -> list:
             return
         parts.append(f'<tbody class="{cls}" data-closed="1">')
         parts.append(
-            '<tr class="cohead"><th colspan="5" scope="colgroup">'
+            f'<tr class="cohead"><th colspan="{cols}" scope="colgroup">'
             f'<span class="coname">{html.escape(heading)}</span>'
             '<button type="button" class="cotoggle" aria-expanded="true">Hide</button>'
             "</th></tr>"
@@ -2927,7 +3012,38 @@ def _review_row(placed, labels, criteria, interactive) -> str:
         f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>'
         f'<td class="why">{html.escape(placed.label)}</td>'
         f'<td class="seen">{html.escape((row["first_seen"] or "")[:10])}</td>'
+        f"{_review_rulings(row) if interactive else ''}"
         "</tr>"
+    )
+
+
+def _review_rulings(row) -> str:
+    """The last cell of a `/review` row under `serve`: two rulings, and their undo.
+
+    Every lane gets it, the folds included — folding is display, never a judgement, so a
+    folded row is as rulable as any other. Each button reuses `/api/decision`; the undo
+    is `/api/decision/clear`. None carries `data-act`, which must keep meaning exactly
+    the three disposition buttons on a pick.
+
+    Both chips are rendered here and start `hidden`, so every control the script toggles
+    is one the server wrote and a parity test can see. The script only moves `hidden`
+    inside this cell and never reloads: a ruled row stays put until the next render, so
+    a misclick is one undo away, and it is gone from the list after that because it is
+    no longer uncertain.
+    """
+    ident = (f'data-company="{html.escape(row["company"] or "")}" '
+             f'data-job="{html.escape(row["ats_job_id"] or "")}"')
+
+    def chip(ruled, words):
+        return (f'<span class="rvdone" data-ruled="{ruled}" hidden>&#10003; {words} · '
+                f'<button type="button" class="rv-undo" {ident}>undo</button></span>')
+
+    return (
+        '<td class="act rvact">'
+        f'<button type="button" class="rv-yes" {ident}>Worth a look</button> '
+        f'<button type="button" class="rv-no" {ident}>Not for me</button>'
+        f'{chip("match", "worth a look")}{chip("reject", "not for me")}'
+        "</td>"
     )
 
 

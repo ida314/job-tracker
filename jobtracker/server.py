@@ -526,8 +526,9 @@ def render_review(conn: sqlite3.Connection, criteria, companies, coverage_by_ori
     with no link. The body is `dashboard.review_page_parts`, and the Today count is the
     length of the same `queue.review` split, so the number and the list cannot disagree.
 
-    It carries `dashboard._JS` for the one filter block its search box needs. The page
-    renders no buttons; the actions column is still to come.
+    It carries `dashboard._JS` for the filter block its search box needs, and
+    `dashboard._REVIEW_JS` for the rulings column — both rendered by `dashboard`, so both
+    handlers come from there, in the one `<script>` this page emits.
     """
     p = [
         "<!doctype html><meta charset=utf-8>",
@@ -543,7 +544,7 @@ def render_review(conn: sqlite3.Connection, criteria, companies, coverage_by_ori
     p.append(_NAV)
     p.extend(body[1:])
     p.append("</div>")
-    p.append(f"<script>{dashboard_mod._JS}</script>")
+    p.append(f"<script>{dashboard_mod._JS}{dashboard_mod._REVIEW_JS}</script>")
     return "\n".join(p)
 
 

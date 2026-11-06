@@ -2220,7 +2220,8 @@ def test_no_emitted_script_carries_a_newline_inside_a_string():
     """
     for name, script in (("server._JS", server._JS),
                          ("server._APPLY_JS", server._APPLY_JS),
-                         ("dashboard._JS", dashboard._JS)):
+                         ("dashboard._JS", dashboard._JS),
+                         ("dashboard._REVIEW_JS", dashboard._REVIEW_JS)):
         assert _unterminated_strings(script) == [], name
 
 

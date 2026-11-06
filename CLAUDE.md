@@ -781,9 +781,18 @@ uncertain list a row is in: `feed`, `read`, `signal`, and the two folds, `no_sig
 - **It is never `data-filterable` beside another panel** — one `[data-filter-scope]`, one search
   box, one table. The board-noise fold is a sibling `tbody.sub` the stylesheet hides while the
   no-signal fold is closed; `data-closed="1"` on each fold, `.closed` still JS-owned.
+- **Every row carries two rulings, folds included** — `.rv-yes` ("Worth a look") and `.rv-no`
+  ("Not for me"), plus `.rv-undo` in each of two server-rendered, `hidden` chips. **None carries
+  `data-act`**, and their handler is `dashboard._REVIEW_JS`, emitted by `/review` alone; no
+  button on the dashboard's Uncertain tables or in the static file, and no bulk control.
+- **They reuse `/api/decision`** — a decision, a human pin, a verdict. The script moves `hidden`
+  inside the cell and never reloads: the row stays put so a misclick is one undo away, and is
+  off the list at the next render because it is no longer uncertain.
 - **`/api/decision/clear` only removes a human decision.** It deletes the `decisions` row,
   drops the pin only if `decided_by` is `human`, and re-derives the verdict with `match()` under
   whatever pin is left. No decision is a refusal with every table untouched.
+- **A match ruling makes the row eligible for picks on the next `rank`** — it is a `match`
+  verdict now, so `ranked_matches` reads it, unjudged and unscored until `judge` gets to it.
 
 ---
 
