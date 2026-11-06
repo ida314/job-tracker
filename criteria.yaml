@@ -31,6 +31,35 @@ level_include:
   - "Software Engineer I"
   - junior
   - grad
+  # `grad` is anchored on alphanumeric boundaries, so it does not fire inside
+  # "Graduate" (the 'u' fails the lookahead) — "Graduate Software Engineer" sat in
+  # UNCERTAIN, and a 2026-11-05 replay of live titles found many Simplify rows shaped
+  # like it, 212 of them pinned by the model on what a title token answers. The
+  # lookbehind keeps it out of "Undergraduate" and "Postgraduate". A graduate title
+  # with no engineering signal ("Commercial Graduate Trainee") REJECTs through the
+  # non-engineering gate, which is correct. Checked 2026-11-06 on the laptop copy
+  # (9,150 postings): no employer name contains "graduate", and no title moved — the
+  # copy predates the Simplify import. Plurals still walk through: "2027 Graduates"
+  # stays UNCERTAIN, the safe direction.
+  - graduate
+  # Numbered level one. Only the Roman `Software Engineer I` was a token, so
+  # "Software Engineer 1" and "Automation Engineer I" sat in UNCERTAIN (about 150
+  # engineering rows in the 2026-11-05 live replay). The lookahead is what keeps
+  # `engineer i` off "Engineer II"/"III" and off "Engineer in Test", and `engineer 1`
+  # off "Engineer 10" and "Engineer 2027"; a test proves each. A "Senior/Staff
+  # Software Engineer I" still REJECTs, because exclude_titles is read first.
+  # Laptop copy, 2026-11-06: 7 uncertain → match and nothing else moved (Flexport
+  # Automation Engineer I, Oscar Health Analytics Engineer I ×2 and IT Engineer I ×3,
+  # Five9 Telecom Engineer I) — entry level, honestly; whether IT or telecom is on
+  # target is the ranking pass's question, not the level gate's. Every "Technical
+  # Support Engineer 1" was already a REJECT on `support engineer`.
+  # Deliberately absent: `analyst 1` (no engineering signal, so it would only turn
+  # UNCERTAIN into a non-engineering REJECT) and `sde 1` (no title in the corpus
+  # carries it — add it when one does). `developer 1` has no corpus hit either; it
+  # is the same shape as `engineer 1` on the other engineering noun.
+  - engineer 1
+  - developer 1
+  - engineer i
 
 # Hard disqualifiers in a title -> REJECT. Order-independent; first hit wins the reason.
 # Short tokens (ii, iii, vp) are matched on alphanumeric boundaries so "ii" does not
@@ -61,6 +90,32 @@ exclude_titles:
   - "5+ years"
   - "3+ years"
   - clearance          # citizenship_note: exclude roles needing active clearance
+  # Arabic seniority levels, the counterpart of `ii`/`iii`. MongoDB, Datadog, Twilio
+  # and Kong number their ladders ("Software Engineer 3", "SRE 2"), so those titles
+  # sat in UNCERTAIN (36 "Full-stack Engineer 4"-shaped rows in the 2026-11-05 live
+  # replay). Only the exact tokens the corpus carries are listed — found by grepping
+  # the laptop copy's titles for (engineer|developer|researcher|scientist|sre) [2-9]
+  # on 2026-11-06: engineer 2 (21), engineer 3 (33), engineer 4 (1), sre 2 (3);
+  # no developer, researcher or scientist is numbered. Never a bare digit: "2" is in
+  # every "2027". The lookahead keeps `engineer 2` off "Engineer 2027", and no
+  # employer name in the corpus contains any of them. Engineer 1 is level ONE, an
+  # entry token in level_include, not here. Replay on that copy: 44 uncertain →
+  # reject and nothing else moved; the other 14 numbered titles were already REJECTs
+  # on `support engineer` or `sales`.
+  - engineer 2
+  - engineer 3
+  - engineer 4
+  - sre 2
+  # Undotted "Sr". `sr.` needs its dot, so "Sr Accounting Specialist" and
+  # "Sr Software Engineer, Infrastructure" sat in UNCERTAIN (46 rows in the 2026-11-05
+  # live replay). Alphanumeric boundaries keep it out of "SRE", "sre" and "Srinivasan";
+  # "Sr." still REJECTs on `sr.`, which comes first in this list, so no existing
+  # reason changes. Latent: a hyphenated technical "SR-" ("SR-IOV") would fire, and
+  # no corpus title has one. Checked 2026-11-06 on the laptop copy: no employer name is
+  # or contains the word "Sr", and the replay moved 28 uncertain → reject (Databricks
+  # 10, Five9 11, Elastic 3, Gusto, MongoDB, SoFi, SolarWinds) and nothing else; the
+  # other 15 undotted-Sr titles were already REJECTs on another token.
+  - sr
 
 # Engineering signal. A MATCH requires a level token AND an engineering signal — either
 # a backend-specific term below (role_type_include) or a generic engineering term here.

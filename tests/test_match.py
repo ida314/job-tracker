@@ -88,6 +88,87 @@ def test_swe_i_not_matched_by_engineer_ii(criteria):
     assert v.decision is Decision.REJECT and v.reason == "excluded_title:ii"
 
 
+def test_graduate_is_a_level_token(criteria):
+    # `grad` cannot fire inside "Graduate"; the whole word is its own token.
+    v = match(_p("Graduate Software Engineer", "NYC"), criteria)
+    assert v.decision is Decision.MATCH and v.reason == "level:graduate+eng:generic"
+    # No engineering signal: the non-engineering gate rejects it, as it should.
+    v = match(_p("Commercial Graduate Trainee", "NYC"), criteria)
+    assert v.decision is Decision.REJECT
+    assert v.reason == "non_engineering_role:level=graduate"
+    # The lookbehind keeps it out of a longer word.
+    v = match(_p("Undergraduate Software Engineer", "NYC"), criteria)
+    assert v.decision is Decision.UNCERTAIN
+
+
+@pytest.mark.parametrize("title,reason", [
+    ("Software Engineer 1", "level:engineer 1+eng:generic"),
+    ("Backend Developer 1", "level:developer 1+role:backend"),
+    ("Automation Engineer I", "level:engineer i+eng:generic"),
+    # The existing Roman token still answers first for its own title.
+    ("Software Engineer I", "level:Software Engineer I+eng:generic"),
+])
+def test_numbered_level_one_matches(criteria, title, reason):
+    v = match(_p(title, "NYC"), criteria)
+    assert v.decision is Decision.MATCH and v.reason == reason
+
+
+def test_engineer_i_does_not_fire_on_engineer_ii(criteria):
+    # The lookahead keeps `engineer i` off a longer Roman numeral and off a word.
+    for title in ("Automation Engineer II", "Automation Engineer III"):
+        assert criteria.first_hit("level_include", title.lower()) is None, title
+        assert match(_p(title, "NYC"), criteria).decision is Decision.REJECT
+    assert criteria.first_hit("level_include", "software engineer in test") is None
+    assert criteria.first_hit("level_include", "software engineer 10") is None
+    # A seniority word still wins: exclude_titles is read before the level gate.
+    v = match(_p("Senior Software Engineer I", "NYC"), criteria)
+    assert v.decision is Decision.REJECT and v.reason == "excluded_title:senior"
+
+
+@pytest.mark.parametrize("title,token", [
+    ("Full-stack Engineer 4", "engineer 4"),
+    ("Software Engineer 3, Atlas Clusters", "engineer 3"),
+    ("Software Engineer 2", "engineer 2"),
+    ("SRE 2, Managed Gateways", "sre 2"),
+])
+def test_engineer_4_is_excluded(criteria, title, token):
+    v = match(_p(title, "NYC"), criteria)
+    assert v.decision is Decision.REJECT and v.reason == f"excluded_title:{token}"
+
+
+_NUMBERED = ("engineer 1", "developer 1", "engineer 2", "engineer 3", "engineer 4",
+             "sre 2")
+
+
+def test_numbered_tokens_do_not_fire_on_years(criteria):
+    # A digit token followed by more digits is a year, not a level.
+    for key in ("level_include", "exclude_titles"):
+        assert not any(t.strip().isdigit() and len(t) < 4 for t in getattr(criteria, key)), \
+            f"{key} carries a bare short digit"
+    for title in ("software engineer 2027", "backend engineer 2026",
+                  "sre 2025 cohort", "software developer 10x", "engineer 1st shift"):
+        for key in ("level_include", "exclude_titles"):
+            hits = set(criteria.hits(key, title)) & set(_NUMBERED)
+            assert not hits, f"{title!r} hit {hits} in {key}"
+    # And the year still reads as the level token it is.
+    v = match(_p("Software Engineer 2027", "NYC"), criteria)
+    assert v.decision is Decision.MATCH and v.reason == "level:2027+eng:generic"
+
+
+def test_sr_does_not_fire_inside_sre(criteria):
+    # The undotted abbreviation rejects on its own token.
+    for title in ("Sr Accounting Specialist", "Sr Software Engineer, Infrastructure"):
+        v = match(_p(title, "NYC"), criteria)
+        assert v.decision is Decision.REJECT and v.reason == "excluded_title:sr", title
+    # Alphanumeric boundaries keep it out of SRE, in either case, and out of a name.
+    for title in ("SRE, New Grad", "New Grad sre", "Srinivasan Labs — Software Engineer"):
+        assert "sr" not in criteria.hits("exclude_titles", title.lower()), title
+    assert match(_p("SRE, New Grad", "NYC"), criteria).decision is Decision.MATCH
+    # "Sr." was already covered and still answers first, so its reason is unchanged.
+    v = match(_p("Sr. Backend Engineer", "NYC"), criteria)
+    assert v.decision is Decision.REJECT and v.reason == "excluded_title:sr."
+
+
 def test_verdict_carries_identity(criteria):
     v = match(_p("Senior Engineer"), criteria)
     assert v.company == "Acme" and v.ats_job_id == "1" and v.decided_by == "rules"
