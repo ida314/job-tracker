@@ -369,3 +369,8 @@ def test_board_scope_never_reaches_match():
     root = Path(jobtracker.__file__).parent
     for name in ("match.py", "health.py"):
         assert "board_scope" not in (root / name).read_text(), name
+
+
+def test_the_real_companies_yaml_marks_target_tech_mixed():
+    loaded = {c.name: c for c in config.load_companies()}
+    assert loaded["Target Tech"].board_scope == "mixed"
