@@ -10,13 +10,12 @@ ends with the shared ground rules from `_ground-rules.md`.
 1. **Base branch.** Branch from `main` once `ui-polish` is merged, and until then from
    `ui-polish`. Several chunks touch `dashboard.py` and the CSS that branch rewrote.
    Run `git fetch` first, because local `main` has lagged origin before.
-2. **Commit the uncommitted work.** The main checkout currently has uncommitted changes to
-   `CLAUDE.md`, `jobtracker/dashboard.py`, `tests/test_css.py` and `tests/test_dashboard.py`.
-   A worktree is cut from a commit, so commit or stash these first. Otherwise every chunk
-   starts without them, and merges conflict.
-3. **Agents read these files from the main checkout.** `.plans/` is untracked, so a
-   worktree will not contain it. Every chunk refers to it by absolute path. Commit
-   `.plans/` if you want it versioned.
+2. **Start from a clean tree.** A worktree is cut from a commit, so anything uncommitted in
+   the main checkout is missing from every chunk and makes merges conflict. (Done on
+   2026-11-05: the pick-menu work and these plans were committed on `ui-polish`.)
+3. **`.plans/` is committed**, so a worktree cut from `ui-polish` after `7b3fc71` has it.
+   The chunks still use absolute paths into the main checkout, which also works for a
+   worktree cut from an older base.
 
 ## Chunks
 
