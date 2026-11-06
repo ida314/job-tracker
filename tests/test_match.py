@@ -101,6 +101,30 @@ def test_graduate_is_a_level_token(criteria):
     assert v.decision is Decision.UNCERTAIN
 
 
+@pytest.mark.parametrize("title,reason", [
+    ("Software Engineer 1", "level:engineer 1+eng:generic"),
+    ("Backend Developer 1", "level:developer 1+role:backend"),
+    ("Automation Engineer I", "level:engineer i+eng:generic"),
+    # The existing Roman token still answers first for its own title.
+    ("Software Engineer I", "level:Software Engineer I+eng:generic"),
+])
+def test_numbered_level_one_matches(criteria, title, reason):
+    v = match(_p(title, "NYC"), criteria)
+    assert v.decision is Decision.MATCH and v.reason == reason
+
+
+def test_engineer_i_does_not_fire_on_engineer_ii(criteria):
+    # The lookahead keeps `engineer i` off a longer Roman numeral and off a word.
+    for title in ("Automation Engineer II", "Automation Engineer III"):
+        assert criteria.first_hit("level_include", title.lower()) is None, title
+        assert match(_p(title, "NYC"), criteria).decision is Decision.REJECT
+    assert criteria.first_hit("level_include", "software engineer in test") is None
+    assert criteria.first_hit("level_include", "software engineer 10") is None
+    # A seniority word still wins: exclude_titles is read before the level gate.
+    v = match(_p("Senior Software Engineer I", "NYC"), criteria)
+    assert v.decision is Decision.REJECT and v.reason == "excluded_title:senior"
+
+
 def test_verdict_carries_identity(criteria):
     v = match(_p("Senior Engineer"), criteria)
     assert v.company == "Acme" and v.ats_job_id == "1" and v.decided_by == "rules"

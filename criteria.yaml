@@ -42,6 +42,24 @@ level_include:
   # copy predates the Simplify import. Plurals still walk through: "2027 Graduates"
   # stays UNCERTAIN, the safe direction.
   - graduate
+  # Numbered level one. Only the Roman `Software Engineer I` was a token, so
+  # "Software Engineer 1" and "Automation Engineer I" sat in UNCERTAIN (about 150
+  # engineering rows in the 2026-11-05 live replay). The lookahead is what keeps
+  # `engineer i` off "Engineer II"/"III" and off "Engineer in Test", and `engineer 1`
+  # off "Engineer 10" and "Engineer 2027"; a test proves each. A "Senior/Staff
+  # Software Engineer I" still REJECTs, because exclude_titles is read first.
+  # Laptop copy, 2026-11-06: 7 uncertain → match and nothing else moved (Flexport
+  # Automation Engineer I, Oscar Health Analytics Engineer I ×2 and IT Engineer I ×3,
+  # Five9 Telecom Engineer I) — entry level, honestly; whether IT or telecom is on
+  # target is the ranking pass's question, not the level gate's. Every "Technical
+  # Support Engineer 1" was already a REJECT on `support engineer`.
+  # Deliberately absent: `analyst 1` (no engineering signal, so it would only turn
+  # UNCERTAIN into a non-engineering REJECT) and `sde 1` (no title in the corpus
+  # carries it — add it when one does). `developer 1` has no corpus hit either; it
+  # is the same shape as `engineer 1` on the other engineering noun.
+  - engineer 1
+  - developer 1
+  - engineer i
 
 # Hard disqualifiers in a title -> REJECT. Order-independent; first hit wins the reason.
 # Short tokens (ii, iii, vp) are matched on alphanumeric boundaries so "ii" does not
