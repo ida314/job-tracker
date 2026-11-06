@@ -231,7 +231,8 @@ jobtracker tailor dismiss --company Acme --job-id 42   # not these edits
 
 `dismiss` keeps the row rather than deleting it, which is `mail_proposals`' rule: deleting
 is what would let the next run propose exactly the same edits again. It comes back on its
-own when the resume changes, because that is a different question.
+own when the resume changes, or when that posting's description does, because either is a
+different question.
 
 `build` is **not a task**, and that is the `prefill` lesson rather than a naming choice:
 `cmd_work` returns early when no router is configured, so a pass that needs no model would

@@ -62,7 +62,9 @@ Two halves, and the split is the point:
 
 `Profile.prose_hash` covers only the prose. That is the whole mechanism: a judgment is
 an *answer to a question*, so changing the question invalidates it and changing how you
-weigh the answer does not.
+weigh the answer does not. The posting's description is the other half of the question,
+so `rankings.description_hash` records which text was judged and a changed description
+re-judges that posting alone — see `docs/tasks.md`.
 
 ```bash
 $EDITOR profile.yaml      # bump `growth: 25` to `growth: 40`

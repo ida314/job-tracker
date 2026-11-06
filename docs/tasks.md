@@ -94,8 +94,35 @@ visible rather than being an inexplicably shrinking queue.
 | task | unit_key | so a change to… |
 |---|---|---|
 | `level` | `"level"` | nothing re-asks it; a re-run is a retry |
-| `judge` | `profile.prose_hash` | profile prose re-asks every posting |
+| `judge` | `profile.prose_hash` `:` description hash | profile prose re-asks every posting; a description change re-asks that posting |
+| `tailor` | resume hash `:` keywords hash `:` description hash | resume or lists re-ask every posting; a description change re-asks that posting |
+| `coverletter` | template `:` resume `:` keywords `:` description hash | likewise |
 | `inbox` | the `Message-ID` | nothing; a message cannot change |
+
+### A description change re-asks one posting
+
+A description is not write-once forever: an ATS fetch can replace a feed's two-line
+blurb with the real prose. An answer read off the blurb is an answer to a different
+question, so `judge`, `tailor` and `coverletter` each record `description_hash` — the
+hash of the text the model was actually handed — on their row (`rankings`,
+`resume_suggestions`, `cover_letters`), and each pending query compares it with the hash
+of the description stored now. That re-asks **that posting only**: the hash is the one
+per-posting part of the question, so no other posting's unit moves.
+
+- **`store.description_hash` is the single definition** — `sha256[:16]`, `''` for NULL or
+  empty. SQLite has no built-in hash, so `connect()` registers that same Python function
+  as a deterministic SQL function and the pending queries call it *in* the SQL. A Python
+  filter would run after the `LIMIT` and hand a budgeted run a short batch.
+- **It is in `unit_key` as well as the pending query**, because the set-aside ledger is
+  keyed on `unit_key`: three failures against a blurb say nothing about the prose that
+  replaced it. The stored `cover_letters.unit_key` stays the configuration key; the
+  description is compared through its own column.
+- **An upgrade re-asks nothing.** Rows from before the column are stamped on connect
+  with the hash of the description stored then (`_backfill_description_hashes`, count
+  logged, self-draining). Reading NULL as "unknown, re-ask" would spend a whole night's
+  budget re-answering questions whose input never moved. The one-time cost is the
+  ledger: existing `task_attempts` rows for these three tasks carry the old key shape,
+  so a unit set aside before the upgrade gets a clean slate once.
 
 `inbox` is where that framing stops being an abstraction: the message *is* the question,
 so its id is the key. It is also load-bearing rather than decorative. Two ambiguous

@@ -665,6 +665,13 @@ reopens only closures that came from absence, so nothing else ever would.
   committed unit; an interrupted run still wrote everything before it.
 - **`unit_key` is the question, not the posting.** Change the question and every unit is new with
   its retry count reset. It is also the router's idempotency key.
+- **A description change re-asks `judge`, `tailor` and `coverletter` for that posting only.**
+  Each row records `description_hash` of the text the model read, compared in SQL against
+  `store.description_hash` of the text stored now (a deterministic function `connect()`
+  registers — SQLite has none, and a Python filter would run after the `LIMIT`). The hash is in
+  the unit key too, so a unit set aside on a blurb is not set aside on the prose. **Rows from
+  before the column are stamped from the current description on connect** — reading NULL as
+  "re-ask" would re-answer everything the night it shipped.
 - **`pending()` must only return work the task can actually do** — `level` excludes postings with
   no cached description. Counting what it cannot reach overstates a backlog and sends a budgeted
   run to guaranteed no-ops.
@@ -900,7 +907,7 @@ The first model role that composes prose, so the bound is not the shape of the a
   `tailor build` reports it once and exits **0**, and must never make `prepare` exit 2. Tectonic is
   in the serve image only.
 - **`dismissed` is reachable and kept** (`jobtracker tailor dismiss`); deleting would let the next
-  run re-propose. It reopens when the resume hash moves.
+  run re-propose. It reopens when the resume hash moves, or when that posting's description does.
 - **`keywords.yaml` is curated**, written by `POST /api/keyword` and your editor, both deliberate
   acts. The writer is line-oriented text surgery — the file is mostly the comments explaining the
   two lists, and `yaml.safe_dump` deletes all of them.
