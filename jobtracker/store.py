@@ -658,7 +658,30 @@ _ADDED_COLUMNS = [
     # "have I applied to this?" be a question about a *req* rather than about one row: the
     # same job arrives from a board and from two feeds, and you apply to it once.
     ("applications", "dedupe_key", "TEXT"),
+    # What kind of text `description` holds — one of DESCRIPTION_SOURCES. The column was
+    # one undifferentiated string for two different things: prose (an ATS detail payload,
+    # a Discord message, a YC listing's own words) and feed *metadata* that Simplify
+    # assembles from its JSON fields ("Category: … / Locations: …"). Nothing recorded
+    # which, so the `level` model was asked to read a metadata stub as if it were a job
+    # description. NULL goes with a NULL description; a non-NULL description with a NULL
+    # source is a row written before this existed, and `_backfill_description_sources`
+    # fills it in on connect.
+    ("postings", "description_source", "TEXT"),
 ]
+
+# The values `postings.description_source` may hold.
+#   ats   — written by `check`'s board path, from the ATS's own payload.
+#   prose — written by a job board whose text is the listing's own words.
+#   feed  — written by a job board that has no prose, only fields it assembled.
+DESCRIPTION_SOURCES = ("ats", "prose", "feed")
+
+
+def _check_description_source(source: Optional[str]) -> None:
+    if source is not None and source not in DESCRIPTION_SOURCES:
+        raise ValueError(
+            f"description source must be one of {', '.join(DESCRIPTION_SOURCES)}, "
+            f"not {source!r}"
+        )
 
 
 # Indexes over columns that _ADDED_COLUMNS creates. These CANNOT live in _SCHEMA:
@@ -742,7 +765,59 @@ def _apply_index_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
+def _backfill_description_sources(
+    conn: sqlite3.Connection, description_sources: Optional[dict] = None
+) -> int:
+    """Label every stored description that predates `description_source`.
+
+    Self-draining: it only ever reads rows with a description and no source, so from the
+    second connect it touches nothing. A NULL description stays NULL — there is no text
+    to say anything about.
+
+      * `origin IS NULL` is a curated board, and the only writer of its description is
+        `check`'s board path, so those rows are `ats` with no further knowledge needed.
+      * A job board row is whatever its plugin says it publishes, which only the plugin
+        knows. `store` must not import `plugins` — the plugins import `tasks`, and tasks
+        import this module — so the caller hands the answer in as `{origin: source}`
+        (`plugins.description_sources()`). An origin it does not name keeps its NULL
+        until a connect that does; guessing one would be the mislabel this column exists
+        to prevent.
+
+    Runs after `_apply_data_migrations`, which is what gives the legacy feed rows their
+    `origin` — before that, a Simplify row would read as a curated board.
+    """
+    labelled = conn.execute(
+        "UPDATE postings SET description_source='ats' "
+        "WHERE description_source IS NULL AND description IS NOT NULL "
+        "AND origin IS NULL"
+    ).rowcount
+    for origin, source in sorted((description_sources or {}).items()):
+        _check_description_source(source)
+        labelled += conn.execute(
+            "UPDATE postings SET description_source=? "
+            "WHERE description_source IS NULL AND description IS NOT NULL AND origin=?",
+            (source, origin),
+        ).rowcount
+    if labelled:
+        # Said out loud for the duplicate sweep's reason: a one-time relabelling of the
+        # corpus should read as a migration in the run log, not as nothing at all.
+        log.info(
+            "labelled the source of %d stored description(s) that predate the column",
+            labelled,
+        )
+    conn.commit()
+    return labelled
+
+
+def connect(
+    db_path: str | Path, description_sources: Optional[dict] = None
+) -> sqlite3.Connection:
+    """Open (and migrate) the database.
+
+    `description_sources` is `{origin: "prose" | "feed"}` for the job boards, from
+    `plugins.description_sources()`. It only feeds the description-source backfill; see
+    `_backfill_description_sources` for why it is passed in rather than looked up.
+    """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -750,6 +825,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     _apply_column_migrations(conn)
     _apply_index_migrations(conn)  # after the columns they index — see _ADDED_INDEXES
     _apply_data_migrations(conn)  # after both, and self-draining
+    _backfill_description_sources(conn, description_sources)  # needs `origin` settled
     conn.commit()
     return conn
 
@@ -1082,6 +1158,7 @@ def append_postings(
     now: str,
     identity: Optional[tuple[str, str]] = None,
     origin: Optional[str] = None,
+    description_source: Optional[str] = None,
 ) -> list[Posting]:
     """Add what a feed just announced. Never close anything by absence.
 
@@ -1112,7 +1189,14 @@ def append_postings(
         posting would be in the table and absent from the product.
       * **`ON CONFLICT DO NOTHING`**, so re-reading the same messages after an
         interrupted run imports nothing twice and can never blank a stored description.
+
+    `description_source` is what kind of text the feed's descriptions are — `prose` or
+    `feed`, from the plugin's `coverage()` via `plugins.description_source`. It is
+    written beside a description and never beside a NULL one. An existing row only gains
+    one where it has none (COALESCE, like `origin`); the description itself is still
+    write-once and is not touched here.
     """
+    _check_description_source(description_source)
     existing = {
         row["ats_job_id"]
         for row in conn.execute(
@@ -1125,19 +1209,23 @@ def append_postings(
         if p.ats_job_id in existing:
             conn.execute(
                 "UPDATE postings SET last_seen=?, dedupe_key=?, "
-                "origin=COALESCE(?, origin), employer=COALESCE(?, employer) "
+                "origin=COALESCE(?, origin), employer=COALESCE(?, employer), "
+                "description_source=COALESCE(description_source, "
+                "CASE WHEN description IS NOT NULL THEN ? END) "
                 "WHERE company=? AND ats_job_id=?",
-                (now, key, origin, p.employer, company, p.ats_job_id),
+                (now, key, origin, p.employer, description_source,
+                 company, p.ats_job_id),
             )
             continue
         conn.execute(
             "INSERT INTO postings (company, ats_job_id, title, location, url, "
             "posted_at, posted_on, first_seen, last_seen, closed_at, description, "
-            "dedupe_key, origin, employer) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?) "
+            "dedupe_key, origin, employer, description_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?) "
             "ON CONFLICT(company, ats_job_id) DO NOTHING",
             (company, p.ats_job_id, p.title, p.location, p.url, p.posted_at,
-             p.posted_on, now, now, p.description, key, origin, p.employer),
+             p.posted_on, now, now, p.description, key, origin, p.employer,
+             description_source if p.description is not None else None),
         )
         existing.add(p.ats_job_id)
         inserted.append(p)
@@ -2060,11 +2148,22 @@ def uncertain_for_resolution(
 
 
 def set_description(
-    conn: sqlite3.Connection, company: str, ats_job_id: str, description: str
+    conn: sqlite3.Connection, company: str, ats_job_id: str, description: str,
+    source: str,
 ) -> None:
+    """Store a posting's description and what kind of text it is.
+
+    `source` is required and has no default, so a new caller cannot write text without
+    saying where it came from — an unlabelled description is the ambiguity the
+    `description_source` column was added to end. One of DESCRIPTION_SOURCES.
+    """
+    if source is None:
+        raise ValueError("set_description needs a source")
+    _check_description_source(source)
     conn.execute(
-        "UPDATE postings SET description=? WHERE company=? AND ats_job_id=?",
-        (description, company, ats_job_id),
+        "UPDATE postings SET description=?, description_source=? "
+        "WHERE company=? AND ats_job_id=?",
+        (description, source, company, ats_job_id),
     )
 
 

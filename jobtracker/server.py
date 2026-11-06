@@ -2897,6 +2897,15 @@ class TuningServer(HTTPServer):
         self.downloads_path = downloads_path or config.DOWNLOADS_YAML
 
 
+def _connect(db_path) -> sqlite3.Connection:
+    """`store.connect`, told what kind of description each job board writes — the
+    same call `cli._connect` makes, for the same reason: `store` cannot import the
+    plugins, so the backfill's mapping is handed in by whoever opens the database."""
+    from . import plugins as plugins_mod
+
+    return store.connect(db_path, description_sources=plugins_mod.description_sources())
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "jobtracker"
 
@@ -2905,7 +2914,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- plumbing ------------------------------------------------------------------
     def _conn(self) -> sqlite3.Connection:
-        return store.connect(self.server.db_path)
+        return _connect(self.server.db_path)
 
     def _send(self, body: str, status: int = 200,
               ctype: str = "text/html; charset=utf-8") -> None:
@@ -4856,7 +4865,7 @@ class Handler(BaseHTTPRequestHandler):
         session = live.start(company_name, job_id, row["title"], url)
 
         def _run() -> None:
-            worker_conn = store.connect(self.server.db_path)
+            worker_conn = _connect(self.server.db_path)
             try:
                 browser_mod.fill_application(
                     worker_conn,

@@ -251,6 +251,17 @@ credential:
   scored, and `rank.available` filters it out — present in the table, absent from the
   product. Plugin postings are deliberately kept *out* of `wanted` for the same reason:
   that pass writes `''` through a bare UPDATE and would erase the message text.
+- **It records what kind of text that description is** (`postings.description_source`),
+  from `coverage()` on the plugin. `prose` is the listing's own words — a Discord
+  message, YC's `minExperience` line; `feed` is a stub the plugin assembled from fields,
+  which is what Simplify's `Category: … / Locations: …` text is. `coverage()` lives on
+  `Plugin` only — `{"bands": [...], "prose": bool}`, defaulting to
+  `{"bands": [], "prose": True}` — because a task plugin publishes no listings and nothing
+  may ask it for one. `plugins.description_sources()` maps every import plugin to its
+  value; `store` cannot import `plugins` (they import `tasks`, which import `store`), so
+  `cli._connect` and `server._connect` hand that mapping to `store.connect`, whose
+  backfill labels rows written before the column existed. An origin missing from the
+  mapping keeps NULL rather than a guess.
 - **A verdict is recorded for every posting.** Every downstream query is
   `postings JOIN verdicts`.
 - **Postings close by age, never by absence.** A channel cannot report that a req was

@@ -256,7 +256,7 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
     for company, posting in pending:
         if posting.description:  # Ashby/Lever: free, already in hand
             store.set_description(conn, posting.company, posting.ats_job_id,
-                                  posting.description)
+                                  posting.description, source="ats")
             stored += 1
             continue
 
@@ -267,7 +267,8 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
             # at all. Record '' ("fetched and genuinely empty") rather than leaving
             # NULL, or every run re-attempts a fetch that cannot exist: 249 aggregator
             # postings were being counted as failures nightly, with no request made.
-            store.set_description(conn, posting.company, posting.ats_job_id, "")
+            store.set_description(conn, posting.company, posting.ats_job_id, "",
+                                  source="ats")
             no_detail += 1
             continue
 
@@ -278,7 +279,8 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
             failed += 1
             continue
         fetched += 1
-        store.set_description(conn, posting.company, posting.ats_job_id, text)
+        store.set_description(conn, posting.company, posting.ats_job_id, text,
+                              source="ats")
         # The detail payload is also the only place Greenhouse exposes a true posted
         # date, so take it while we are here rather than paying for the request twice.
         source = get_source(company.ats)
@@ -293,6 +295,18 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
         "%d have no detail endpoint, %d deferred to tomorrow",
         stored, fetched, failed, no_detail, remaining,
     )
+
+
+def _connect(db_path):
+    """`store.connect`, told what kind of description each job board writes.
+
+    The one place the CLI opens the database, so the description-source backfill sees
+    every plugin's answer. `store` cannot ask the plugins itself — they import `tasks`,
+    which import `store` — so the mapping is handed in from here.
+    """
+    from . import plugins as plugins_mod
+
+    return store.connect(db_path, description_sources=plugins_mod.description_sources())
 
 
 def _active_plugins(plugins_path) -> list:
@@ -387,7 +401,8 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
             continue
 
         inserted = store.append_postings(
-            conn, company.name, fetch.postings, today, origin=plugin.name
+            conn, company.name, fetch.postings, today, origin=plugin.name,
+            description_source=plugins_mod.description_source(plugin),
         )
         stats["new_postings"] += len(inserted)
 
@@ -530,7 +545,7 @@ def _plugins_list(args: argparse.Namespace, path: Path) -> int:
         print(f"plugins.yaml is invalid: {exc}", file=sys.stderr)
         return 1
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     try:
         for plugin in plugins_mod.all_plugins():
             settings = {**plugin_settings.defaults_for(plugin.name),
@@ -595,7 +610,7 @@ def _plugins_purge(args: argparse.Namespace, plugin) -> int:
 
     settings = plugin_settings.settings_for(plugin.name, args.plugins)
     company = plugin.company(settings).name
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     try:
         counts = store.plugin_posting_counts(conn, company)
         blockers = store.purge_blockers(conn, company)
@@ -676,7 +691,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     results = fetcher.fetch_all(api)
 
     config.ensure_data_dir()
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     by_name = {c.name: c for c in api}
     # One dict for the whole run: ~9k postings, a handful of overrides.
     overrides = store.load_overrides(conn)
@@ -870,7 +885,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
     companies = config.load_companies(args.companies)
     companies_path = Path(args.companies or config.COMPANIES_YAML)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     by_name = {c.name: c for c in companies}
 
@@ -1017,7 +1032,7 @@ def cmd_rematch(args: argparse.Namespace) -> int:
     from .models import Posting
 
     criteria = load_criteria(args.criteria)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     overrides = store.load_overrides(conn)
     before = store.counts_by_verdict(conn)
@@ -1304,7 +1319,7 @@ def cmd_work(args: argparse.Namespace) -> int:
         print(f"  `jobtracker plugins enable {args.task}` turns it on.")
         return 0
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
 
     fetcher = None
@@ -1388,7 +1403,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     than being something you have to remember to read.
     """
     criteria = load_criteria(args.criteria)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     decisions = store.all_decisions(conn)
     conn.close()
 
@@ -1445,7 +1460,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
     companies = config.load_companies(args.companies)
     tiers = rank_mod.tier_lookup(companies)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     stats = rank_mod.RankStats()
 
@@ -1516,7 +1531,7 @@ def cmd_tailor(args: argparse.Namespace) -> int:
     from . import keywords as kw_mod
     from . import resume as resume_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     try:
         if args.action == "dismiss":
@@ -1668,7 +1683,7 @@ def cmd_coverletter(args: argparse.Namespace) -> int:
     from . import letter as letter_mod
     from . import resume as resume_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     try:
         template, error = letter_mod.load(getattr(args, "coverletter_source", None))
@@ -1798,7 +1813,7 @@ def cmd_prefill(args: argparse.Namespace) -> int:
         _say_switched_off("prefill")
         return EXIT_OK
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     fetcher = Fetcher()
     try:
@@ -1839,7 +1854,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     """
     from . import rank as rank_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     fetcher = Fetcher()
     try:
@@ -2005,7 +2020,7 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
         _say_switched_off("apply-to")
         return EXIT_OK
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     try:
         row = conn.execute(
@@ -2084,7 +2099,7 @@ def cmd_today(args: argparse.Namespace) -> int:
     """
     from . import rank as rank_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     # `--since` for the same reason every other command has it: a snooze is "today plus
     # N days", so without a way to pin today, anything that asserts on the resulting date
     # is a time bomb that passes until midnight.
@@ -2168,7 +2183,7 @@ def cmd_today(args: argparse.Namespace) -> int:
 # -- decide ------------------------------------------------------------------------
 def cmd_decide(args: argparse.Namespace) -> int:
     """Record a judgment on one posting, and optionally pin it with an override."""
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     row = conn.execute(
         "SELECT company, ats_job_id, title, location FROM postings "
         "WHERE company=? AND ats_job_id=?",
@@ -2221,7 +2236,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
     LinkedIn. Those have no posting row, so the id is minted from the title; giving the
     same title twice updates the same application rather than creating a second one.
     """
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     next_action = None
     if args.next_action:
         next_action = apps_mod.parse_day(args.next_action)
@@ -2291,7 +2306,7 @@ def cmd_applications(args: argparse.Namespace) -> int:
     The terminal mirror of `/applications`. Read-only, and it reads `applications`
     directly rather than joining through `postings`, so manual entries appear.
     """
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = _today()
     apps = store.all_applications(conn)
     events_by = store.events_by_application(conn)
@@ -2347,7 +2362,7 @@ def cmd_mail(args: argparse.Namespace) -> int:
     """
     from . import mail as mail_mod, maildir as maildir_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     try:
         if args.accept or args.dismiss:
             return _mail_decide(conn, args)
@@ -2469,7 +2484,7 @@ def _mail_decide(conn, args: argparse.Namespace) -> int:
 # -- report ------------------------------------------------------------------------
 def cmd_report(args: argparse.Namespace) -> int:
     companies = config.load_companies(args.companies)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     since = args.since or _today()
     criteria = load_criteria(args.criteria)
     text = report_mod.build_report(
@@ -2491,7 +2506,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
     companies = config.load_companies(args.companies)
     criteria = load_criteria(args.criteria)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     html_doc = dashboard_mod.build_dashboard(conn, companies, _today(), criteria)
     conn.close()
 
@@ -2550,7 +2565,7 @@ def cmd_forget_learned(args: argparse.Namespace) -> int:
     """
     from . import prefill as prefill_mod
 
-    conn = store.connect(args.db or config.DB_PATH)
+    conn = _connect(args.db or config.DB_PATH)
     try:
         answers, answers_path = _load_answers(
             Path(args.answers) if args.answers else None)
@@ -2605,7 +2620,7 @@ def cmd_forget_question(args: argparse.Namespace) -> int:
     Dry by default, like `repair`: this rewrites something a run decided, and the list is
     worth reading before it goes.
     """
-    conn = store.connect(args.db or config.DB_PATH)
+    conn = _connect(args.db or config.DB_PATH)
     try:
         rows = store.forget_question(conn, args.question, write=args.write)
         if not rows:

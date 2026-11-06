@@ -221,7 +221,7 @@ def _seed(conn, answers):
                  "https://job-boards.greenhouse.io/stripe/jobs/8077887")],
         TODAY,
     )
-    store.set_description(conn, "Stripe", "8077887", "backend, new grads welcome")
+    store.set_description(conn, "Stripe", "8077887", "backend, new grads welcome", source="ats")
     store.record_verdict(
         conn, Verdict("Stripe", "8077887", Decision.MATCH, "r", "rules"), TODAY)
     store.record_judgment(conn, "Stripe", "8077887",

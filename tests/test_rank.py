@@ -254,7 +254,7 @@ def test_judgment_round_trips_and_survives_a_rescore():
 def test_a_changed_prose_hash_puts_a_posting_back_in_the_judging_queue():
     conn = store.connect(":memory:")
     store.sync_postings(conn, "Acme", [Posting("Acme", "1", "SWE", "u")], "2026-08-02")
-    store.set_description(conn, "Acme", "1", "a description")
+    store.set_description(conn, "Acme", "1", "a description", source="ats")
     store.record_verdict(conn, Verdict("Acme", "1", Decision.MATCH, "r", "rules"), "2026-08-02")
 
     assert len(store.matches_needing_judgment(conn, "hash1")) == 1
@@ -313,7 +313,7 @@ def _seed_unjudged(db, jid="1"):
     conn = store.connect(db)
     store.sync_postings(conn, "Acme", [Posting("Acme", jid, "SWE", f"https://x/{jid}")],
                         "2026-08-02")
-    store.set_description(conn, "Acme", jid, "a description")
+    store.set_description(conn, "Acme", jid, "a description", source="ats")
     store.record_verdict(conn, Verdict("Acme", jid, Decision.MATCH, "r", "rules"),
                          "2026-08-02")
     conn.commit()
@@ -324,7 +324,7 @@ def _seed(db, jid="1", score=90.0):
     conn = store.connect(db)
     store.sync_postings(conn, "Acme", [Posting("Acme", jid, "SWE", f"https://x/{jid}")],
                         "2026-08-02")
-    store.set_description(conn, "Acme", jid, "a description")
+    store.set_description(conn, "Acme", jid, "a description", source="ats")
     store.record_verdict(conn, Verdict("Acme", jid, Decision.MATCH, "r", "rules"),
                          "2026-08-02")
     store.record_judgment(conn, "Acme", jid, RankJudgment("strong", "strong", "low", "w"),
@@ -407,7 +407,7 @@ def test_the_resolve_queue_puts_readable_postings_first():
     for jid in ("old", "new"):
         store.record_verdict(
             conn, Verdict("Acme", jid, Decision.UNCERTAIN, "r", "rules"), "2026-07-01")
-    store.set_description(conn, "Acme", "old", "a description")
+    store.set_description(conn, "Acme", "old", "a description", source="ats")
 
     rows = store.uncertain_for_resolution(conn, limit=1)
     assert [r["ats_job_id"] for r in rows] == ["old"]  # readable beats newer

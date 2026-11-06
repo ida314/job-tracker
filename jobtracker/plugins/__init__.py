@@ -17,6 +17,8 @@ from .base import (  # noqa: F401
     PluginFetch,
     TaskPlugin,
     all_plugins,
+    description_source,
+    description_sources,
     get_plugin,
     plugin_names,
     plugins_of_kind,
