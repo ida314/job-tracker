@@ -56,7 +56,9 @@ fires; two were already wrong when they were written.
 
 ### `board_scope: mixed`
 
-`board_scope: mixed` sits directly after `category`. It says one thing: this board is a whole employer's careers site, not its engineering
+The form's checkbox, *"Board serves many non-field roles (folds them in Review)"*, writes
+`board_scope: mixed`, placed directly after `category`. It is the only UI for the field.
+It says one thing: this board is a whole employer's careers site, not its engineering
 org — Target Tech's Workday triple carries baristas, stocking and store security, and was
 511 of 1,773 live company-page uncertain rows on 2026-11-05.
 

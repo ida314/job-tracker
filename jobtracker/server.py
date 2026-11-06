@@ -647,6 +647,8 @@ _COMPANIES_CSS = """
         color:var(--ink)}
 .cocard textarea{min-height:3.4rem;resize:vertical}
 .cocard .wide{grid-column:1/-1}
+.cocard label.cocheck{flex-direction:row;align-items:center;gap:.45rem}
+.cocard label.cocheck input{padding:0;margin:0}
 .hint{font-size:.75rem;color:var(--muted);margin:.15rem 0 0}
 .coresult{margin-top:.9rem;padding:.7rem;border-radius:var(--radius-control);border:1px solid var(--border)}
 .coresult pre{overflow-x:auto;font-size:.75rem;margin:.5rem 0 0;white-space:pre;
@@ -1179,6 +1181,13 @@ def _add_company_card() -> list:
         "<label>Tier"
         + _select("newco", "tier", ("", "1", "2", "3", "4", "5", "6", "7"), "")
         + "</label>"
+    )
+    # A checkbox whose value is the one word it writes; the script sends `value` when it
+    # is ticked and "" when not, so an unticked box omits the key from the entry.
+    p.append(
+        '<label class="wide cocheck"><input class=newco data-key="board_scope" type=checkbox '
+        'value="mixed"> Board serves many non-field roles (folds them in Review)'
+        "</label>"
     )
     p.append(
         '<label class=wide>Notes<textarea class=newco data-key="notes" '
@@ -4646,6 +4655,7 @@ class Handler(BaseHTTPRequestHandler):
             careers_page=field("careers_page"),
             board_url=field("board_url"),
             notes=field("notes"),
+            board_scope=field("board_scope") or None,
         )
 
         path = self._companies_path()
@@ -6718,7 +6728,10 @@ document.addEventListener('click', async (e) => {
   const cosave = e.target.closest('button.co-save, button.co-force');
   if (cosave) {
     const body = {force: cosave.classList.contains('co-force')};
-    document.querySelectorAll('.newco').forEach(el => { body[el.dataset.key] = el.value; });
+    // A checkbox's `value` is constant whether or not it is ticked; read `checked`.
+    document.querySelectorAll('.newco').forEach(el => {
+      body[el.dataset.key] = el.type === 'checkbox' ? (el.checked ? el.value : '') : el.value;
+    });
     const out = document.getElementById('coout');
     const force = document.querySelector('button.co-force');
     cosave.disabled = true;
