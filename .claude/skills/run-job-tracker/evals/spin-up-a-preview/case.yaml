@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: spin-up-a-preview
+expected_outcome: |
+  A preview starts through the skill's script, passes its check, and the user gets the URL and a plain account of what is real.
