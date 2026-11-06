@@ -257,6 +257,16 @@ disagree about what is on it.
   hundreds of employers. Employer is its own column, the board is a `srctag` beside the role, and
   the filter bar offers search, which board, and the location sort. No tier chips and no ATS
   select: a control that filters on a field every row leaves empty only ever hides everything.
+  Its one group is the uncertain table's trailing fold, which is a lane, not an employer.
+- **The Uncertain tables are the full record; the folds trail them.** Both (company pages, job
+  boards) carry a **Status** column with `queue.label(lane)`, the rules' raw reason in the
+  cell's `title`. `no_signal` and `noise` rows render in one trailing `tbody.grp.fold`, "No
+  field signal — N rows" — a group head like a company's, open in the HTML, collapsed by the
+  script, force-expanded by any filter, its count read through `data-noun`. Nothing is removed
+  and the partition does not move: the heading count, "N of M shown" and the Uncertain tile stay
+  the whole list, and the tile's sub-line is "M worth a read" (`dashboard._WORTH_A_READ`, the
+  complement of `queue.FOLDED`). Without criteria there are no lanes: the raw reason shows and
+  nothing folds.
 - **A duplicate is shown, never hidden.** A job board row sharing a `dedupe_key` with an open
   company-page row carries an "on company page" chip linking to it; a row whose key matches an
   application renders "applied · \<status\>" where `+ tracker` would be. A live-looking control
