@@ -106,6 +106,16 @@ exclude_titles:
   - engineer 3
   - engineer 4
   - sre 2
+  # Undotted "Sr". `sr.` needs its dot, so "Sr Accounting Specialist" and
+  # "Sr Software Engineer, Infrastructure" sat in UNCERTAIN (46 rows in the 2026-11-05
+  # live replay). Alphanumeric boundaries keep it out of "SRE", "sre" and "Srinivasan";
+  # "Sr." still REJECTs on `sr.`, which comes first in this list, so no existing
+  # reason changes. Latent: a hyphenated technical "SR-" ("SR-IOV") would fire, and
+  # no corpus title has one. Checked 2026-11-06 on the laptop copy: no employer name is
+  # or contains the word "Sr", and the replay moved 28 uncertain → reject (Databricks
+  # 10, Five9 11, Elastic 3, Gusto, MongoDB, SoFi, SolarWinds) and nothing else; the
+  # other 15 undotted-Sr titles were already REJECTs on another token.
+  - sr
 
 # Engineering signal. A MATCH requires a level token AND an engineering signal — either
 # a backend-specific term below (role_type_include) or a generic engineering term here.

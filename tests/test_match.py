@@ -155,6 +155,20 @@ def test_numbered_tokens_do_not_fire_on_years(criteria):
     assert v.decision is Decision.MATCH and v.reason == "level:2027+eng:generic"
 
 
+def test_sr_does_not_fire_inside_sre(criteria):
+    # The undotted abbreviation rejects on its own token.
+    for title in ("Sr Accounting Specialist", "Sr Software Engineer, Infrastructure"):
+        v = match(_p(title, "NYC"), criteria)
+        assert v.decision is Decision.REJECT and v.reason == "excluded_title:sr", title
+    # Alphanumeric boundaries keep it out of SRE, in either case, and out of a name.
+    for title in ("SRE, New Grad", "New Grad sre", "Srinivasan Labs — Software Engineer"):
+        assert "sr" not in criteria.hits("exclude_titles", title.lower()), title
+    assert match(_p("SRE, New Grad", "NYC"), criteria).decision is Decision.MATCH
+    # "Sr." was already covered and still answers first, so its reason is unchanged.
+    v = match(_p("Sr. Backend Engineer", "NYC"), criteria)
+    assert v.decision is Decision.REJECT and v.reason == "excluded_title:sr."
+
+
 def test_verdict_carries_identity(criteria):
     v = match(_p("Senior Engineer"), criteria)
     assert v.company == "Acme" and v.ats_job_id == "1" and v.decided_by == "rules"
