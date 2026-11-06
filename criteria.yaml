@@ -90,6 +90,22 @@ exclude_titles:
   - "5+ years"
   - "3+ years"
   - clearance          # citizenship_note: exclude roles needing active clearance
+  # Arabic seniority levels, the counterpart of `ii`/`iii`. MongoDB, Datadog, Twilio
+  # and Kong number their ladders ("Software Engineer 3", "SRE 2"), so those titles
+  # sat in UNCERTAIN (36 "Full-stack Engineer 4"-shaped rows in the 2026-11-05 live
+  # replay). Only the exact tokens the corpus carries are listed — found by grepping
+  # the laptop copy's titles for (engineer|developer|researcher|scientist|sre) [2-9]
+  # on 2026-11-06: engineer 2 (21), engineer 3 (33), engineer 4 (1), sre 2 (3);
+  # no developer, researcher or scientist is numbered. Never a bare digit: "2" is in
+  # every "2027". The lookahead keeps `engineer 2` off "Engineer 2027", and no
+  # employer name in the corpus contains any of them. Engineer 1 is level ONE, an
+  # entry token in level_include, not here. Replay on that copy: 44 uncertain →
+  # reject and nothing else moved; the other 14 numbered titles were already REJECTs
+  # on `support engineer` or `sales`.
+  - engineer 2
+  - engineer 3
+  - engineer 4
+  - sre 2
 
 # Engineering signal. A MATCH requires a level token AND an engineering signal — either
 # a backend-specific term below (role_type_include) or a generic engineering term here.

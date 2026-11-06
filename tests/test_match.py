@@ -125,6 +125,36 @@ def test_engineer_i_does_not_fire_on_engineer_ii(criteria):
     assert v.decision is Decision.REJECT and v.reason == "excluded_title:senior"
 
 
+@pytest.mark.parametrize("title,token", [
+    ("Full-stack Engineer 4", "engineer 4"),
+    ("Software Engineer 3, Atlas Clusters", "engineer 3"),
+    ("Software Engineer 2", "engineer 2"),
+    ("SRE 2, Managed Gateways", "sre 2"),
+])
+def test_engineer_4_is_excluded(criteria, title, token):
+    v = match(_p(title, "NYC"), criteria)
+    assert v.decision is Decision.REJECT and v.reason == f"excluded_title:{token}"
+
+
+_NUMBERED = ("engineer 1", "developer 1", "engineer 2", "engineer 3", "engineer 4",
+             "sre 2")
+
+
+def test_numbered_tokens_do_not_fire_on_years(criteria):
+    # A digit token followed by more digits is a year, not a level.
+    for key in ("level_include", "exclude_titles"):
+        assert not any(t.strip().isdigit() and len(t) < 4 for t in getattr(criteria, key)), \
+            f"{key} carries a bare short digit"
+    for title in ("software engineer 2027", "backend engineer 2026",
+                  "sre 2025 cohort", "software developer 10x", "engineer 1st shift"):
+        for key in ("level_include", "exclude_titles"):
+            hits = set(criteria.hits(key, title)) & set(_NUMBERED)
+            assert not hits, f"{title!r} hit {hits} in {key}"
+    # And the year still reads as the level token it is.
+    v = match(_p("Software Engineer 2027", "NYC"), criteria)
+    assert v.decision is Decision.MATCH and v.reason == "level:2027+eng:generic"
+
+
 def test_verdict_carries_identity(criteria):
     v = match(_p("Senior Engineer"), criteria)
     assert v.company == "Acme" and v.ats_job_id == "1" and v.decided_by == "rules"
