@@ -1711,6 +1711,18 @@ def record_decision(
     )
 
 
+def clear_decision(conn: sqlite3.Connection, company: str, ats_job_id: str) -> bool:
+    """Remove your judgment on one posting. False when there was none to remove.
+
+    The undo behind `/review`'s ruling buttons. It touches `decisions` only; whether the
+    pin goes too is the caller's call, because only a human pin may.
+    """
+    cur = conn.execute(
+        "DELETE FROM decisions WHERE company=? AND ats_job_id=?", (company, ats_job_id)
+    )
+    return cur.rowcount > 0
+
+
 def all_decisions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Every judgment ever recorded, newest first. The input to `eval`."""
     return list(

@@ -6,6 +6,7 @@ own table, and the Today count is the length of the same list.
 """
 
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -218,10 +219,183 @@ def test_review_is_in_the_nav_after_job_boards():
     assert nav.index('href="/jobboards"') < nav.index('href="/review"')
 
 
-def test_review_page_has_no_buttons_yet(conn, criteria):
-    markup = _markup(_page(conn, criteria))
+# -- rulings ---------------------------------------------------------------------------
+def test_review_buttons_have_handlers_and_no_data_act(conn, criteria):
+    """The parity rule: a button's handler ships in the page that renders it. The rulings
+    are rendered by `dashboard`, so `dashboard._REVIEW_JS` is the script that must answer
+    them — and it is on `/review` alone, never in the static file."""
+    page = _page(conn, criteria)
+    markup = _markup(page)
+    script = page[page.rindex("<script>"):]
+    rendered = set(re.findall(r'<button[^>]*class="([^"]+)"', markup))
+    assert rendered == {"cotoggle", "rv-yes", "rv-no", "rv-undo"}
+    rulings = {c for c in rendered if c.startswith("rv-")}
+    assert set(re.findall(r"button\.(rv-[a-z]+)", script)) == rulings
+    assert set(re.findall(r"button\.(rv-[a-z]+)", dashboard._REVIEW_JS)) == rulings
+    assert "'/api/decision'" in script and "'/api/decision/clear'" in script
+    # swaps in place, never reloads
+    assert "location.reload" not in dashboard._REVIEW_JS
+    # `data-act` keeps meaning exactly the three disposition buttons on a pick
     assert "data-act" not in markup
-    assert not re.search(r"<button(?![^>]*class=\"cotoggle\")", markup)
+
+    # every row gets the rulings, the folds included: folding is not a judgement
+    rows = re.findall(r"<tr data-lane=[^>]*>.*?</tr>", markup, re.S)
+    assert len(rows) == 5
+    for row in rows:
+        assert row.count('class="rv-yes"') == 1 and row.count('class="rv-no"') == 1
+        assert row.count('class="rv-undo"') == 2
+    assert 'data-company="Target Tech" data-job="tt"' in _tbody(markup, "grp noise sub")
+    # both chips start hidden, so the cell first shows the two buttons
+    assert len(re.findall(r'<span class="rvdone" data-ruled="(match|reject)" hidden>',
+                          markup)) == 10
+    # a fold head spans the extra column
+    assert '<th colspan="6" scope="colgroup">' in markup
+    assert 'colspan="5"' not in markup
+
+    # not in the static file, and not on the dashboard's own Uncertain tables
+    def bare(doc):
+        return re.sub(r"<(style|script)>.*?</\1>", "", doc, flags=re.S)
+
+    for interactive in (True, False):
+        doc = dashboard.build_dashboard(conn, COMPANIES, TODAY, criteria,
+                                        interactive=interactive)
+        assert "rv-" not in bare(doc) and "button.rv-yes" not in doc
+    boards = server.render_job_boards(conn, COMPANIES, TODAY, criteria)
+    assert "rv-" not in bare(boards) and "button.rv-yes" not in boards
+    assert "rv-yes" not in dashboard._JS
+
+
+def _db(tmp_path):
+    path = tmp_path / "state.db"
+    conn = store.connect(path)
+    _post(conn, "Acme", "new", "Software Engineer")
+    _post(conn, "Simplify New-Grad-Positions", "s1", "Klaviyo — Software Engineer",
+          origin="simplify", employer="Klaviyo")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _handler(path):
+    h = server.Handler.__new__(server.Handler)
+    h.server = SimpleNamespace(db_path=path, criteria_path=config.CRITERIA_YAML)
+    return h
+
+
+def _tables(path):
+    conn = store.connect(path)
+    try:
+        return tuple(
+            [tuple(r) for r in conn.execute(f"SELECT * FROM {t} ORDER BY 1, 2")]
+            for t in ("decisions", "overrides", "verdicts")
+        )
+    finally:
+        conn.close()
+
+
+def test_decision_clear_refuses_when_nothing_to_clear(tmp_path):
+    path = _db(tmp_path)
+    # a pin with no decision behind it: nothing here is a ruling this undo may remove
+    conn = store.connect(path)
+    store.set_override(conn, "Acme", "new", "match", TODAY, reason="manual")
+    conn.commit()
+    conn.close()
+    before = _tables(path)
+
+    res = _handler(path)._api_decision_clear({"company": "Acme", "ats_job_id": "new"})
+    assert res["ok"] is False and "no ruling" in res["error"]
+    res = _handler(path)._api_decision_clear({"company": "Acme", "ats_job_id": "nope"})
+    assert res["ok"] is False
+    assert _tables(path) == before
+
+
+def test_decision_clear_never_clears_an_llm_override(tmp_path):
+    """A decision recorded without a pin (`decide` without --pin), on a posting the model
+    pinned. Undoing the decision removes the decision; the model's pin is not a ruling
+    this undoes, and the verdict re-derived after it still follows that pin."""
+    path = _db(tmp_path)
+    conn = store.connect(path)
+    store.record_decision(conn, "Acme", "new", "Software Engineer", "match", TODAY)
+    store.set_override(conn, "Acme", "new", "reject", TODAY, reason="llm:senior",
+                       decided_by="llm")
+    conn.commit()
+    conn.close()
+
+    res = _handler(path)._api_decision_clear({"company": "Acme", "ats_job_id": "new"})
+    assert res["ok"] is True and res["decisions"] == 0
+
+    conn = store.connect(path)
+    pin = conn.execute("SELECT decision, decided_by FROM overrides").fetchone()
+    assert tuple(pin) == ("reject", "llm")
+    v = conn.execute("SELECT verdict, decided_by FROM verdicts WHERE ats_job_id='new'"
+                     ).fetchone()
+    assert tuple(v) == ("reject", "llm")
+    conn.close()
+
+
+def test_a_human_ruling_undone_is_uncertain_again_and_unpinned(tmp_path):
+    path = _db(tmp_path)
+    before = _tables(path)
+    h = _handler(path)
+    assert h._api_decision({"company": "Acme", "ats_job_id": "new",
+                            "decision": "reject"})["ok"]
+    res = h._api_decision_clear({"company": "Acme", "ats_job_id": "new"})
+    assert res["ok"] is True and res["verdict"] == "uncertain"
+    after = _tables(path)
+    assert after[0] == [] and after[1] == []
+    # the verdict is the rules' again; the other row was never touched
+    verdicts = {r[1]: r for r in after[2]}
+    assert verdicts["new"][2] == "uncertain" and verdicts["new"][4] == "rules"
+    assert verdicts["s1"] == {r[1]: r for r in before[2]}["s1"]
+
+
+def test_rule_undo_rule_leaves_exactly_one_decision(tmp_path):
+    """The done condition: a click, its undo, then the other button."""
+    path = _db(tmp_path)
+    h = _handler(path)
+    ident = {"company": "Acme", "ats_job_id": "new"}
+    assert h._api_decision({**ident, "decision": "match"})["decisions"] == 1
+    assert h._api_decision_clear(ident)["decisions"] == 0
+    assert h._api_decision({**ident, "decision": "reject"})["decisions"] == 1
+    decisions, overrides, _ = _tables(path)
+    assert [(d[0], d[1], d[4]) for d in decisions] == [("Acme", "new", "reject")]
+    assert [(o[0], o[1], o[2]) for o in overrides] == [("Acme", "new", "reject")]
+
+
+def test_ruled_row_leaves_review_on_next_render(tmp_path, criteria):
+    path = _db(tmp_path)
+    conn = store.connect(path)
+    assert "job=new" in _markup(_page(conn, criteria))
+    conn.close()
+
+    assert _handler(path)._api_decision({"company": "Acme", "ats_job_id": "new",
+                                         "decision": "match"})["ok"]
+    conn = store.connect(path)
+    markup = _markup(_page(conn, criteria))
+    assert "job=new" not in markup and "job=s1" in markup
+    conn.close()
+
+    # and an undo puts it back
+    assert _handler(path)._api_decision_clear({"company": "Acme",
+                                               "ats_job_id": "new"})["ok"]
+    conn = store.connect(path)
+    assert "job=new" in _markup(_page(conn, criteria))
+    conn.close()
+
+
+def test_match_ruling_feeds_eval(tmp_path, criteria):
+    """The reason the buttons exist: a ruling is a row in the corpus `eval` replays."""
+    from jobtracker import tuning
+
+    path = _db(tmp_path)
+    assert _handler(path)._api_decision({"company": "Acme", "ats_job_id": "new",
+                                         "decision": "match"})["ok"]
+    conn = store.connect(path)
+    report = tuning.evaluate(store.all_decisions(conn), criteria)
+    conn.close()
+    assert report.total == 1
+    # the rules still say uncertain: unresolved, never a regression
+    assert report.ok and len(report.unresolved) == 1
 
 
 def test_review_page_survives_an_empty_corpus(criteria):

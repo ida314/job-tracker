@@ -526,8 +526,9 @@ def render_review(conn: sqlite3.Connection, criteria, companies, coverage_by_ori
     with no link. The body is `dashboard.review_page_parts`, and the Today count is the
     length of the same `queue.review` split, so the number and the list cannot disagree.
 
-    It carries `dashboard._JS` for the one filter block its search box needs. The page
-    renders no buttons; the actions column is still to come.
+    It carries `dashboard._JS` for the filter block its search box needs, and
+    `dashboard._REVIEW_JS` for the rulings column — both rendered by `dashboard`, so both
+    handlers come from there, in the one `<script>` this page emits.
     """
     p = [
         "<!doctype html><meta charset=utf-8>",
@@ -543,7 +544,7 @@ def render_review(conn: sqlite3.Connection, criteria, companies, coverage_by_ori
     p.append(_NAV)
     p.extend(body[1:])
     p.append("</div>")
-    p.append(f"<script>{dashboard_mod._JS}</script>")
+    p.append(f"<script>{dashboard_mod._JS}{dashboard_mod._REVIEW_JS}</script>")
     return "\n".join(p)
 
 
@@ -3151,6 +3152,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/decision":
                 self._send_json(self._api_decision(payload))
+            elif path == "/api/decision/clear":
+                self._send_json(self._api_decision_clear(payload))
             elif path == "/api/disposition":
                 self._send_json(self._api_disposition(payload))
             elif path == "/api/rule":
@@ -3355,6 +3358,55 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         return {"ok": True, "decisions": n}
+
+    def _api_decision_clear(self, payload: dict) -> dict:
+        """Undo a ruling: `/review`'s undo, the inverse of `_api_decision`.
+
+        Removes the posting's `decisions` row, and its pin **only if the pin is yours** —
+        a model pin is not a ruling this undoes, and `set_override`'s rule that a machine
+        never displaces a human runs the other way here: an undo of a human ruling never
+        removes a machine one. The verdict is then re-derived the way `check` would,
+        `match()` with whatever pin is left applied on top.
+
+        Nothing to clear is a refusal, with both tables untouched.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        # Before anything is touched: a criteria file that does not parse must refuse the
+        # undo, not leave a decision deleted with its verdict still the ruling's.
+        try:
+            criteria = load_criteria(self.server.criteria_path)
+        except Exception as exc:  # noqa: BLE001 - reported, never stored
+            return {"ok": False, "error": f"criteria.yaml did not load: {exc}"}
+
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT title, url, location, posted_at, posted_on FROM postings "
+                "WHERE company=? AND ats_job_id=?",
+                (company, job_id),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "error": "no such posting"}
+            if not store.clear_decision(conn, company, job_id):
+                return {"ok": False, "error": "there is no ruling on this posting to undo"}
+            pin = conn.execute(
+                "SELECT decided_by FROM overrides WHERE company=? AND ats_job_id=?",
+                (company, job_id),
+            ).fetchone()
+            if pin is not None and pin["decided_by"] == "human":
+                store.clear_override(conn, company, job_id)
+            posting = Posting(company, job_id, row["title"], row["url"],
+                              row["location"] or "", posted_at=row["posted_at"],
+                              posted_on=row["posted_on"])
+            verdict = tuning.apply_override(match(posting, criteria),
+                                            store.load_overrides(conn))
+            store.record_verdict(conn, verdict, datetime.now().isoformat(timespec="seconds"))
+            conn.commit()
+            n = store.decision_count(conn)
+        finally:
+            conn.close()
+        return {"ok": True, "decisions": n, "verdict": verdict.decision.value}
 
     def _api_disposition(self, payload: dict) -> dict:
         """Act on one of today's picks: applied, skipped, or snoozed.
