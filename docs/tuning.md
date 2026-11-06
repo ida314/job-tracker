@@ -61,6 +61,68 @@ counted those against you, it would push you toward writing rules that guess lev
 from titles, which is exactly the over-fitting this whole mechanism exists to prevent.
 Only regressions block.
 
+## When there is no corpus: `eval --replay-all`
+
+`eval` needs recorded judgments. With `decisions` empty it has nothing to replay, and a
+criteria edit would ship with no evidence at all. `--replay-all` is the fallback: it
+replays `match()` over **every stored posting** — open and closed, every origin — under
+the old criteria and the new, and diffs every verdict.
+
+```sh
+git show HEAD:criteria.yaml > /tmp/criteria.old.yaml
+$EDITOR criteria.yaml
+jobtracker eval --replay-all --against /tmp/criteria.old.yaml
+```
+
+```
+replayed 9150 postings, open and closed (0 override(s), 0 held)
+  old: /tmp/criteria.old.yaml
+  new: criteria.yaml
+  match       33 → 14  (-19)
+  reject      7513 → 7512  (-1)
+  uncertain   1604 → 1624  (+20)
+
+transitions:
+  match → uncertain         19  BLOCKS
+  match → reject             0
+  uncertain → match          0
+  ...
+
+match → uncertain:
+  Notion             Software Engineer, New Grad
+                     └─ level:new grad+eng:generic  →  no_level_token_in_title
+```
+
+The delta table is `rematch`'s; the six transition lines always print, so "nothing
+moved" reads as six zeros rather than as silence. Up to `--samples N` (default 20)
+examples follow per transition, each with the reason the old rules gave and the reason
+the new ones give.
+
+- **`--against` is required.** The old file is named, not fetched: running `git` here
+  would make this the second module that shells out, and `assemble.py` is the only one
+  (a test in `tests/test_resume.py` keeps it that way).
+- **It gates only on a lost match.** Exit **1** when a posting goes `match → reject` or
+  `match → uncertain` and that transition is not declared intended; `uncertain → match`
+  and `uncertain → reject` are counted and printed and never block, for the reason in
+  *Regression vs unresolved* above. Exit **2** when it could not run — either criteria
+  file, the `--intended` file or the database did not load.
+- **`--intended PATH`** is a YAML mapping of the transitions this change means to make,
+  each with its reason, which is printed beside the count:
+
+  ```yaml
+  "match->uncertain": "bare 'grad' moves to the level task"
+  ```
+
+- **Overrides are applied to both sides.** A pinned posting cannot move on the pages, so
+  it is never a transition; when the rules under it *did* move, it is reported as
+  **held**, with its own samples. Those are the rows a criteria edit may need
+  `store.clear_override` for — only where a model guess contradicts the new rules.
+- **It is read-only.** The database is opened through a `mode=ro` URI, never through
+  `store.connect()`, which migrates on open, so it is safe against a copy of production
+  or a file you cannot write. It writes nothing anywhere and needs no `decisions`.
+  A WAL database in a directory you cannot write either will not open: SQLite needs to
+  create the `-shm` file beside it. Copy it somewhere writable.
+
 ## Suggestions
 
 `eval` also proposes phrases that appear in several postings you rejected and in **no**
@@ -102,6 +164,43 @@ rematched 8637 open postings (2 override(s) applied)
 ```
 
 Overrides are re-applied on every rematch, so pinned postings keep your verdict.
+
+## Auditing the model's pins: `jobtracker audit-pins`
+
+The `level` task pins every verdict it reaches, because `check` would otherwise
+re-derive the title's verdict overnight and erase it. Pins written before readings were
+grounded have nothing behind them, and the worst of them are invisible: an `entry` pin
+on a job board row whose "description" is employer, location and a date, and a
+`not_entry` reject, which no page renders. `audit-pins` decides which stay.
+
+| Pin | Kept if | Otherwise |
+|---|---|---|
+| `entry`, `description_source = 'feed'` | the rules, from the title alone, reach the pinned verdict | cleared |
+| `not_entry`, any source | its quote (after `llm:not_entry:`) occurs in the title or description | cleared |
+| `entry`, `ats`/`prose`, with a quote | its quote occurs in the title or description | cleared |
+| `entry`, `ats`/`prose`, no quote | always — real prose was read, before quotes were stored | — |
+
+"Occurs" is `level.grounded`, the check the reading passed when it was made:
+whitespace-normalized and casefolded. Two cases the table does not name are **kept**,
+because the side to err on is the one that removes nothing on a guess: an `entry` pin
+with no quote and no recorded source, and a reason in a shape the audit does not
+recognise.
+
+```sh
+jobtracker audit-pins            # dry: counts per bucket and up to 20 titles each
+jobtracker audit-pins --write    # clear, then re-derive each cleared row with match()
+```
+
+- **It can only see `llm` pins.** `decided_by = 'llm'` is in the SQL, so a human
+  ruling is never in the list it chooses from. It is the only bulk remover of model
+  pins.
+- **A cleared pin re-derives from the rules, not the model.** `match()` writes a
+  `decided_by = 'rules'` verdict for each cleared row and nothing else; the run logs
+  how many moved.
+- **It leaves the outer loop alone.** `decisions`, `applications`, `rankings` and
+  `level_readings` are untouched; a cleared posting you applied to is still an
+  application.
+- **By hand only.** Nothing in `check`, `work` or `prepare` calls it.
 
 ## Doing it in a browser
 

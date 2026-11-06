@@ -25,6 +25,8 @@ Subcommands:
   serve         the same view, plus editing: decisions, criteria, dispositions
   report        re-render the latest state from state.db without fetching
   rematch       re-apply criteria to stored postings without fetching
+  audit-pins    remove the model's pins nothing on the page supports (llm pins
+                only, never yours); dry unless --write, then re-derives from the rules
   eval          replay criteria against your recorded judgments
   decide        record a judgment on one posting; --pin makes it an override
   apply         record an application and its outcome; --manual for an untracked job
@@ -256,7 +258,7 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
     for company, posting in pending:
         if posting.description:  # Ashby/Lever: free, already in hand
             store.set_description(conn, posting.company, posting.ats_job_id,
-                                  posting.description)
+                                  posting.description, source="ats")
             stored += 1
             continue
 
@@ -267,7 +269,8 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
             # at all. Record '' ("fetched and genuinely empty") rather than leaving
             # NULL, or every run re-attempts a fetch that cannot exist: 249 aggregator
             # postings were being counted as failures nightly, with no request made.
-            store.set_description(conn, posting.company, posting.ats_job_id, "")
+            store.set_description(conn, posting.company, posting.ats_job_id, "",
+                                  source="ats")
             no_detail += 1
             continue
 
@@ -278,7 +281,8 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
             failed += 1
             continue
         fetched += 1
-        store.set_description(conn, posting.company, posting.ats_job_id, text)
+        store.set_description(conn, posting.company, posting.ats_job_id, text,
+                              source="ats")
         # The detail payload is also the only place Greenhouse exposes a true posted
         # date, so take it while we are here rather than paying for the request twice.
         source = get_source(company.ats)
@@ -293,6 +297,128 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
         "%d have no detail endpoint, %d deferred to tomorrow",
         stored, fetched, failed, no_detail, remaining,
     )
+
+
+def _board_descriptions(fetcher, company: Company) -> dict | None:
+    """`{job id (lowercased): description}` for one Ashby or Lever board, or None.
+
+    Both ship the text in the bulk payload, and neither adapter has a per-posting
+    endpoint, so one board request answers every feed link pointing into it. None means
+    the fetch failed; an empty dict is a board that answered with no jobs.
+    """
+    res = fetcher.fetch_company(company)
+    if res.error or not res.ok:
+        return None
+    return {p.ats_job_id.lower(): p.description or "" for p in res.postings}
+
+
+def _upgrade_descriptions(conn, fetcher, budget: int) -> None:
+    """Swap a feed's metadata stub for the real prose of the posting it links to.
+
+    Simplify's description is `Category: … / Locations: …` assembled from its fields
+    (`description_source='feed'`), and `judge`, `tailor` and `coverletter` then work
+    from almost nothing. Many of those links point straight at a Greenhouse, Lever or
+    Ashby posting whose public JSON has the posting's own words, so the link is
+    resolved (`dedupe.upgrade_target`, from the URL with its case intact — never from
+    `dedupe_key`, which lowercases the Lever slug) and fetched once through the same
+    adapters and the same per-host limiter as the board sweep.
+
+    The one exception to write-once, and a narrow one: `feed` → `ats`, only when the
+    fetch returns non-empty prose. Everything else — a failed request, a job no longer
+    on its board, a payload with no text — leaves the row exactly as it was, and is
+    counted in the summary line. Like `_cache_descriptions`, nothing here touches board
+    health or can produce EXIT_DEGRADED: the board in question is not one we curate.
+
+    What resolves is *provenance* — the feed served the link — not verified identity,
+    and the log says so. `budget` counts requests: one per Greenhouse posting, one per
+    Ashby or Lever board however many links point into it.
+
+    Deliberately not `wanted`: that list feeds `_cache_descriptions`, whose
+    no-detail-endpoint branch writes '' over whatever a feed row already holds.
+    """
+    from . import dedupe
+
+    rows = store.feed_descriptions_to_upgrade(conn)
+    if not rows:
+        return
+    targets = []
+    for row in rows:
+        target = dedupe.upgrade_target(row["url"])
+        if target is not None:
+            targets.append((row, target))
+    unresolved = len(rows) - len(targets)
+    by_ats = collections.Counter(target[0] for _row, target in targets)
+    log.info(
+        "description upgrade: %d of %d feed-text posting(s) link straight at an ATS "
+        "posting (%s) — provenance, the feed served the link; not verified identity "
+        "(budget %d request(s))",
+        len(targets), len(rows),
+        ", ".join(f"{a} {n}" for a, n in sorted(by_ats.items())) or "none",
+        budget,
+    )
+
+    boards: dict[tuple[str, str], dict | None] = {}
+    requests = upgraded = failed = not_on_board = no_prose = deferred = 0
+    for row, (ats, slug, job_id) in targets:
+        company = Company(name=f"{ats}:{slug}", ats=ats, slug=slug, check_method="api")
+        if ats == "greenhouse":
+            if requests >= budget:
+                deferred += 1
+                continue
+            requests += 1
+            try:
+                text, _posted_at = fetcher.fetch_job_detail(company, job_id)
+            except Exception as exc:  # one link must never fail the run
+                log.warning("description upgrade: %s fetch raised: %s", ats, exc)
+                text = None
+            if text is None:
+                # The adapter folds a failed request and an empty `content` together.
+                failed += 1
+                continue
+        else:
+            key = (ats, slug)
+            if key not in boards:
+                if requests >= budget:
+                    deferred += 1
+                    continue
+                requests += 1
+                try:
+                    boards[key] = _board_descriptions(fetcher, company)
+                except Exception as exc:  # one board must never fail the run
+                    log.warning("description upgrade: %s fetch raised: %s", ats, exc)
+                    boards[key] = None
+            board = boards[key]
+            if board is None:
+                failed += 1
+                continue
+            text = board.get(job_id.lower())
+            if text is None:
+                not_on_board += 1
+                continue
+        if not text.strip():
+            no_prose += 1
+            continue
+        store.set_description(conn, row["company"], row["ats_job_id"], text, source="ats")
+        upgraded += 1
+
+    log.info(
+        "description upgrade: %d upgraded, %d failed or empty, %d no longer on their "
+        "board, %d had no prose, %d deferred to tomorrow, %d link nowhere we can read "
+        "(%d request(s))",
+        upgraded, failed, not_on_board, no_prose, deferred, unresolved, requests,
+    )
+
+
+def _connect(db_path):
+    """`store.connect`, told what kind of description each job board writes.
+
+    The one place the CLI opens the database, so the description-source backfill sees
+    every plugin's answer. `store` cannot ask the plugins itself — they import `tasks`,
+    which import `store` — so the mapping is handed in from here.
+    """
+    from . import plugins as plugins_mod
+
+    return store.connect(db_path, description_sources=plugins_mod.description_sources())
 
 
 def _active_plugins(plugins_path) -> list:
@@ -387,7 +513,8 @@ def _run_plugins(conn, fetcher, active, criteria, overrides, today, stats, degra
             continue
 
         inserted = store.append_postings(
-            conn, company.name, fetch.postings, today, origin=plugin.name
+            conn, company.name, fetch.postings, today, origin=plugin.name,
+            description_source=plugins_mod.description_source(plugin),
         )
         stats["new_postings"] += len(inserted)
 
@@ -530,7 +657,7 @@ def _plugins_list(args: argparse.Namespace, path: Path) -> int:
         print(f"plugins.yaml is invalid: {exc}", file=sys.stderr)
         return 1
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     try:
         for plugin in plugins_mod.all_plugins():
             settings = {**plugin_settings.defaults_for(plugin.name),
@@ -595,7 +722,7 @@ def _plugins_purge(args: argparse.Namespace, plugin) -> int:
 
     settings = plugin_settings.settings_for(plugin.name, args.plugins)
     company = plugin.company(settings).name
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     try:
         counts = store.plugin_posting_counts(conn, company)
         blockers = store.purge_blockers(conn, company)
@@ -676,7 +803,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     results = fetcher.fetch_all(api)
 
     config.ensure_data_dir()
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     by_name = {c.name: c for c in api}
     # One dict for the whole run: ~9k postings, a handful of overrides.
     overrides = store.load_overrides(conn)
@@ -743,6 +870,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     try:
         _cache_descriptions(conn, fetcher, wanted, args.max_descriptions, today)
+        # After the board pass and after the plugins, so tonight's feed rows are in it.
+        # Its own work list and its own budget — never rows added to `wanted`.
+        _upgrade_descriptions(conn, fetcher, getattr(args, "max_upgrades", 100))
     finally:
         fetcher.close()
 
@@ -870,7 +1000,7 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
     companies = config.load_companies(args.companies)
     companies_path = Path(args.companies or config.COMPANIES_YAML)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     by_name = {c.name: c for c in companies}
 
@@ -1017,7 +1147,7 @@ def cmd_rematch(args: argparse.Namespace) -> int:
     from .models import Posting
 
     criteria = load_criteria(args.criteria)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     overrides = store.load_overrides(conn)
     before = store.counts_by_verdict(conn)
@@ -1047,6 +1177,73 @@ def cmd_rematch(args: argparse.Namespace) -> int:
         b, a = before.get(verdict, 0), after.get(verdict, 0)
         arrow = f"  {b} → {a}" + (f"  ({a - b:+d})" if a != b else "")
         print(f"  {verdict:<10}{arrow}")
+    return 0
+
+
+# -- audit-pins --------------------------------------------------------------------
+_AUDIT_SAMPLES = 20
+
+
+def cmd_audit_pins(args: argparse.Namespace) -> int:
+    """Remove the model's pins that nothing on the page supports. Dry unless --write.
+
+    A one-off, by hand — never called from `check`, `work` or `prepare`. It sees only
+    `decided_by = 'llm'` overrides (`store.llm_pins`), so a human ruling is never a
+    candidate. A cleared pin's verdict is re-derived from the title by `match()` alone,
+    exactly what `check` would do to an unpinned posting; the model is not asked again.
+    `decisions`, `applications`, `rankings` and `level_readings` are not touched — an
+    application against a cleared posting is still an application.
+    """
+    from . import audit
+    from .models import Posting
+
+    criteria = load_criteria(args.criteria)
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
+    findings = audit.classify_pins(store.llm_pins(conn), criteria)
+    kept = [f for f in findings if f.action == audit.KEEP]
+    cleared = [f for f in findings if f.action == audit.CLEAR]
+
+    mode = "" if args.write else "  (dry run — nothing written; --write applies)"
+    print(f"audited {len(findings)} llm pin(s){mode}")
+    for label, bucket in (("kept", kept), ("cleared → will re-derive", cleared)):
+        print(f"  {label:<26}{len(bucket)}")
+    for label, bucket in (("kept", kept), ("cleared → will re-derive", cleared)):
+        if not bucket:
+            continue
+        print(f"\n{label} — up to {_AUDIT_SAMPLES} of {len(bucket)}:")
+        for f in bucket[:_AUDIT_SAMPLES]:
+            print(f"  {f.company:<18} {f.title[:52]:<52} {f.kind}/{f.decision:<8} {f.why}")
+
+    if not args.write:
+        conn.close()
+        return 0
+
+    today = _today()
+    moved = 0
+    for f in cleared:
+        row = conn.execute(
+            "SELECT title, url, location, posted_at, posted_on FROM postings "
+            "WHERE company=? AND ats_job_id=?",
+            (f.company, f.ats_job_id),
+        ).fetchone()
+        before = conn.execute(
+            "SELECT verdict FROM verdicts WHERE company=? AND ats_job_id=?",
+            (f.company, f.ats_job_id),
+        ).fetchone()
+        store.clear_override(conn, f.company, f.ats_job_id)
+        verdict = match(Posting(
+            company=f.company, ats_job_id=f.ats_job_id, title=row["title"],
+            url=row["url"], location=row["location"] or "",
+            posted_at=row["posted_at"], posted_on=row["posted_on"],
+        ), criteria)
+        store.record_verdict(conn, verdict, today)
+        if before is None or before["verdict"] != verdict.decision.value:
+            moved += 1
+    conn.commit()
+    conn.close()
+
+    log.info("audit-pins cleared %d llm pin(s); %d verdict(s) moved", len(cleared), moved)
+    print(f"\ncleared {len(cleared)} pin(s); {moved} verdict(s) moved on re-derivation")
     return 0
 
 
@@ -1195,7 +1392,8 @@ def _rescore(conn, profile, criteria, tiers, today) -> tuple[int, int]:
     scored = unranked = 0
     for row in store.ranked_matches(conn):
         breakdown = rank_mod.score_posting(
-            row, profile, criteria, tiers.get(row["company"]), today
+            row, profile, criteria, tiers.get(row["company"]), today,
+            thin=rank_mod.is_thin(row),
         )
         if breakdown is None:
             unranked += 1
@@ -1304,7 +1502,7 @@ def cmd_work(args: argparse.Namespace) -> int:
         print(f"  `jobtracker plugins enable {args.task}` turns it on.")
         return 0
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
 
     fetcher = None
@@ -1387,8 +1585,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
     Exits 1 when a regression exists, so this composes into a pre-apply gate rather
     than being something you have to remember to read.
     """
+    if getattr(args, "replay_all", False):
+        return _cmd_eval_replay(args)
     criteria = load_criteria(args.criteria)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     decisions = store.all_decisions(conn)
     conn.close()
 
@@ -1420,6 +1620,136 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 1 if report.regressions else 0
 
 
+def _read_only_rows(db_path: Path) -> tuple[list, dict]:
+    """Every posting, and the overrides, read through a `mode=ro` URI.
+
+    Deliberately not `store.connect`: connecting migrates, and a replay is evidence
+    gathered *before* a change — it must be safe to point at a copy of a production
+    database, or at one you cannot write. A database that predates `decided_by` reads
+    as human overrides, the same rule `apply_override` applies to a row without it.
+    """
+    import sqlite3
+
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT company, ats_job_id, title, location, url FROM postings "
+            "ORDER BY company, ats_job_id"
+        ).fetchall()
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        overrides: dict = {}
+        if "overrides" in tables:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(overrides)")}
+            by = "decided_by" if "decided_by" in cols else "'human' AS decided_by"
+            overrides = {
+                (r["company"], r["ats_job_id"]): r
+                for r in conn.execute(
+                    f"SELECT company, ats_job_id, decision, reason, {by} FROM overrides"
+                )
+            }
+    finally:
+        conn.close()
+    return rows, overrides
+
+
+def _load_intended(path: str | None) -> dict[tuple[str, str], str]:
+    """`--intended`: a YAML mapping of `"old->new": why`. ValueError on anything else."""
+    import yaml
+
+    if not path:
+        return {}
+    data = yaml.safe_load(Path(path).read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping of 'old->new': reason")
+    return {tuning.parse_transition(str(k)): str(v or "") for k, v in data.items()}
+
+
+def _cmd_eval_replay(args: argparse.Namespace) -> int:
+    """`eval --replay-all`: diff every stored posting's verdict under two criteria files.
+
+    The empty-corpus replay CLAUDE.md asks for when `decisions` has nothing in it. Reads
+    the database read-only, writes nothing, and gates only on a posting that stops
+    matching — a moved `uncertain` is counted and printed, never blocking.
+
+    Exit 0 clean (or every blocking transition declared in `--intended`), 1 on an
+    undeclared match loss, 2 when it could not run: either criteria file, the intended
+    file or the database did not load.
+    """
+    import sqlite3
+
+    if not args.against:
+        # The obvious default is `git show HEAD:criteria.yaml`, but `assemble.py` is the
+        # only module allowed to run a subprocess (tests/test_resume.py), so the old file
+        # is named rather than fetched.
+        print("eval --replay-all needs --against PATH, the criteria to compare with — e.g.",
+              file=sys.stderr)
+        print("  git show HEAD:criteria.yaml > /tmp/criteria.old.yaml", file=sys.stderr)
+        return 2
+    try:
+        old = load_criteria(args.against)
+        new = load_criteria(args.criteria)
+    except (OSError, ValueError) as exc:
+        print(f"criteria did not load: {exc}", file=sys.stderr)
+        return 2
+    try:
+        intended = _load_intended(args.intended)
+    except (OSError, ValueError) as exc:
+        print(f"--intended did not load: {exc}", file=sys.stderr)
+        return 2
+    db_path = config.DB_PATH if args.db is None else Path(args.db)
+    try:
+        rows, overrides = _read_only_rows(db_path)
+    except sqlite3.Error as exc:
+        print(f"could not read {db_path}: {exc}", file=sys.stderr)
+        return 2
+
+    report = tuning.replay(rows, old, new, overrides, samples=args.samples)
+    held = sum(report.held.values())
+    print(f"replayed {report.total} postings, open and closed "
+          f"({len(overrides)} override(s), {held} held)")
+    print(f"  old: {args.against}")
+    print(f"  new: {args.criteria}")
+    # rematch's delta table: the question after a rule change is always "what moved".
+    for verdict in sorted(set(report.before) | set(report.after)):
+        b, a = report.before.get(verdict, 0), report.after.get(verdict, 0)
+        arrow = f"  {b} → {a}" + (f"  ({a - b:+d})" if a != b else "")
+        print(f"  {verdict:<10}{arrow}")
+
+    print("\ntransitions:")
+    for t in tuning.TRANSITIONS:
+        flag = ""
+        if t in tuning.GATED_TRANSITIONS and report.transitions.get(t):
+            flag = "  intended: " + (intended[t] or "yes") if t in intended else "  BLOCKS"
+        print(f"  {t[0] + ' → ' + t[1]:<22}{report.transitions.get(t, 0):>6}{flag}")
+    if held:
+        print("held by an override (the rules moved, the pin did not):")
+        for t in tuning.TRANSITIONS:
+            if report.held.get(t):
+                print(f"  {t[0] + ' → ' + t[1]:<22}{report.held[t]:>6}")
+
+    def _samples(title: str, groups: dict) -> None:
+        for t in tuning.TRANSITIONS:
+            kept = groups.get(t)
+            if not kept:
+                continue
+            print(f"\n{title}{t[0]} → {t[1]}:")
+            for s in kept:
+                print(f"  {s.company:<18} {s.title[:72]}")
+                print(f"  {'':<18} └─ {s.old_reason}  →  {s.new_reason}")
+
+    _samples("", report.samples)
+    _samples("held, ", report.held_samples)
+
+    blocking = report.gated(intended)
+    if blocking:
+        lost = sum(blocking.values())
+        print(f"\n{lost} posting(s) stop matching and are not in --intended — exit 1")
+        return 1
+    return 0
+
+
 # -- rank --------------------------------------------------------------------------
 def cmd_rank(args: argparse.Namespace) -> int:
     """Judge open matches against profile.yaml and score the queue.
@@ -1445,7 +1775,7 @@ def cmd_rank(args: argparse.Namespace) -> int:
 
     companies = config.load_companies(args.companies)
     tiers = rank_mod.tier_lookup(companies)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     stats = rank_mod.RankStats()
 
@@ -1516,7 +1846,7 @@ def cmd_tailor(args: argparse.Namespace) -> int:
     from . import keywords as kw_mod
     from . import resume as resume_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     try:
         if args.action == "dismiss":
@@ -1668,7 +1998,7 @@ def cmd_coverletter(args: argparse.Namespace) -> int:
     from . import letter as letter_mod
     from . import resume as resume_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     try:
         template, error = letter_mod.load(getattr(args, "coverletter_source", None))
@@ -1798,7 +2128,7 @@ def cmd_prefill(args: argparse.Namespace) -> int:
         _say_switched_off("prefill")
         return EXIT_OK
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     fetcher = Fetcher()
     try:
@@ -1839,7 +2169,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     """
     from . import rank as rank_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     fetcher = Fetcher()
     try:
@@ -1918,19 +2248,53 @@ def _report_picks(picks) -> int:
     print(f"\nTomorrow: {len(picks)} pick(s)\n")
     for i, row in enumerate(picks, 1):
         print(f"  {i}. {row['company']} — {row['title'][:52]}")
+    _report_thin(picks)
     return EXIT_OK
 
 
+def _report_thin(picks) -> None:
+    """Name the picks whose judgment rests on a feed's listing fields (`rank.is_thin`).
+
+    Said once, by name, under the list: their score is already capped at moderate fit
+    and growth, and what you can do about one is read the posting before trusting it.
+    """
+    from . import rank as rank_mod
+
+    thin = [row for row in picks if rank_mod.is_thin(row)]
+    if not thin:
+        return
+    print(f"\n{len(thin)} thin pick(s), {rank_mod.THIN_WHY}:")
+    for row in thin:
+        print(f"  {row['company']} — {row['title'][:52]}")
+
+
 def _report_readiness(conn, picks, ctx) -> int:
-    """Print whether each pick can actually be applied to, and exit accordingly."""
+    """Print whether each pick can actually be applied to, and exit accordingly.
+
+    A thin pick (`rank.is_thin`) is reported and named, and counts neither toward
+    `ready` nor against it: whether it has a plan says nothing about whether it is worth
+    applying to, which is the open question about it, and a nightly exit 2 for a row only
+    reading the posting can settle is the dbt Labs trap again.
+    """
+    from . import rank as rank_mod
+
     plans = store.plans_by_posting(conn)
     ready = 0
     unprefillable = 0
+    thin = 0
     lines: list[str] = []
 
     for i, row in enumerate(picks, 1):
         plan = plans.get((row["company"], row["ats_job_id"]))
         head = f"  {i}. {row['company']} — {row['title'][:52]}"
+        if rank_mod.is_thin(row):
+            thin += 1
+            if plan is not None:
+                state = f"prefill {plan['fields'] - plan['gaps']}/{plan['fields']} fields"
+            else:
+                state = _unprefillable_reason(ctx, row) or "no plan"
+            lines.append(f"{head}\n       thin — {rank_mod.THIN_WHY} · {state}")
+            continue
         if plan is None:
             why = _unprefillable_reason(ctx, row)
             if why:
@@ -1944,12 +2308,15 @@ def _report_readiness(conn, picks, ctx) -> int:
         tail = f"{plan['gaps']} need you" if plan["gaps"] else "nothing left to type"
         lines.append(f"{head}\n       prefill {filled}/{plan['fields']} fields · {tail}")
 
-    prefillable = len(picks) - unprefillable
+    prefillable = len(picks) - unprefillable - thin
     summary = f"Tomorrow: {ready}/{prefillable} ready to apply to"
     if unprefillable:
         summary += f" ({unprefillable} apply on the employer's own page)"
+    if thin:
+        summary += f" ({thin} thin, not counted)"
     print(summary + "\n")
     print("\n".join(lines))
+    _report_thin(picks)
 
     if ready < prefillable:
         print("\nA pick with no plan opens as a blank form. See docs/prefill.md.")
@@ -2005,7 +2372,7 @@ def cmd_apply_to(args: argparse.Namespace) -> int:
         _say_switched_off("apply-to")
         return EXIT_OK
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = args.since or _today()
     try:
         row = conn.execute(
@@ -2084,7 +2451,7 @@ def cmd_today(args: argparse.Namespace) -> int:
     """
     from . import rank as rank_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     # `--since` for the same reason every other command has it: a snooze is "today plus
     # N days", so without a way to pin today, anything that asserts on the resulting date
     # is a time bomb that passes until midnight.
@@ -2168,7 +2535,7 @@ def cmd_today(args: argparse.Namespace) -> int:
 # -- decide ------------------------------------------------------------------------
 def cmd_decide(args: argparse.Namespace) -> int:
     """Record a judgment on one posting, and optionally pin it with an override."""
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     row = conn.execute(
         "SELECT company, ats_job_id, title, location FROM postings "
         "WHERE company=? AND ats_job_id=?",
@@ -2221,7 +2588,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
     LinkedIn. Those have no posting row, so the id is minted from the title; giving the
     same title twice updates the same application rather than creating a second one.
     """
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     next_action = None
     if args.next_action:
         next_action = apps_mod.parse_day(args.next_action)
@@ -2291,7 +2658,7 @@ def cmd_applications(args: argparse.Namespace) -> int:
     The terminal mirror of `/applications`. Read-only, and it reads `applications`
     directly rather than joining through `postings`, so manual entries appear.
     """
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     today = _today()
     apps = store.all_applications(conn)
     events_by = store.events_by_application(conn)
@@ -2347,7 +2714,7 @@ def cmd_mail(args: argparse.Namespace) -> int:
     """
     from . import mail as mail_mod, maildir as maildir_mod
 
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     try:
         if args.accept or args.dismiss:
             return _mail_decide(conn, args)
@@ -2469,7 +2836,7 @@ def _mail_decide(conn, args: argparse.Namespace) -> int:
 # -- report ------------------------------------------------------------------------
 def cmd_report(args: argparse.Namespace) -> int:
     companies = config.load_companies(args.companies)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     since = args.since or _today()
     criteria = load_criteria(args.criteria)
     text = report_mod.build_report(
@@ -2491,7 +2858,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
     companies = config.load_companies(args.companies)
     criteria = load_criteria(args.criteria)
-    conn = store.connect(config.DB_PATH if args.db is None else Path(args.db))
+    conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     html_doc = dashboard_mod.build_dashboard(conn, companies, _today(), criteria)
     conn.close()
 
@@ -2550,7 +2917,7 @@ def cmd_forget_learned(args: argparse.Namespace) -> int:
     """
     from . import prefill as prefill_mod
 
-    conn = store.connect(args.db or config.DB_PATH)
+    conn = _connect(args.db or config.DB_PATH)
     try:
         answers, answers_path = _load_answers(
             Path(args.answers) if args.answers else None)
@@ -2605,7 +2972,7 @@ def cmd_forget_question(args: argparse.Namespace) -> int:
     Dry by default, like `repair`: this rewrites something a run decided, and the list is
     worth reading before it goes.
     """
-    conn = store.connect(args.db or config.DB_PATH)
+    conn = _connect(args.db or config.DB_PATH)
     try:
         rows = store.forget_question(conn, args.question, write=args.write)
         if not rows:
@@ -2718,6 +3085,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="cap per-posting description fetches this run (default: 400). The "
              "remainder is picked up tomorrow; only Greenhouse costs a request.",
     )
+    c.add_argument(
+        "--max-upgrades", type=int, default=100,
+        help="cap requests spent replacing job-board metadata with the linked "
+             "Greenhouse/Lever/Ashby posting's own text (default: 100). One per "
+             "Greenhouse posting, one per Ashby or Lever board.",
+    )
     c.add_argument("--plugins", default=None,
                    help=f"path to plugins.yaml (default: {config.PLUGINS_YAML})")
     c.set_defaults(func=cmd_check)
@@ -2755,6 +3128,16 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("--db", default=None)
     rm.add_argument("--since", default=None)
     rm.set_defaults(func=cmd_rematch)
+
+    au = sub.add_parser(
+        "audit-pins",
+        help="remove model pins nothing on the page supports (dry unless --write)",
+    )
+    au.add_argument("--criteria", default=str(config.CRITERIA_YAML))
+    au.add_argument("--db", default=None)
+    au.add_argument("--write", action="store_true",
+                    help="clear the pins and re-derive their verdicts from the rules")
+    au.set_defaults(func=cmd_audit_pins)
 
     def _llm_flags(parser) -> None:
         # One transport now, so there is no --llm-provider: the router is the thing that
@@ -2918,6 +3301,16 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--db", default=None)
     e.add_argument("--min-count", type=int, default=3,
                    help="rejects a phrase needs before it is suggested (default: 3)")
+    e.add_argument("--replay-all", action="store_true",
+                   help="diff every stored posting's verdict under --against and "
+                        "--criteria (read-only; needs no decisions)")
+    e.add_argument("--against", default=None, metavar="PATH",
+                   help="with --replay-all: the old criteria file (required)")
+    e.add_argument("--samples", type=int, default=20,
+                   help="with --replay-all: examples kept per transition (default: 20)")
+    e.add_argument("--intended", default=None, metavar="PATH",
+                   help="with --replay-all: YAML of 'old->new': reason, the transitions "
+                        "this change means to make")
     e.set_defaults(func=cmd_eval)
 
     pl = sub.add_parser(

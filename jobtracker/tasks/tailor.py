@@ -407,7 +407,10 @@ class TailorTask(Task):
                 # The keyword lists are the other half of the question — `allowed` is in
                 # the prompt and `denied` is a refusal applied to the answer — so ruling
                 # on a term re-keys every posting, exactly as a rewritten resume does.
-                unit_key=_unit_key(ctx),
+                #
+                # The description is the one per-posting part of the question: when it
+                # changes, this posting alone is a new unit with a clean retry count.
+                unit_key=f"{_unit_key(ctx)}:{row['description_hash']}",
                 title=row["title"],
                 payload={"description": row["description"]},
             )
@@ -461,6 +464,7 @@ class TailorTask(Task):
             conn, unit.company, unit.ats_job_id, result.as_json(),
             ctx.resume_hash, ctx.today,
             flagged=result.flagged_json(), keywords_hash=_keywords(ctx).hash,
+            description_hash=store.description_hash(unit.payload["description"]),
         )
         log.info(
             "tailor proposes %d edit(s) and flags %d term(s) at %s — %s",

@@ -122,6 +122,11 @@ class Simplify(Plugin):
             "board_url": LISTINGS_URL,
         }
 
+    def coverage(self) -> dict:
+        # A new-grad list, and one with no prose: `_description` assembles its text from
+        # the listing's fields, so a model reading it reads metadata, not a job.
+        return {"bands": ["entry"], "prose": False}
+
     def validate(self, settings: dict) -> None:
         from .settings import InvalidSettings
 

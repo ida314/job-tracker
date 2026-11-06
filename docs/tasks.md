@@ -93,9 +93,36 @@ visible rather than being an inexplicably shrinking queue.
 
 | task | unit_key | so a change to… |
 |---|---|---|
-| `level` | `"level"` | nothing re-asks it; a re-run is a retry |
-| `judge` | `profile.prose_hash` | profile prose re-asks every posting |
+| `level` | `"level"` | nothing in the key; a changed description re-asks via `level_readings.source_hash` |
+| `judge` | `profile.prose_hash` `:` description hash | profile prose re-asks every posting; a description change re-asks that posting |
+| `tailor` | resume hash `:` keywords hash `:` description hash | resume or lists re-ask every posting; a description change re-asks that posting |
+| `coverletter` | template `:` resume `:` keywords `:` description hash | likewise |
 | `inbox` | the `Message-ID` | nothing; a message cannot change |
+
+### A description change re-asks one posting
+
+A description is not write-once forever: an ATS fetch can replace a feed's two-line
+blurb with the real prose. An answer read off the blurb is an answer to a different
+question, so `judge`, `tailor` and `coverletter` each record `description_hash` — the
+hash of the text the model was actually handed — on their row (`rankings`,
+`resume_suggestions`, `cover_letters`), and each pending query compares it with the hash
+of the description stored now. That re-asks **that posting only**: the hash is the one
+per-posting part of the question, so no other posting's unit moves.
+
+- **`store.description_hash` is the single definition** — `sha256[:16]`, `''` for NULL or
+  empty. SQLite has no built-in hash, so `connect()` registers that same Python function
+  as a deterministic SQL function and the pending queries call it *in* the SQL. A Python
+  filter would run after the `LIMIT` and hand a budgeted run a short batch.
+- **It is in `unit_key` as well as the pending query**, because the set-aside ledger is
+  keyed on `unit_key`: three failures against a blurb say nothing about the prose that
+  replaced it. The stored `cover_letters.unit_key` stays the configuration key; the
+  description is compared through its own column.
+- **An upgrade re-asks nothing.** Rows from before the column are stamped on connect
+  with the hash of the description stored then (`_backfill_description_hashes`, count
+  logged, self-draining). Reading NULL as "unknown, re-ask" would spend a whole night's
+  budget re-answering questions whose input never moved. The one-time cost is the
+  ledger: existing `task_attempts` rows for these three tasks carry the old key shape,
+  so a unit set aside before the upgrade gets a clean slate once.
 
 `inbox` is where that framing stops being an abstraction: the message *is* the question,
 so its id is the key. It is also load-bearing rather than decorative. Two ambiguous
@@ -121,12 +148,12 @@ no half-applied state to clean up.
 **Failure stays absence**, inherited whole from docs/llm.md. A unit that times out,
 returns nonsense, or throws writes *nothing*; the posting stays exactly where it was.
 
-One deliberate divergence, in `inbox`: "this message is not about an application" is an
-**answer** and is written, where `level`'s equivalent (`unclear`) writes nothing and is
-retried three times. Copying `level` there would spend three model calls on every
-newsletter that squeaked through the narrower and would fill the blocked-unit count —
-which exists to signal breakage — with perfectly healthy readings. Only a transport
-failure leaves a message unread. See docs/mail.md.
+An answer that changes nothing is still an answer, and is written. `inbox`'s "this
+message is not about an application" and `level`'s `unclear` both record what was read
+and leave the queue as `ok`. Reading either as no answer would spend three model calls
+on every such unit and fill the blocked-unit count — which exists to signal breakage —
+with perfectly healthy readings. Only a transport failure, or a reply that does not
+parse or ground, is no answer. See docs/mail.md and docs/llm.md.
 Every task in this package must be safe to abandon halfway through, on every night,
 forever. The model can add resolution to this pipeline; it cannot subtract correctness.
 
@@ -188,8 +215,10 @@ register(MyTask())
 ```
 
 `pending()` must return only work the task can actually do. `level` excludes postings
-with no cached description, because counting those as pending overstates a backlog no
-model could drain — and sends a `--budget` run to units guaranteed to be no-ops.
+with no cached description and prose-less feed rows (`description_source = 'feed'`),
+because counting those as pending overstates a backlog no model could drain — and sends
+a `--budget` run to units guaranteed to be no-ops. It also skips postings already read
+off the text it would show now (`level_readings.source_hash`).
 
 ## Running it
 

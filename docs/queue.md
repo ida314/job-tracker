@@ -1,0 +1,162 @@
+# The review queue: which lane an uncertain row is in
+
+An uncertain posting is one the rules could not decide. On the live corpus most of them are
+not engineering at all — 2,227 of 3,176 on 2026-11-05 had no field word in the title — and
+the decision was to **fold** that part, not reject it. It stays on the list as a short set
+of possible misses, sorted after everything more promising.
+
+`jobtracker/queue.py` is where that split is made, and the only place:
+
+```
+lane      queue.lane(row, criteria, companies_by_name, coverage_by_origin, reading, targets)
+label     queue.label(lane, coverage_band)       the words a page shows
+order     queue.sort_key(row, lane, criteria)    (lane, location_rank, newest first)
+rows      store.uncertain_with_context(conn)     open uncertain rows + origin, employer,
+                                                 first_seen and the level reading
+```
+
+## The five lanes, in queue order
+
+| Lane | When | Label |
+|---|---|---|
+| `feed` | field signal, and the row's job board declares a band in `targets` | listed on a new-grad feed |
+| `read` | field signal, and `level` read the prose and found no level (`unclear`) | read — the description does not say |
+| `signal` | field signal, not read yet | not read yet |
+| `no_signal` | no field signal — **folded** | no field signal in the title |
+| `noise` | no field signal on a `board_scope: mixed` company — folded inside the fold | board lists many non-field roles |
+
+The order of the checks is the definition:
+
+1. **Field signal first, and it is `level.looks_engineering` and nothing else** — the same
+   test that scopes the `level` queue, so "not read yet" never names a row `level` would not
+   read. No signal is `no_signal`, or `noise` when the company's curation says the board is
+   mixed.
+2. With a signal, a **job board curated to a band you target** wins over anything the model
+   said: Simplify's listing is a new-grad list, and that is a stronger statement than "the
+   description does not say". The band comes from `Plugin.coverage()["bands"]`, keyed by
+   `postings.origin`; the wording comes from `queue.BAND_WORDS`, the one table that turns a
+   band name into words.
+3. Then an `unclear` reading, then the plain signal.
+
+`targets` defaults to `("entry",)` and is a parameter, never read from config inside the
+module, so preferences can feed it without `queue.py` knowing they exist. With
+`targets=("mid",)` a Simplify row is `signal`.
+
+## Rules
+
+- **`queue.lane` is the single derivation.** `/review`, the dashboard tables, the Today
+  count and the folds all call it. Two copies are how two pages come to disagree about what
+  is on a list, and a test greps the package for the label strings.
+- **A lane is derived when a page renders, and is never stored.** It reads the title, the
+  criteria, the curation and the reading as they are now; a stored lane would be a snapshot
+  of all four that nothing invalidates.
+- **Folding is display, never a verdict.** No lane moves a posting out of `uncertain`, and
+  nothing in `queue.py` writes. A folded row is still on the list.
+- **`board_scope` is read here only.** It folds; it never gates `match()`, health or a fetch.
+- **Pure.** No SQLite, no files, no clock (`test_lane_is_pure`). The caller builds
+  `companies_by_name` from `load_companies` and `coverage_by_origin` from the import
+  plugins; a plugin's group is never curation, so the lookup is `.get` and its absence reads
+  as an ordinary board.
+- **An unreadable `first_seen` sorts last** within its lane and location, never as today.
+
+## The `/review` page
+
+`server.render_review`, `dashboard.review_page_parts`, `queue.review`. The short list of
+possible misses you skim weekly: on the live corpus about 134 rows in the last 14 days,
+against 3,176 uncertain in total.
+
+```
+split     queue.review(rows, criteria, companies_by_name, coverage_by_origin, today)
+            .recent     review lanes (feed, read, signal), first seen in the window
+            .older      the same lanes, outside it
+            .no_signal  the no-signal fold, any age
+            .noise      the board-noise fold, any age
+window    queue.REVIEW_WINDOW_DAYS = 14     inclusive; an unreadable first_seen is older
+read      dashboard.review_split(conn, …)   the one call both the page and Today make
+```
+
+One flat table — Role (posting link, plus the board's `srctag` on a feed row), Employer
+(`.cobadge`), Location (with the NYC pin), the lane's label, First seen — and one search
+box. The default view is open; below it three folds, each a `tbody.grp` rendered with
+`data-closed="1"`: "N older", "N with no field signal", and inside that "N from boards
+that list many non-field roles: <companies>". A table cannot nest a `tbody`, so the inner
+fold is the next sibling (`tbody.sub`) and the stylesheet hides it while its parent is
+collapsed; with no plain no-signal rows it renders as a top-level fold instead, because a
+child under an absent parent is a fold nobody can open.
+
+- **Serve-only.** The static dashboard has no `/review` and does not get one. Today shows
+  "N to review" under the picks in both — a link to `/review` under `serve`, a bare count
+  in the file, which has nowhere to link to.
+- **A read across the partition, not a third home.** Every row on it is also on exactly one
+  of the Company pages and the Job boards page (`test_review_rows_are_each_on_exactly_one_surface`).
+  The page decides nothing about where a posting lives.
+- **Never `data-filterable` beside another panel.** The page is one `[data-filter-scope]`
+  holding a search box and this table and nothing else, so the shared filter script drives
+  only these rows. No tier chips and no ATS select: a feed row has neither, and a control
+  filtering on a field many rows leave empty only ever hides.
+- **Today's count is `len(review_split(...).recent)`**, the same split the page renders, so
+  the number and the list it links to cannot disagree. With no criteria there are no lanes
+  and the line is absent, never a guessed zero.
+- **Two rulings on every row**, the folds included — folding is display, never a judgement.
+  See *Ruling from `/review`* below.
+- **At phone width each row wraps** into a line of its cells; every display rule there is
+  `:not([hidden])`, or it would outrank `tr[hidden]` and a filtered row would stay.
+
+### Ruling from `/review`
+
+Under `serve` each row ends in a cell with **Worth a look** (`button.rv-yes`) and **Not for
+me** (`button.rv-no`). They exist because without a one-click ruling `decisions` stays empty
+and `jobtracker eval` has nothing to protect a criteria edit with.
+
+```
+Worth a look   POST /api/decision        {company, ats_job_id, decision: "match"}
+Not for me     POST /api/decision        {company, ats_job_id, decision: "reject"}
+undo           POST /api/decision/clear  {company, ats_job_id}
+```
+
+- **No new write path.** `/api/decision` records the decision, pins `override:manual` as
+  `human`, and writes the verdict, the same three writes `/tuning`'s buttons make.
+- **The cell is server-rendered whole.** Both buttons and both chips ("✓ worth a look ·
+  undo", "✓ not for me · undo", each with its own `button.rv-undo`) are in the markup, the
+  chips `hidden`; the script in `dashboard._REVIEW_JS` only moves `hidden` inside that cell.
+  So every control the page can show is one a parity test can see
+  (`test_review_buttons_have_handlers_and_no_data_act`). None carries `data-act`.
+- **It never reloads.** A ruled row stays where it is until the next render, so a misclick is
+  fixed in place; after that it is gone, because it is no longer uncertain. A refusal is an
+  `alert` and changes nothing on the page.
+- **`/api/decision/clear` undoes only what you did.** It deletes the posting's `decisions`
+  row, clears the pin **only if `decided_by` is `human`**, and re-derives the verdict with
+  `match()` and whatever pin remains on top — so a decision recorded beside a model pin
+  leaves that pin, and the verdict, alone. No decision to clear, or no such posting, is
+  `ok:false` with every table untouched; a `criteria.yaml` that does not parse refuses
+  before anything is deleted.
+- **An undo does not bring back a model pin the ruling replaced.** `set_override` overwrote
+  it; the verdict after the undo is the rules' alone. `level` does not re-ask while its
+  stored reading stands on the same text, so the posting stays uncertain until the next
+  ruling or a description upgrade.
+- **A match ruling is a `match` verdict now**, so `ranked_matches` reads it and it is
+  eligible for the picks on the next `rank`, unscored until `judge` has read it.
+- **Not on the dashboard's Uncertain tables and not in the static file**, and no bulk "rule
+  all like this": one ruling is one row in the corpus `eval` replays, which is the point.
+
+## The dashboard's Uncertain tables
+
+The company pages and job boards each keep their Uncertain table as the full record of the
+list. Two things changed on both, identically in the static file and under `serve`:
+
+- **Status, not "Why uncertain".** The rules' reason is `no_level_token_in_title` on nearly
+  every row, so as text it said nothing. The cell shows `queue.label(lane)` — the feed band's
+  wording through `queue.feed_band` — and keeps the raw reason in its `title`, one hover away.
+- **A trailing fold.** `no_signal` and `noise` rows render in one last group, "No field
+  signal — N rows", `noise` after `no_signal`. It is a `tbody.grp` like a company's: rendered
+  open, collapsed by the script on load, force-expanded by any active filter. On the company
+  pages a folded row carries its company as a `.cobadge`, because no company head sits above
+  it.
+
+Nothing is removed and the partition does not move. The heading count, "N of M shown" and the
+**Uncertain** tile are the whole list; the tile's sub-line reads "M worth a read" — lanes
+`feed`, `read` and `signal`, which is `dashboard._WORTH_A_READ`, the complement of
+`queue.FOLDED`. The lanes come from `dashboard._uncertain_lanes`, which feeds
+`store.uncertain_with_context` rows to `queue.lane` (each row is its own reading) and takes
+coverage from the import plugins. Without criteria there is no field signal to read, so the
+raw reason shows and nothing folds.

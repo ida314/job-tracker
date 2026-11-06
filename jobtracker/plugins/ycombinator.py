@@ -145,6 +145,12 @@ class YCombinator(Plugin):
             "base_url": BASE,
         }
 
+    def coverage(self) -> dict:
+        # Prose: `minExperience` and the one-liner are the listing's own words, and the
+        # board is not curated to a level — it carries "6+ years" roles beside new-grad
+        # ones. Stated rather than inherited so the claim sits beside `_description`.
+        return {"bands": [], "prose": True}
+
     def validate(self, settings: dict) -> None:
         from .settings import InvalidSettings
 

@@ -722,9 +722,10 @@
   slug: target/wd5/targetcareers
   tier: 5
   category: enterprise-backend
+  board_scope: mixed
   check_method: api
   careers_page: https://tech.target.com/job-search
-  notes: 2026-08-31 — promoted to api. tech.target.com names no ATS in its static HTML; the triple target/wd5/targetcareers was confirmed by fetching it (2,000 reqs). A guessed triple that 404s is indistinguishable from a dead board, so it was verified before being written.
+  notes: 2026-08-31 — promoted to api. tech.target.com names no ATS in its static HTML; the triple target/wd5/targetcareers was confirmed by fetching it (2,000 reqs). A guessed triple that 404s is indistinguishable from a dead board, so it was verified before being written. 2026-11-06 — board_scope set to mixed. The triple is all of Target's careers, not just tech (Starbucks Barista, stocking, store security), and it contributed 511 of the 1,773 live company-page uncertain rows; the flag only folds those in Review and gates nothing, since fetch-side filtering (appliedFacets) is ruled out.
   expected_board_name: null
 - name: Five9
   ats: greenhouse

@@ -38,6 +38,7 @@ order; the parser and every `awk`/`grep` sweep depends on it.
 | `board_url` | Full JSON API URL for `api`. On a `manual` entry it is documentation — nothing fetches it. A listings feed that *is* fetched is a job board plugin and carries its own URL in `plugins.yaml`. |
 | `careers_page` | Human-facing careers URL. The fallback when the API breaks. |
 | `category` | Free-text bucket, e.g. `data-infra`, `fintech-backend`. |
+| `board_scope` | Absent, or `mixed`: the board serves many roles outside the field (Target Tech's triple is all of Target's careers). **Affects review folding only** — never `match()`, health or `SUSPECT_EMPTY`, and never a fetch filter. `validate_new` refuses any other value; `load_companies` loads it and names it at WARNING. |
 | `check_method` | `api` or `manual`. Governs what the agent may do. **`aggregator` was retired 2026-09-15**: community listings are job boards now. `curation.validate_new` refuses the value and `/companies` no longer offers it, while `load_companies` still loads a leftover entry and names it at WARNING — the loader must keep loading whatever is on disk. |
 | `status` | `not-open` / `open`. |
 | `last_checked` | Date of the last check. Set on every run, including no-match runs. |
@@ -132,6 +133,8 @@ silently changes the verdict on thousands of postings already judged. See `docs/
   and `eval` has no corpus, replay `match()` over all stored postings under old and new criteria
   and diff every verdict instead. A criteria edit with no regression evidence is the thing this
   loop exists to prevent.
+  That replay is `jobtracker eval --replay-all --against OLD.yaml` (read-only, `mode=ro`, never
+  `store.connect()`); it blocks only on a lost match, and `--intended` declares the ones you mean.
 - **`uncertain` is not a regression.** Only active contradiction blocks. Counting it as failure
   pushes toward rules that guess level from titles.
 - **The admission test for a token is not "does it catch the bad thing", it is "what else does
@@ -153,6 +156,11 @@ silently changes the verdict on thousands of postings already judged. See `docs/
   may need `store.clear_override` — **only** where a model guess contradicts the new rules.
 - **`check` re-derives a rules verdict from the title for every posting it fetches**, so an
   unpinned model verdict lasts one night. That is why `resolve`/`level` pins.
+- **`audit-pins` is the only bulk remover of model pins, and it can only see `llm` ones.**
+  `decided_by = 'llm'` is in its SQL (`store.llm_pins`). Dry by default, `--write` applies, by
+  hand only — never from `check`, `work` or `prepare`. A cleared pin re-derives from `match()`
+  alone; the model is not asked, and `decisions`, `applications`, `rankings` and
+  `level_readings` are untouched.
 - **Rejects are kept.** Do not replace them with a hash set of "seen and rejected": `cmd_check`
   re-deriving `match()` over every posting is what makes a criteria edit reclassify all of
   history with no backfill, and `eval` replays against that same corpus. The fetch unit is the
@@ -232,6 +240,11 @@ disagree about what is on it.
 - **Rows render server-side; JS only hides them.** Panels are server-rendered and the script only
   toggles `[hidden]`; `.tabs` is `display:none` until JS confirms it is running. Don't "improve"
   this into client-side rendering from embedded JSON.
+- **Every `var(--x)` has to resolve.** With no fallback, one undefined name makes the whole
+  `border:` shorthand compute to `0 none` — no error, no log, and a form with invisible fields
+  reads as a minimal one. The tokens are in `dashboard._CSS`, the one sheet every page loads.
+- **`:hover` lives inside `@media (hover: hover)`.** On touch it latches after a tap, so a dimming
+  hover leaves a button you just pressed looking disabled.
 - **Escape everything.** Titles and locations come from third-party APIs; URLs get a scheme check
   too, or a `javascript:` href executes on click.
 - **Location sorts, never filters.** The dropdown defaults to "Anywhere".
@@ -244,6 +257,16 @@ disagree about what is on it.
   hundreds of employers. Employer is its own column, the board is a `srctag` beside the role, and
   the filter bar offers search, which board, and the location sort. No tier chips and no ATS
   select: a control that filters on a field every row leaves empty only ever hides everything.
+  Its one group is the uncertain table's trailing fold, which is a lane, not an employer.
+- **The Uncertain tables are the full record; the folds trail them.** Both (company pages, job
+  boards) carry a **Status** column with `queue.label(lane)`, the rules' raw reason in the
+  cell's `title`. `no_signal` and `noise` rows render in one trailing `tbody.grp.fold`, "No
+  field signal — N rows" — a group head like a company's, open in the HTML, collapsed by the
+  script, force-expanded by any filter, its count read through `data-noun`. Nothing is removed
+  and the partition does not move: the heading count, "N of M shown" and the Uncertain tile stay
+  the whole list, and the tile's sub-line is "M worth a read" (`dashboard._WORTH_A_READ`, the
+  complement of `queue.FOLDED`). Without criteria there are no lanes: the raw reason shows and
+  nothing folds.
 - **A duplicate is shown, never hidden.** A job board row sharing a `dedupe_key` with an open
   company-page row carries an "on company page" chip linking to it; a row whose key matches an
   application renders "applied · \<status\>" where `+ tracker` would be. A live-looking control
@@ -268,6 +291,10 @@ disagree about what is on it.
   disposition buttons.
 - **Disposition buttons only exist under `serve`** (`interactive=True`). A dead button in a
   mailed file is worse than no button. Counts render in both modes.
+- **A pick's controls sit behind one `details.pick-menu`, `serve` only,** in the card's top-right
+  corner beside the title (`.pick-head`). The static card keeps its bare `Apply` at the foot.
+  `.applymsg` is inside the panel, which floats over whatever is below it. The resume line
+  renders only for a posting with its own resume.
 - **A button's handler lives in the file that renders the button.** `server._JS` and
   `dashboard._JS` are two scripts on several pages; tests assert the button exists *and* that the
   page's script listens for it.
@@ -457,9 +484,9 @@ first thing other than the user to touch the outer loop, which is why it may onl
 - **`read_at` NULL is the queue**; non-NULL with no proposal means "read, and not application
   news". Rejected messages are deliberately not stored, so a message predating an application can
   become a candidate later.
-- **"Nothing here" is an answer and is written**, unlike `level`'s `unclear` — copying `level`
-  would fill the blocked-unit count with healthy readings. Only a transport failure leaves a
-  message unread.
+- **"Nothing here" is an answer and is written**, as `level`'s `unclear` is — reading it as no
+  answer would fill the blocked-unit count with healthy readings. Only a transport failure
+  leaves a message unread.
 - **The model's quote must appear in the message verbatim.** It is the only free text it
   produces, and grounding it is what keeps a fabricated rejection off the list.
 - **`unit_key` is the message id**, or two ambiguous messages at one company collapse onto one
@@ -656,9 +683,17 @@ reopens only closures that came from absence, so nothing else ever would.
   committed unit; an interrupted run still wrote everything before it.
 - **`unit_key` is the question, not the posting.** Change the question and every unit is new with
   its retry count reset. It is also the router's idempotency key.
+- **A description change re-asks `judge`, `tailor` and `coverletter` for that posting only.**
+  Each row records `description_hash` of the text the model read, compared in SQL against
+  `store.description_hash` of the text stored now (a deterministic function `connect()`
+  registers — SQLite has none, and a Python filter would run after the `LIMIT`). The hash is in
+  the unit key too, so a unit set aside on a blurb is not set aside on the prose. **Rows from
+  before the column are stamped from the current description on connect** — reading NULL as
+  "re-ask" would re-answer everything the night it shipped.
 - **`pending()` must only return work the task can actually do** — `level` excludes postings with
-  no cached description. Counting what it cannot reach overstates a backlog and sends a budgeted
-  run to guaranteed no-ops.
+  no cached description, and **prose-less feed rows** (`description_source = 'feed'`): a feed's
+  assembled fields carry no level to read. Counting what it cannot reach overstates a backlog
+  and sends a budgeted run to guaranteed no-ops.
 - **Task modules are pure**; `runner.py` owns every socket, transaction and clock. Adding a task
   is one module plus one import line.
 - **`jobtracker prepare` is the nightly "is tomorrow useful?" check** — rescore, take what `today`
@@ -687,6 +722,27 @@ API-key handling anywhere in `jobtracker/llm/`. Do not add a hosted provider.
   reproduces it exactly.
 - **Scope is level extraction only.** The model never decides that a role is on-target; an `entry`
   reading still has to pass the rules' engineering gate.
+- **The evidence must occur in the text the model was shown, or the reading is no answer.**
+  `parse_verdict(text, shown)` checks an `entry`/`not_entry` quote against `shown_text`
+  — title plus the truncated description, the same string the prompt sends —
+  whitespace-normalized (`letter.flat`) and case-insensitive. Empty evidence on a usable
+  level is ungrounded too; `unclear` needs none. Both reasons carry the quote
+  (`llm:entry+<detail>:<evidence>`, `llm:not_entry:<evidence>`); `entry` pins written
+  before 2026-11-06 carry none, and nothing parses the string, so both forms render.
+- **Every grounded answer writes a `level_readings` row, `unclear` included.** `unclear` is an
+  answer — the model read the page and the page does not say — and is written like `inbox`'s
+  "nothing here": the unit is `ok` and leaves the queue. Read as no answer, as it once was, it
+  spent three calls per posting and then sat in the blocked count beside transport failures.
+  `run` returns a `LevelAnswer` (the reading plus the verdict it implies, None for `unclear`);
+  only a malformed or ungrounded reply is None. `apply` writes the reading **before**
+  `set_override`, so a posting you ruled on still records what was read. A reading is not an
+  override and moves no verdict by itself.
+- **`level_readings.source_hash` is `sha256[:16]` of `shown_text`**, hashed in Python by
+  `level.source_hash`, and `pending()` skips a posting whose reading matches the text it would
+  show now. A description upgrade moves the hash and the posting is asked again. The
+  `unit_key` stays `"level"`.
+- **Prose-less feed rows are not `level` work.** `description_source = 'feed'` is metadata a job
+  board assembled, and there is no level in it.
 - **Every failure path must leave the posting UNCERTAIN.** Unreachable, timeout, malformed,
   unsure. Nothing here may raise for a down server, and a code path that can produce a verdict from
   a failed call is a bug.
@@ -701,6 +757,45 @@ API-key handling anywhere in `jobtracker/llm/`. Do not add a hosted provider.
 
 ---
 
+## The review queue
+
+`jobtracker/queue.py`, `store.uncertain_with_context`, `/review`, `docs/queue.md`. Which part of the
+uncertain list a row is in: `feed`, `read`, `signal`, and the two folds, `no_signal` and
+`noise`.
+
+- **`queue.lane` is the single derivation.** Every surface that splits the uncertain list —
+  `/review`, the dashboard tables, the Today count, the folds — calls it, and the labels come
+  from `queue.label`. A test greps the package for the label strings. The field signal is
+  `level.looks_engineering` and nothing else; the feed band's wording is `queue.BAND_WORDS`.
+- **A lane is derived when a page renders and is never stored.** It reads the title, criteria,
+  curation and reading as they are now; no column or table holds one.
+- **Folding is display, never a verdict.** No lane moves a posting out of `uncertain`, and
+  `queue.py` is pure — no SQLite, no files, no clock.
+- **`board_scope` is read here only.** It decides which fold a no-signal row lands in.
+- **`targets` is a parameter** (default `("entry",)`), never read from config inside `queue.py`.
+- **`/review` is serve-only.** The static dashboard has no `/review`; Today shows "N to review"
+  under the picks in both, a link only under `serve`. The count is `len(queue.review(...).recent)`
+  through `dashboard.review_split`, the same split the page renders.
+- **`/review` is a read across the partition**, never a third home: every row on it is on exactly
+  one of the Company pages and Job boards.
+- **It is never `data-filterable` beside another panel** — one `[data-filter-scope]`, one search
+  box, one table. The board-noise fold is a sibling `tbody.sub` the stylesheet hides while the
+  no-signal fold is closed; `data-closed="1"` on each fold, `.closed` still JS-owned.
+- **Every row carries two rulings, folds included** — `.rv-yes` ("Worth a look") and `.rv-no`
+  ("Not for me"), plus `.rv-undo` in each of two server-rendered, `hidden` chips. **None carries
+  `data-act`**, and their handler is `dashboard._REVIEW_JS`, emitted by `/review` alone; no
+  button on the dashboard's Uncertain tables or in the static file, and no bulk control.
+- **They reuse `/api/decision`** — a decision, a human pin, a verdict. The script moves `hidden`
+  inside the cell and never reloads: the row stays put so a misclick is one undo away, and is
+  off the list at the next render because it is no longer uncertain.
+- **`/api/decision/clear` only removes a human decision.** It deletes the `decisions` row,
+  drops the pin only if `decided_by` is `human`, and re-derives the verdict with `match()` under
+  whatever pin is left. No decision is a refusal with every table untouched.
+- **A match ruling makes the row eligible for picks on the next `rank`** — it is a `match`
+  verdict now, so `ranked_matches` reads it, unjudged and unscored until `judge` gets to it.
+
+---
+
 ## Descriptions are cached by `check`
 
 `cmd_check` stores a description for every posting whose verdict is `match` or `uncertain`. That
@@ -709,6 +804,22 @@ is what makes the model passes offline with respect to the ATSes.
 - **Scoped, deliberately.** Open rejects are excluded. Self-healing: retune criteria so a former
   reject becomes a match, and the next `check` fills it in.
 - **Write-once.** `NULL` = never fetched, `''` = fetched and genuinely empty. Only NULL is retried.
+- **The one exception to write-once is `feed` → `ats`** (`_upgrade_descriptions`). An open
+  `match`/`uncertain` row whose text is a feed's stub and whose link points straight at a
+  Greenhouse, Lever or Ashby posting is fetched once through the same adapters and limiter, and
+  only non-empty prose overwrites the stub. A failure, a 404 or empty prose leaves the row as it
+  was, counted in a summary line, and is invisible to health like any description failure.
+  - **Resolved from the URL, never the key** (`dedupe.upgrade_target`): `dedupe_key` lowercases
+    the slug, and Lever slugs are case-sensitive. `.eu.` hosts do not resolve — the adapters read
+    the US API host. The link is *provenance*, never verified identity, and the log says so.
+  - **Its own list and its own budget**, `--max-upgrades` (default 100), counted in requests —
+    one per Greenhouse posting, one per Ashby or Lever board. Never rows added to `wanted`.
+- **`description_source` says what kind of text it is**: `ats` (this board path), `prose` (a job
+  board's own words) or `feed` (a stub a job board assembled from fields — Simplify). A job
+  board's value comes from `Plugin.coverage()["prose"]`, which task plugins do not have.
+  `set_description` takes `source` with no default, so no writer can store unlabelled text.
+  `store` must not import `plugins`; the backfill on connect gets `{origin: source}` from
+  `cli._connect` / `server._connect`, and NULL text keeps a NULL source.
 - **`--max-descriptions` (default 400)** caps requests per run so a bad night cannot turn a
   30-second job into a 40-minute one.
 - **A description failure is invisible to board health** and must never produce `EXIT_DEGRADED`.
@@ -759,6 +870,11 @@ deliberately is not a task** — it needs no model and must run regardless.
 - **Two absences that must not be "simplified":** an unjudged posting scores `None`, not `0.0`
   (zero buries a model failure at the bottom); an undated one scores mid-scale, not "today" (that
   floats stale reqs to the top). Both have tests.
+- **A thin row's fit and growth are capped at moderate in Python; the model is never told.** Thin
+  is `description_source='feed'` (`rank.is_thin`): a stub a job board assembled from fields, so a
+  "strong" read off it would outrank real prose. `_rescore` passes `thin=` to `score_posting`; an
+  unjudged thin row still scores `None`. Every surface showing the role wears one `span.thin`
+  chip, and `prepare` names thin picks and counts them neither toward `ready` nor against it.
 - **Rankings live in their own table, never in `verdicts`** — `check` rewrites `verdicts` nightly,
   which is what erased the model's work before.
 - **`rank` never fails for want of a model**; yesterday's order beats nothing. A large "still
@@ -891,7 +1007,7 @@ The first model role that composes prose, so the bound is not the shape of the a
   `tailor build` reports it once and exits **0**, and must never make `prepare` exit 2. Tectonic is
   in the serve image only.
 - **`dismissed` is reachable and kept** (`jobtracker tailor dismiss`); deleting would let the next
-  run re-propose. It reopens when the resume hash moves.
+  run re-propose. It reopens when the resume hash moves, or when that posting's description does.
 - **`keywords.yaml` is curated**, written by `POST /api/keyword` and your editor, both deliberate
   acts. The writer is line-oriented text surgery — the file is mostly the comments explaining the
   two lists, and `yaml.safe_dump` deletes all of them.

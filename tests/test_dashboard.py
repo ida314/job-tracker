@@ -600,7 +600,7 @@ def test_the_rest_of_the_ranking_carries_no_disposition_control_in_either_mode()
     for interactive in (False, True):
         doc = dashboard.build_dashboard(conn, [_company("Acme", 1), _company("Zeta", 3)],
                                         "2026-07-22", interactive=interactive)
-        rest = doc[doc.index('<details class="rest">'):doc.index("</details>")]
+        rest = _drawer(doc)
         assert "data-act" not in rest
         assert 'data-act="skipped"' not in rest and 'data-act="snoozed"' not in rest
 
@@ -611,7 +611,7 @@ def test_the_rest_of_the_ranking_carries_no_controls_in_the_static_file():
     conn = _ranked_pool(6)
     doc = dashboard.build_dashboard(conn, [_company("Acme", 1), _company("Zeta", 3)],
                                     "2026-07-22", interactive=False)
-    rest = doc[doc.index('<details class="rest">'):doc.index("</details>")]
+    rest = _drawer(doc)
     assert "<button" not in rest
     assert "/api/" not in rest
 
@@ -725,6 +725,12 @@ def test_no_drawer_when_there_is_nothing_below_the_picks():
 
 
 # -- per-posting resume and the rebuild button --------------------------------------
+def _drawer(doc):
+    """The drawer alone. Its own closing tag: each pick's menu is an earlier `</details>`."""
+    start = doc.index('<details class="rest">')
+    return doc[start:doc.index("</details>", start)]
+
+
 def _one_ranked(conn=None):
     conn = conn or _matches(("Acme", "1", "Backend Engineer", "New York, NY"))
     _ranked(conn, "Acme", "1", 90.0)
@@ -753,9 +759,39 @@ def test_the_rebuild_and_resume_controls_exist_only_under_serve():
     for markup in ('class="pick-rebuild"', 'class="pick-attach"', 'class="pickfile"'):
         assert markup not in static, markup
         assert markup in live, markup
-    # The name of the file that will be attached is useful offline, so it renders in both.
-    assert "resume: the one in Settings" in static
-    assert "resume: the one in Settings" in live
+    # The default resume is every card's until you choose otherwise; saying so is noise.
+    assert 'class="resume"' not in static
+    assert 'class="resume"' not in live
+
+
+def test_a_picks_controls_sit_behind_its_menu_under_serve():
+    conn = _one_ranked()
+    store.set_posting_resume(conn, "Acme", "1", "acme_1_ab12cd34.pdf", 1234, "2026-07-22")
+    conn.commit()
+    live = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22",
+                                     interactive=True)
+    card = live[live.index('<article class="pick">'):live.index("</article>")]
+    start = card.index('<details class="pick-menu">')
+    end = card.index("</details>", start)
+    outside, menu = card[:start] + card[end:], card[start:end]
+    # Beside the title, in its row.
+    head = card[card.index('<div class="pick-head">'):]
+    assert head.index("<h3>") < head.index('<details class="pick-menu">')
+    for markup in ('class="apply"', "data-act=", 'class="pickfile"', 'class="pick-attach"',
+                   'class="pick-detach"', 'class="applymsg"'):
+        assert markup in menu, markup
+        assert markup not in outside, markup
+    # What the card says about its resume is not a control, and stays on the card.
+    assert "resume for this posting: acme_1_ab12cd34.pdf" in outside
+    assert ".pick-menu" in live[live.rindex("<script>"):live.rindex("</script>")]
+
+
+def test_the_static_card_keeps_its_one_link_out_of_a_menu():
+    conn = _one_ranked()
+    static = dashboard.build_dashboard(conn, [_company("Acme", 1)], "2026-07-22")
+    card = static[static.index('<article class="pick">'):static.index("</article>")]
+    assert '<details class="pick-menu">' not in card
+    assert 'class="apply"' in card
 
 
 def test_the_pick_controls_have_their_handlers_on_the_page_that_renders_them():
@@ -1099,7 +1135,7 @@ def test_the_two_tex_copies_are_told_apart_without_hovering():
     cell = panel[panel.index('<td class="act">'):]
     cell = cell[:cell.index("</td>")]
     assert ">tex</button>" in cell
-    assert ">tex&#9993;</button>" in cell
+    assert f">tex{dashboard.LETTER_GLYPH}</button>" in cell
     assert cell.count(">tex</button>") == 1
     assert "data-act" not in cell
 
@@ -1334,7 +1370,7 @@ def test_the_drawer_offers_the_same_two_controls_under_serve():
     conn = _ranked_pool(6)
     doc = dashboard.build_dashboard(conn, [_company("Acme", 1), _company("Zeta", 3)],
                                     "2026-07-22", interactive=True)
-    rest = doc[doc.index('<details class="rest">'):doc.index("</details>")]
+    rest = _drawer(doc)
     assert rest.count('class="track"') == 3
     assert "data-act" not in rest
 
@@ -1359,3 +1395,44 @@ def test_the_static_applications_tab_prerenders_every_view_and_hides_all_but_one
     assert 'class="appsort js-only"' in doc
     assert ".appsort.js-only" in dashboard._JS
     assert doc.count("<script>") == 1
+
+
+# -- thin rows ----------------------------------------------------------------------
+def test_thin_chip_renders_on_picks_and_tables():
+    """A row judged from a feed's listing fields says so wherever its role is shown.
+
+    Picks, the drawer, the company pages table and the job boards table all render the
+    same `span.thin`, from `rank.is_thin`; a row with real text renders none.
+    """
+    conn = _matches(*[("Acme", str(j), "Backend Engineer, New Grad", "New York, NY")
+                      for j in range(1, 6)])
+    companies = [_company("Acme", 1)]
+    for j in range(1, 6):
+        store.set_description(conn, "Acme", str(j), "text",
+                              source="feed" if j in (1, 4) else "ats")
+        _ranked(conn, "Acme", str(j), 100.0 - j)
+    store.append_postings(
+        conn, "Simplify New-Grad-Positions",
+        [Posting("Simplify New-Grad-Positions", "s1", "Klaviyo — Backend Engineer",
+                 "https://x/s1", "New York, NY", employer="Klaviyo", description="d")],
+        "2026-07-01", origin="simplify", description_source="feed")
+    store.record_verdict(conn, Verdict("Simplify New-Grad-Positions", "s1", Decision.MATCH,
+                                       "r", "rules"), "2026-07-01")
+    conn.commit()
+
+    for interactive in (False, True):
+        doc = dashboard.build_dashboard(conn, companies, "2026-07-22",
+                                        interactive=interactive)
+        doc = doc[:doc.rindex("<script>")]
+        chip = '<span class="thin" title="judged from the feed&#x27;s listing fields, '
+        today = doc[doc.index('data-panel-body="today"'):doc.index('data-panel-body="all"')]
+        picks = today[:today.index('<details class="rest">')]
+        rest = today[today.index('<details class="rest">'):]
+        assert picks.count(chip) == 1      # pick 1 of 3
+        assert rest.count(chip) == 1       # row 4 of the drawer's two
+        assert _all_panel(doc).count(chip) == 2
+        if not interactive:  # under `serve` the job boards are their own page
+            boards = doc[doc.index('data-panel-body="jobboards"'):
+                         doc.index('data-panel-body="boards"')]
+            assert boards.count(chip) == 1
+    assert ".thin {" in dashboard._CSS

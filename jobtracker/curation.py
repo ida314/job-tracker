@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from .models import Company
+from .models import BOARD_SCOPES, Company
 from .sources import api_sources
 from .sources.workday import Workday
 
@@ -39,13 +39,15 @@ log = logging.getLogger("jobtracker.curation")
 
 # Canonical field order on disk. `name` leads because it opens the block; the rest
 # mirrors migrate._KEEP, which wrote all 100 existing entries, plus `board_url` — which
-# sits where `careers_page` does, since a feed has one or the other and never both.
+# sits where `careers_page` does, since a feed has one or the other and never both, and
+# `board_scope`, which sits beside `category` because both describe what the board holds.
 FIELD_ORDER = (
     "name",
     "ats",
     "slug",
     "tier",
     "category",
+    "board_scope",
     "check_method",
     "careers_page",
     "board_url",
@@ -189,6 +191,10 @@ def validate_new(company: Company, existing: Sequence[Company]) -> list[str]:
 
     if "\n" in (company.category or ""):
         errors.append("category may not contain a line break")
+    if company.board_scope is not None and company.board_scope not in BOARD_SCOPES:
+        errors.append(
+            f"board_scope must be absent or one of: {', '.join(sorted(BOARD_SCOPES))}"
+        )
     if len(company.notes or "") > MAX_NOTES:
         errors.append(f"notes is longer than {MAX_NOTES} characters")
 

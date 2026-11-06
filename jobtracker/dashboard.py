@@ -33,9 +33,9 @@ import sqlite3
 import urllib.parse
 from collections import Counter
 from datetime import date
-from typing import Optional
+from typing import Mapping, Optional
 
-from . import applications as apps_mod, config, rank as rank_mod, store
+from . import applications as apps_mod, config, queue, rank as rank_mod, store
 from . import build_version
 from .criteria import Criteria
 from .match import location_label, location_rank
@@ -62,9 +62,18 @@ MANUAL_INTERVAL_DAYS = 7
 #
 # Each band ships a paired ink because the ramp crosses the light/dark text flip at a
 # different band in each mode: light runs dark→light, dark runs light→dark.
+# The cover letter's mark, with the variation selector that asks for the text form. Without it
+# some platforms draw U+2709 as a colour emoji, which ignores `color` and so every state a
+# button's colour carries.
+LETTER_GLYPH = "&#9993;&#xFE0E;"
+
 _CSS = """
 :root {
   color-scheme: light;
+  /* The two radii everything interactive or card-shaped takes. Badges keep their own. */
+  --radius-card:    10px;
+  --radius-control: 6px;
+  --image-outline:  oklch(0 0 0 / 0.1);
   --page:        #f9f9f7;
   --surface:     #fcfcfb;
   --ink:         #0b0b0b;
@@ -88,6 +97,7 @@ _CSS = """
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
+    --image-outline: oklch(1 0 0 / 0.1);
     --page:    #0d0d0d;
     --surface: #1a1a19;
     --ink:     #ffffff;
@@ -107,6 +117,7 @@ _CSS = """
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --image-outline: oklch(1 0 0 / 0.1);
   --page:    #0d0d0d;
   --surface: #1a1a19;
   --ink:     #ffffff;
@@ -136,12 +147,16 @@ h2 { font-size: 15px; font-weight: 650; margin: 34px 0 10px; letter-spacing: -0.
 .sub { color: var(--ink-2); font-size: 13px; margin: 0 0 4px; }
 .note { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
 a { color: var(--link); text-decoration: none; }
-a:hover { text-decoration: underline; }
+@media (hover: hover) { a:hover { text-decoration: underline; } }
+
+/* Here and not in `server._EXTRA_CSS`: `/` and `/jobboards` load this sheet alone, so the nav
+   was a different size and spacing on those two pages than on the rest. */
+.nav { margin: 0 0 1rem; font-size: .9rem; }
 
 /* --- stat tiles ------------------------------------------------------------ */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
          gap: 10px; margin-top: 18px; }
-.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
         padding: 13px 15px; }
 .tile .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em;
            color: var(--muted); }
@@ -149,7 +164,7 @@ a:hover { text-decoration: underline; }
 .tile .n { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
 
 /* --- tier bar chart -------------------------------------------------------- */
-.chart { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+.chart { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
          padding: 15px 17px; margin-top: 12px; }
 .bar-row { display: grid; grid-template-columns: 74px 1fr 42px; align-items: center;
            gap: 10px; margin: 7px 0; }
@@ -163,35 +178,41 @@ a:hover { text-decoration: underline; }
 .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
            margin: 20px 0 6px; }
 .filters input[type=search], .filters select {
-  font: inherit; font-size: 13.5px; padding: 6px 10px; border-radius: 8px;
-  border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
+  font: inherit; font-size: 13.5px; padding: 6px 10px; border-radius: var(--radius-control);
+  border: 1px solid var(--muted); background: var(--surface); color: var(--ink);
 }
 .filters input[type=search] { min-width: 250px; }
-.chip { font-size: 12.5px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
+/* The filter chip. Not `.chip`, which is a plain text token on /tuning and /settings: both
+   stylesheets load together there, and this rule's pointer and `user-select: none` reached
+   tokens that do nothing when clicked and could not be selected to copy. */
+.fchip { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
         border: 1px solid var(--rule); background: var(--surface); color: var(--ink-2);
         user-select: none; }
-.chip[aria-pressed="true"] { background: var(--ink); color: var(--page);
+.fchip[aria-pressed="true"] { background: var(--ink); color: var(--page);
                              border-color: var(--ink); }
+@media (hover: hover) { .fchip:not([aria-pressed="true"]):hover { color: var(--ink); border-color: var(--ink-2); } }
 .count { font-size: 12.5px; color: var(--muted); margin-left: auto;
          font-variant-numeric: tabular-nums; }
 
 /* --- tables ---------------------------------------------------------------- */
-table { width: 100%; border-collapse: collapse; background: var(--surface);
-        border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+/* `separate`, because a radius on a collapsed table is undefined: Chromium drops the border
+   ring and Firefox leaves square nubs at the corners. */
+table { width: 100%; border-collapse: separate; border-spacing: 0; background: var(--surface);
+        border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; }
 th { text-align: left; font-size: 11.5px; text-transform: uppercase;
      letter-spacing: 0.05em; color: var(--muted); font-weight: 600;
      padding: 9px 12px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
 td { padding: 9px 12px; border-bottom: 1px solid var(--grid); font-size: 13.5px;
      vertical-align: top; }
 tr:last-child td { border-bottom: none; }
-tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+@media (hover: hover) { tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); } }
 td.co { font-weight: 550; white-space: nowrap; }
 td.loc, td.why { color: var(--ink-2); font-size: 12.5px; }
 td.seen { color: var(--muted); font-size: 12.5px; white-space: nowrap;
           font-variant-numeric: tabular-nums; }
 .empty { padding: 18px; color: var(--muted); font-size: 13.5px; text-align: center;
          background: var(--surface); border: 1px solid var(--border);
-         border-radius: 10px; }
+         border-radius: var(--radius-card); }
 
 /* --- chips / badges -------------------------------------------------------- */
 .tier { display: inline-block; min-width: 26px; text-align: center; padding: 2px 6px;
@@ -220,14 +241,14 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
        color: var(--muted); font: inherit; font-size: 14px; padding: 8px 14px;
        cursor: pointer; margin-bottom: -1px; }
-.tab:hover { color: var(--ink-2); }
+@media (hover: hover) { .tab:hover { color: var(--ink-2); } }
 .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent);
                              font-weight: 600; }
 .tab .n { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 5px; }
 
 /* -- today's picks ---------------------------------------------------------------- */
 .picks { display: grid; gap: 14px; margin: 6px 0 26px; }
-.pick { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+.pick { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
         padding: 16px 18px; display: grid; grid-template-columns: 34px 1fr; gap: 0 14px; }
 .pick .rank { font-size: 26px; font-weight: 700; color: var(--rule); line-height: 1;
               grid-column: 1; grid-row: 1; }
@@ -237,8 +258,12 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
    vertically instead of running left to right. */
 .pick > :not(.rank) { grid-column: 2; }
 .pick h3 { margin: 0 0 3px; font-size: 17px; line-height: 1.3; }
+/* Title and menu share the first line. The menu takes the corner rather than following the
+   title, so it sits in the same place on every card however long the title runs. */
+.pick-head { display: flex; align-items: flex-start; gap: 12px; }
+.pick-head h3 { flex: 1; min-width: 0; }
 .pick h3 a { color: var(--ink); text-decoration: none; }
-.pick h3 a:hover { text-decoration: underline; }
+@media (hover: hover) { .pick h3 a:hover { text-decoration: underline; } }
 .pick .meta { color: var(--muted); font-size: 12.5px; margin-bottom: 8px;
               display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .pick .why { font-size: 13.5px; color: var(--ink-2); line-height: 1.5;
@@ -255,14 +280,15 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
    line-height. Without the transparent border the anchor sits 2px shorter than its
    neighbours. */
 .pick .act a.apply, .pick .act button { display: inline-flex; align-items: center;
-                     border: 1px solid transparent; border-radius: 6px; padding: 6px 11px;
+                     border: 1px solid transparent; border-radius: var(--radius-control); padding: 6px 11px;
                      line-height: 1.4; white-space: nowrap; }
 .pick .act a.apply { background: var(--accent); color: #fcfcfb; text-decoration: none;
                      padding-inline: 14px; font-size: 13px; font-weight: 600; }
 .pick .act button { appearance: none; background: var(--page); color: var(--ink-2);
                     border-color: var(--rule); font: inherit;
                     font-size: 12.5px; line-height: 1.4; cursor: pointer; }
-.pick .act button:hover { color: var(--ink); border-color: var(--ink-2); }
+@media (hover: hover) { .pick .act button:not([disabled]):hover { color: var(--ink); border-color: var(--ink-2); }
+  .pick .act a.apply:hover { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); } }
 .pick .act button[disabled] { opacity: .5; cursor: default; }
 /* Whatever came back from /api/apply-to. Written by JS into an empty server-rendered
    node, so a page with JS off never shows a stray empty line. */
@@ -276,32 +302,65 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .resume { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
                 margin-top: 6px; font-size: 12px; color: var(--muted); }
 .pick .resume .rname.own { color: var(--ink-2); }
-.pick .resume input[type=file] { font: inherit; font-size: 11.5px; max-width: 210px; }
-.pick .resume button { appearance: none; background: var(--page); color: var(--ink-2);
-                       border: 1px solid var(--rule); border-radius: 6px;
+.pick .resume-set { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--grid);
+                    font-size: 12px; color: var(--muted); }
+.pick .resume-set input[type=file] { font: inherit; font-size: 11.5px; max-width: 210px; }
+.pick .resume-set button { appearance: none; background: var(--page); color: var(--ink-2);
+                       border: 1px solid var(--rule); border-radius: var(--radius-control);
                        padding: 3px 9px; font: inherit; font-size: 11.5px;
                        cursor: pointer; }
-.pick .resume button:hover { color: var(--ink); border-color: var(--ink-2); }
-.pick .resume button[disabled] { opacity: .5; cursor: default; }
+@media (hover: hover) { .pick .resume-set button:not([disabled]):hover { color: var(--ink); border-color: var(--ink-2); } }
+.pick .resume-set button[disabled] { opacity: .5; cursor: default; }
+
+/* A pick's controls, behind one button so the card reads as a card. A <details>, so it
+   opens with no script at all; the script only adds closing from outside. */
+/* The negative margin centres the 29px button on the title's 22px first line. */
+.pick-menu { position: relative; flex: none; margin: -4px 0 0; }
+.pick-menu > summary { display: inline-flex; align-items: center; gap: 6px; list-style: none;
+    background: var(--page); color: var(--ink-2); border: 1px solid var(--rule);
+    border-radius: var(--radius-control); padding: 5px 10px; font-size: 12.5px; line-height: 1.4;
+    user-select: none; }
+.pick-menu > summary::-webkit-details-marker { display: none; }
+.pick-menu > summary::after { content: "\\25BE"; }
+.pick-menu[open] > summary { color: var(--ink); border-color: var(--ink-2); }
+.pick-menu[open] > summary::after { transform: rotate(180deg); }
+@media (hover: hover) { .pick-menu > summary:hover { color: var(--ink); border-color: var(--ink-2); } }
+.pick-menu .menu-panel { position: absolute; z-index: 10; top: 100%; right: 0; margin-top: 4px;
+    width: max-content; max-width: min(380px, calc(100vw - 72px)); box-sizing: border-box;
+    padding: 12px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 16%, transparent); }
 
 /* A pick's two documents: the same `↓` and `✉` the actions cell carries, each beside a
    word saying which document it is — a card has the room a table row does not. */
 .pick .docs { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
               margin-top: 6px; font-size: 12px; color: var(--muted); }
 .pick .docs button, .pick .docs a { appearance: none; background: var(--page);
-    color: var(--ink-2); border: 1px solid var(--rule); border-radius: 6px;
+    color: var(--ink-2); border: 1px solid var(--rule); border-radius: var(--radius-control);
     padding: 1px 9px; margin-left: 4px; font: inherit; font-size: 12px;
     cursor: pointer; text-decoration: none; }
-.pick .docs button:hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); }
+@media (hover: hover) { .pick .docs button:not([disabled]):hover, .pick .docs a:hover { color: var(--ink); border-color: var(--ink-2); } }
 .pick .docs button[disabled] { opacity: .5; cursor: default; }
 .pick .docs .tailor-tex, .pick .docs .letter-tex { margin-left: 4px; }
+
+/* The file input's own button, which the browser draws grey and in its own font otherwise —
+   beside themed buttons on every pick card and on /posting. */
+/* `:where`, so a page's own class still sets the size. */
+:where(input[type=file]) { font: inherit; }
+input[type=file]::file-selector-button { appearance: none; font: inherit; font-size: 11.5px;
+    background: var(--page); color: var(--ink-2); border: 1px solid var(--rule);
+    border-radius: var(--radius-control); padding: 3px 9px; margin-inline-end: 8px; cursor: pointer; }
+@media (hover: hover) { input[type=file]:not(:disabled)::file-selector-button:hover {
+    color: var(--ink); border-color: var(--ink-2); } }
+input[type=file]:disabled::file-selector-button { opacity: .5; cursor: default; }
 
 /* The rest of the ranking. A <details>, so it opens with no script at all — and not a
    table, so the filter JS can never reach into the Today tab. */
 .rest { margin: 0 0 26px; }
 .rest > summary { cursor: pointer; font-size: 13px; color: var(--ink-2);
                   padding: 8px 0; }
-.rest > summary:hover { color: var(--ink); }
+@media (hover: hover) { .rest > summary:hover { color: var(--ink); } }
 .restlist { list-style: none; margin: 8px 0 0; padding: 0; }
 .restlist li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 9px;
                padding: 4px 0; border-top: 1px solid var(--grid); font-size: 13px; }
@@ -333,6 +392,13 @@ td.act { text-align: right; }
 .dupchip { font-size: 11px; color: var(--muted); border-bottom: 1px dotted currentColor; }
 .appliedchip { font-size: 11px; color: var(--good); }
 .bt th.src, .bt td.src { white-space: nowrap; }
+/* A row judged from a feed's listing fields rather than the posting's text. Outlined in
+   the warning colour, not filled: it is a caveat on the row, never a status, and the word
+   is printed — colour is reinforcement. Its score is capped in `rank.score_posting`. */
+.thin { display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; padding: 1px 6px; border-radius: 999px; vertical-align: 2px;
+  border: 1px dashed var(--warning); color: var(--ink-2); background: var(--page);
+  white-space: nowrap; }
 .act .tchip, .act .tracked, .act .theld { display: inline-block; font-size: 11px;
     color: var(--muted);
                              vertical-align: middle; }
@@ -345,10 +411,10 @@ td.act { text-align: right; }
    itself. Warned rather than muted: it is a question addressed to you. */
 .act .theld { color: var(--warning); border-bottom: 1px dotted currentColor; cursor: help; }
 .act button { appearance: none; background: var(--page);
-    color: var(--ink-2); border: 1px solid var(--grid); border-radius: 5px;
+    color: var(--ink-2); border: 1px solid var(--grid); border-radius: var(--radius-control);
     font: inherit; font-size: 11px; line-height: 1.6; padding: 1px 7px; cursor: pointer;
     text-decoration: none; vertical-align: middle; }
-.act button:hover { color: var(--ink); border-color: var(--ink-2); }
+@media (hover: hover) { .act button:not([disabled]):hover { color: var(--ink); border-color: var(--ink-2); } }
 .act button[disabled] { opacity: .5; cursor: default; }
 .act .tailor-build, .act .tailor-dl, .act .tailor-tex,
 .act .letter-build, .act .letter-dl, .act .letter-tex { margin-right: 5px; }
@@ -373,6 +439,43 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
                        border: 0; padding: 0 0 0 10px; color: var(--accent);
                        font: inherit; font-size: 12.5px; cursor: pointer; }
 
+@media (hover: hover) { .js-groups .cotoggle:hover { text-decoration: underline; } }
+
+/* -- /review ----------------------------------------------------------------------
+   The board-noise fold lives inside the no-signal fold. A table cannot nest a tbody, so
+   it is the next sibling, and it goes with its parent: hidden whenever the parent is
+   collapsed. Collapsing still owns `.closed` and filtering still owns `hidden` — this
+   reads the one and touches neither. */
+.js-groups tbody.grp.closed + tbody.grp.sub { display: none; }
+tbody.grp.sub tr.cohead th { padding-left: 28px; font-weight: 500; }
+.rv .rvnone td { color: var(--muted); text-align: center; }
+.rv td.emp .cobadge { white-space: normal; }
+/* The rulings cell. Both chips are server-rendered and start `hidden`. No rule here sets
+   `display` on a chip or a button, and the one below says `hidden` outright with an
+   element in its selector, so it outranks any class-only `display:` a later edit adds —
+   an author `display` beats the attribute, and a chip that ignored it would read as a
+   ruling you never made. */
+td.rvact [hidden] { display: none; }
+.rvact .rv-yes { margin-right: 5px; }
+.act .rvdone { font-size: 11px; color: var(--ink-2); vertical-align: middle; }
+.act .rvdone[data-ruled="match"] { color: var(--good); }
+.act .rvdone .rv-undo { margin-left: 2px; }
+/* At phone width the five columns do not fit, and a page that scrolls sideways is the
+   failure. Each row becomes a wrapped line of its cells. `:not([hidden])` on every
+   display rule, or the rule would outrank `tr[hidden]` and a filtered row would stay. */
+@media (max-width: 640px) {
+  table.rv, .rv tbody:not([hidden]) { display: block; }
+  .rv thead { display: none; }
+  .rv tr:not([hidden]) { display: flex; flex-wrap: wrap; align-items: baseline;
+                         gap: 2px 10px; padding: 8px 12px;
+                         border-bottom: 1px solid var(--grid); }
+  .rv tr.cohead:not([hidden]) { padding: 0; border-bottom: 0; }
+  .rv tr.cohead th { flex: 1 1 100%; display: block; white-space: normal; }
+  .rv td { display: block; padding: 0; border: 0; }
+  .rv td.role { flex: 1 1 100%; }
+  .rv td.act { flex: 1 1 100%; text-align: left; padding-top: 4px; }
+}
+
 /* The applications view bar. In the static file it only works with the script, so it
    is hidden until the script says it is running — the same rule as .tabs. */
 .appsort { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
@@ -384,13 +487,13 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 .sortchip { font-size: 12.5px; padding: 3px 10px; border-radius: 999px;
             border: 1px solid var(--rule); background: var(--surface);
             color: var(--ink-2); text-decoration: none; }
-.sortchip:hover { text-decoration: none; border-color: var(--ink-2); }
+@media (hover: hover) { .sortchip:hover { text-decoration: none; border-color: var(--ink-2); } }
 .sortchip[aria-pressed="true"] { background: var(--ink); color: var(--page);
                                  border-color: var(--ink); }
 
 /* "Your inbox says something happened." Only rendered when there is something. */
 .banner.mail { background: var(--surface); border: 1px solid var(--border);
-               border-left: 3px solid var(--accent); border-radius: 8px;
+               border-left: 3px solid var(--accent); border-radius: var(--radius-card);
                padding: 9px 13px; font-size: 13px; margin: 10px 0 14px; }
 
 /* -- applications ------------------------------------------------------------------ */
@@ -400,7 +503,7 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 .apps { display: grid; gap: 6px; margin: 6px 0 22px; }
 /* Body-text sized. A list you scan every morning, so a row is a line of text with its
    controls under it, not a card with a form in it. */
-.app { background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+.app { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card);
        padding: 7px 12px; font-size: 13px; }
 /* The left rule is the section's urgency, carried onto every row in it. */
 .app.urgent { border-left: 3px solid var(--serious); }
@@ -408,7 +511,7 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
 .app.done   { opacity: .78; }
 .app h3 { margin: 0 0 1px; font-size: 13.5px; line-height: 1.35; font-weight: 600; }
 .app h3 a { color: var(--ink); text-decoration: none; }
-.app h3 a:hover { text-decoration: underline; }
+@media (hover: hover) { .app h3 a:hover { text-decoration: underline; } }
 .app .co { color: var(--ink-2); font-weight: 400; }
 .app .meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap;
              gap: 2px 6px; align-items: center; font-variant-numeric: tabular-nums; }
@@ -501,6 +604,27 @@ _JS = """
       c.setAttribute('aria-pressed', c === chip ? 'true' : 'false');
     });
     views.forEach(function (v) { v.hidden = v.dataset.appview !== chip.dataset.sort; });
+  });
+})();
+
+// The pick menus. <details> opens and closes itself; what it cannot do is close when you
+// click elsewhere, or keep a second one from opening over the first.
+(function () {
+  var menus = Array.prototype.slice.call(document.querySelectorAll('.pick-menu'));
+  if (!menus.length) return;
+  function closeExcept(keep) {
+    menus.forEach(function (m) { if (m !== keep) m.open = false; });
+  }
+  document.addEventListener('click', function (e) {
+    closeExcept(e.target.closest ? e.target.closest('.pick-menu') : null);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    menus.forEach(function (m) {
+      if (!m.open) return;
+      m.open = false;
+      m.querySelector('summary').focus();
+    });
   });
 })();
 
@@ -717,7 +841,7 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
   var q = scope.querySelector('[data-f="q"]');
   var atsSel = scope.querySelector('[data-f="ats"]');   // absent on a panel with no ATS
   var locSel = scope.querySelector('[data-f="loc"]');   // absent when no criteria were passed
-  var chips = Array.prototype.slice.call(scope.querySelectorAll('.chip[data-attr]'));
+  var chips = Array.prototype.slice.call(scope.querySelectorAll('.fchip[data-attr]'));
 
   // Chips group by the row attribute they read (tier, source). Within a group any pressed
   // chip admits a row; across groups every group must. A group with nothing pressed is off.
@@ -768,8 +892,10 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
         b.classList.toggle('closed', b.dataset.closed === '1' && !filtering);
         var open = !b.classList.contains('closed');
         var n = b.querySelector('.cohead .n');
+        // A company's group counts roles; the no-field-signal fold says rows.
+        var noun = b.dataset.noun || 'role';
         if (n) n.textContent = (vis === mine.length)
-          ? mine.length + (mine.length === 1 ? ' role' : ' roles')
+          ? mine.length + ' ' + noun + (mine.length === 1 ? '' : 's')
           : vis + ' of ' + mine.length;
         var btn = b.querySelector('.cotoggle');
         if (btn) {
@@ -986,6 +1112,76 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
 
 """
 
+# `/review`'s rulings, emitted by `server.render_review` alone. Its own block rather than
+# a part of `_JS`: the static file carries `_JS` and has no `/review`, so a handler there
+# would be one for a button the file can never render. It lives here because the button
+# does — `_review_rulings` — and a button's handler belongs to the file that renders it.
+_REVIEW_JS = """
+// Worth a look / Not for me, and the undo. Delegated, like the actions cell: the folds
+// hold hundreds of rows, and one listener is also what keeps working as buttons hide.
+//
+// Every control is server-rendered; this only moves `hidden` inside one cell and never
+// reloads. A ruled row stays where it is, so a misclick is fixable in place, and it is
+// off the list at the next render because it is no longer uncertain.
+(function () {
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); });
+  }
+
+  // `ruled` is the decision whose chip shows, or '' for the two buttons.
+  function show(cell, ruled) {
+    cell.querySelectorAll('button.rv-yes, button.rv-no').forEach(function (x) {
+      x.hidden = ruled !== '';
+    });
+    cell.querySelectorAll('.rvdone').forEach(function (c) {
+      c.hidden = c.dataset.ruled !== ruled;
+    });
+  }
+
+  function busy(cell, on) {
+    cell.querySelectorAll('button').forEach(function (x) { x.disabled = on; });
+  }
+
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest) return;
+    var yes = e.target.closest('button.rv-yes');
+    var no = e.target.closest('button.rv-no');
+    var undo = e.target.closest('button.rv-undo');
+    var b = yes || no || undo;
+    if (!b) return;
+    var cell = b.closest('td.rvact');
+    if (!cell) return;
+    var ident = {company: b.dataset.company, ats_job_id: b.dataset.job};
+    var req;
+    var after;
+    if (undo) {
+      req = post('/api/decision/clear', ident);
+      after = '';
+    } else {
+      after = yes ? 'match' : 'reject';
+      ident.decision = after;
+      req = post('/api/decision', ident);
+    }
+    busy(cell, true);
+    req.then(function (res) {
+      busy(cell, false);
+      if (!res.ok) {
+        alert(res.error || 'could not record that');
+        return;
+      }
+      show(cell, after);
+    }).catch(function () {
+      busy(cell, false);
+      alert('could not reach the server');
+    });
+  });
+})();
+"""
+
 
 def build_dashboard(
     conn: sqlite3.Connection,
@@ -994,6 +1190,7 @@ def build_dashboard(
     criteria: Criteria | None = None,
     interactive: bool = False,
     include_job_boards: bool = True,
+    coverage_by_origin: Mapping | None = None,
 ) -> str:
     """Return a complete HTML document. Pure read — never writes to `conn`.
 
@@ -1007,6 +1204,8 @@ def build_dashboard(
     by `jobtracker dashboard` must stay a self-contained, offline, read-only artifact,
     and dead buttons in it would be worse than no buttons.
 
+    `coverage_by_origin` is each job board's `coverage()`, which the Today tab's review
+    count reads through `queue.review`; absent, it is asked of the plugin registry.
     """
     by_name = {c.name: c for c in companies}
     # Two pages out of one corpus, split on `postings.origin`: a row with no origin came
@@ -1017,6 +1216,7 @@ def build_dashboard(
         store.open_postings_by_verdict(conn, "match"), criteria)
     uncertain, board_uncertain = _split_by_origin(
         store.open_postings_by_verdict(conn, "uncertain"), criteria)
+    lanes = _uncertain_lanes(conn, criteria, by_name)
     counts = store.counts_by_verdict(conn)
     run = store.last_run(conn)
     unhealthy = store.unhealthy_boards(conn)
@@ -1040,6 +1240,12 @@ def build_dashboard(
     letters = store.letters_by_posting(conn)
     letters_built = _built_letters()
     pending_mail = store.pending_mail_count(conn)
+    # The Today line counting the review list. Lanes read the criteria, so with none
+    # there is no count to give — absent, never a guessed zero.
+    review_count = None
+    if criteria is not None:
+        review_count = len(review_split(conn, criteria, by_name, coverage_by_origin,
+                                        today).recent)
 
     # Read straight off `applications` rather than joining through `postings`, which is
     # what lets a hand-entered job — no board, no verdict, no posting row — show up here
@@ -1071,7 +1277,7 @@ def build_dashboard(
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
            rest, overrides, suggestions, tracked, built, held, letters, letters_built,
-           applied_today)
+           applied_today, review_count)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -1086,14 +1292,14 @@ def build_dashboard(
     parts.append("</section>")
 
     parts.append('<section data-panel-body="all" data-filter-scope hidden>')
-    _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria)
+    _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria, lanes)
     _tier_chart(parts, matches, by_name)
     _filters(parts, matches + uncertain, by_name, criteria)
     _table(parts, "Open matches", matches, by_name, "matches", False, criteria,
            interactive, tracked, suggestions, built, held, letters, letters_built)
     _table(parts, "Uncertain — needs a human", uncertain, by_name, "uncertain", True,
            criteria, interactive, tracked, suggestions, built, held, letters,
-           letters_built)
+           letters_built, lanes)
     parts.append("</section>")
 
     if include_job_boards:
@@ -1101,7 +1307,7 @@ def build_dashboard(
         _job_board_panel(parts, board_matches, board_uncertain, companies, criteria,
                          interactive, tracked, suggestions, built, held, letters,
                          letters_built, _company_keys(matches + uncertain), unhealthy,
-                         by_name)
+                         by_name, lanes)
         parts.append("</section>")
 
     parts.append('<section data-panel-body="boards" hidden>')
@@ -1157,7 +1363,7 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy,
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
            plans=None, rest=(), overrides=None, suggestions=None, tracked=None,
            built=None, held=None, letters=None, letters_built=None,
-           applied_today: int = 0) -> None:
+           applied_today: int = 0, review_count: Optional[int] = None) -> None:
     """The three to apply to today, less the ones you already applied to.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -1199,9 +1405,29 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
             "the model has not read them yet. Run <code>jobtracker rank</code>.</p>"
         )
 
+    _review_count_line(parts, review_count, interactive)
+
     _rest_of_ranking(parts, rest, by_name, today, criteria, plans, interactive,
                      tracked, suggestions, built, held, letters, letters_built,
                      start=len(picks) + 1)
+
+
+def _review_count_line(parts, count: Optional[int], interactive: bool) -> None:
+    """"N to review": the size of `/review`'s default view, under the picks.
+
+    A link under `serve` and a bare count in the static file, which has no `/review` —
+    a file:// page pointing at a server that is not running is worse than no link.
+    `None` means no criteria were passed, so no lane could be derived; nothing renders.
+    """
+    if count is None:
+        return
+    text = f"{count} to review"
+    if interactive:
+        text = f'<a href="/review">{text} →</a>'
+    parts.append(
+        f'<p class="note reviewcount">{text} — uncertain rows with a field signal, '
+        f"first seen in the last {queue.REVIEW_WINDOW_DAYS} days.</p>"
+    )
 
 
 def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
@@ -1262,7 +1488,7 @@ def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
         parts.append(
             f'<li><span class="rn">{n}</span>{_source_badge(row, by_name)}'
             f'<span class="role"><a {_posting_attrs(row, interactive)}>'
-            f'{html.escape(_role_of(row))}</a> '
+            f'{html.escape(_role_of(row))}</a>{_thin_chip(row)} '
             f'<span class="cobadge">{html.escape(employer)}</span></span>'
             f'<span class="meta">{" · ".join(bits)}</span>{act}</li>'
         )
@@ -1282,10 +1508,26 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
 
     parts.append('<article class="pick">')
     parts.append(f'<div class="rank">{i}</div>')
+    parts.append('<div class="pick-head">')
     parts.append(
         f'<h3><a {_posting_attrs(row, interactive)}>'
-        f'{html.escape(row["title"])}</a></h3>'
+        f'{html.escape(row["title"])}</a>{_thin_chip(row)}</h3>'
     )
+    # Under `serve` the card's controls sit behind one menu, beside the title. The static
+    # file has only the Apply link, and a menu holding one link would be a click for
+    # nothing, so there it stays at the foot of the card.
+    if interactive:
+        parts.append('<details class="pick-menu"><summary>Actions</summary>'
+                     '<div class="menu-panel">')
+        _pick_actions(parts, row, interactive)
+        _resume_controls(parts, row, overrides)
+        # Where the handlers write what came back. Empty and invisible until something
+        # has to be said; rendered here rather than created in JS so the script only ever
+        # sets text, never markup. Inside the panel, because the panel floats over whatever
+        # is below it, and "choose a file first" has to land beside the button you pressed.
+        parts.append('<div class="applymsg"></div>')
+        parts.append("</div></details>")
+    parts.append("</div>")
     # A job board row has no tier — it is not a curated company — so it wears the board
     # it came from instead of the "T—" that would say nothing.
     parts.append(
@@ -1304,9 +1546,15 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
 
     _prefill_line(parts, row, plans)
     _tailor_line(parts, row, suggestions, held)
-    _resume_line(parts, row, interactive, overrides)
+    _resume_line(parts, row, overrides)
     _docs_line(parts, row, interactive, suggestions, held, built, letters, letters_built)
+    if not interactive:
+        _pick_actions(parts, row, interactive)
+    parts.append("</article>")
 
+
+def _pick_actions(parts, row, interactive) -> None:
+    """The card's action row: Apply in the file; Prepare and the dispositions under `serve`."""
     parts.append('<div class="act">')
     # Under `serve` this leads to the posting page, which is where the documents and the
     # questions are — so it says Prepare, not Apply. In the static file there is no such
@@ -1348,12 +1596,6 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
                 f"{label}</button>"
             )
     parts.append("</div>")
-    if interactive:
-        # Where the apply-to handler writes what came back. Empty and invisible until
-        # something has to be said; rendered here rather than created in JS so the
-        # script only ever sets text, never markup.
-        parts.append('<div class="applymsg"></div>')
-    parts.append("</article>")
 
 
 def _prefill_line(parts, row, plans) -> None:
@@ -1626,6 +1868,17 @@ def _tag_chip(origin: str, labels: dict) -> str:
             f"{html.escape(label)}</span>")
 
 
+def _thin_chip(row) -> str:
+    """The `thin` chip, with its leading space, or "" for a row with real text.
+
+    One definition for every surface that shows a role — picks, the drawer, both postings
+    tables — so "thin" cannot come to mean two things. `rank.is_thin` is the test.
+    """
+    if not rank_mod.is_thin(row):
+        return ""
+    return f' <span class="thin" title="{html.escape(rank_mod.THIN_WHY, quote=True)}">thin</span>'
+
+
 def _source_badge(row, by_name, labels=None) -> str:
     """The badge in front of a row: its tier, or the board that carried it.
 
@@ -1724,17 +1977,17 @@ def _letter_control(row, letter_row, letters_built) -> str:
     j = html.escape(row["ats_job_id"], quote=True)
     copy = (
         f'<button class="letter-tex" data-company="{c}" data-job="{j}" '
-        'title="Save the cover letter&#39;s LaTeX source">tex&#9993;</button>'
+        f'title="Save the cover letter&#39;s LaTeX source">tex{LETTER_GLYPH}</button>'
     )
     if _letter_built(row, letters_built, letter_row):
         return (
             f'<button class="letter-dl" data-company="{c}" data-job="{j}" '
-            'data-glyph="&#9993;" title="Save the cover letter">&#9993;</button>'
+            f'data-glyph="{LETTER_GLYPH}" title="Save the cover letter">{LETTER_GLYPH}</button>'
             + copy
         )
     return (
         f'<button class="letter-build" data-company="{c}" data-job="{j}" '
-        'data-glyph="&#9993;" title="Build the cover letter">&#9993;</button>' + copy
+        f'data-glyph="{LETTER_GLYPH}" title="Build the cover letter">{LETTER_GLYPH}</button>' + copy
     )
 
 
@@ -1882,36 +2135,39 @@ def _tailor_line(parts, row, suggestions=None, held=None) -> None:
     )
 
 
-def _resume_line(parts, row, interactive, overrides=None) -> None:
-    """Which resume this posting will attach, and — under `serve` — how to change it.
+def _resume_line(parts, row, overrides=None) -> None:
+    """The resume this posting attaches, when it is not the one in Settings.
 
-    The name renders in both modes for the same reason the prefill counts do: knowing
-    which PDF is about to go out under your name is useful offline. Only the controls are
-    gated on `interactive`, because only a live server has anywhere to POST them.
+    Renders in both modes for the same reason the prefill counts do: knowing which PDF is
+    about to go out under your name is useful offline. Absent for the default, which is
+    every card until you choose otherwise, so a line saying so on each of them said
+    nothing. The controls that change it are `_resume_controls`, in the card's menu.
     """
     row_override = (overrides or {}).get((row["company"], row["ats_job_id"]))
-    parts.append('<div class="resume">')
-    if row_override is not None:
+    if row_override is None:
+        return
+    parts.append(
+        '<div class="resume"><span class="rname own">resume for this posting: '
+        f'{html.escape(row_override["filename"])}</span></div>'
+    )
+
+
+def _resume_controls(parts, row, overrides=None) -> None:
+    """How to change this posting's resume. `serve` only: nowhere to POST them otherwise."""
+    c = html.escape(row["company"], quote=True)
+    j = html.escape(row["ats_job_id"], quote=True)
+    parts.append(
+        '<div class="resume-set">'
+        "<input type=\"file\" class=\"pickfile\" accept=\".pdf,.docx\" "
+        'aria-label="Resume for this posting">'
+        f'<button class="pick-attach" data-company="{c}" data-job="{j}">'
+        "Use for this posting</button>"
+    )
+    if (overrides or {}).get((row["company"], row["ats_job_id"])) is not None:
         parts.append(
-            '<span class="rname own">resume for this posting: '
-            f'{html.escape(row_override["filename"])}</span>'
+            f'<button class="pick-detach" data-company="{c}" data-job="{j}">'
+            "Use the default</button>"
         )
-    else:
-        parts.append('<span class="rname">resume: the one in Settings</span>')
-    if interactive:
-        c = html.escape(row["company"], quote=True)
-        j = html.escape(row["ats_job_id"], quote=True)
-        parts.append(
-            "<input type=\"file\" class=\"pickfile\" accept=\".pdf,.docx\" "
-            'aria-label="Resume for this posting">'
-            f'<button class="pick-attach" data-company="{c}" data-job="{j}">'
-            "Use for this posting</button>"
-        )
-        if row_override is not None:
-            parts.append(
-                f'<button class="pick-detach" data-company="{c}" data-job="{j}">'
-                "Use the default</button>"
-            )
     parts.append("</div>")
 
 
@@ -2006,7 +2262,8 @@ def _by_location(rows, criteria):
     return sorted(rows, key=lambda r: location_rank(r["location"], criteria))
 
 
-def _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria=None) -> None:
+def _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria=None,
+           lanes=None) -> None:
     stale = _days_since(run["started_at"][:10]) if run else None
     # A run older than 2 days is the failure this whole tile exists to catch: every
     # other number on the page keeps looking fine when the pipeline has simply stopped.
@@ -2029,8 +2286,16 @@ def _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteri
         nyc = sum(1 for r in matches if location_rank(r["location"], criteria) == 0)
         us = sum(1 for r in matches if location_rank(r["location"], criteria) == 1)
         tiles.append(("In NYC", str(nyc), f"+{us} elsewhere in the US"))
+    # The count stays the whole list — folding is display, never a verdict — and the
+    # sub-line says how much of it is worth opening. Without criteria there are no lanes
+    # to count, and a "0 worth a read" would be a claim nobody made.
+    if lanes:
+        worth = sum(1 for r in uncertain if _lane_of(r, lanes) in _WORTH_A_READ)
+        uncertain_note = f"{worth:,} worth a read"
+    else:
+        uncertain_note = "needs a human read"
     tiles += [
-        ("Uncertain", str(len(uncertain)), "needs a human read"),
+        ("Uncertain", str(len(uncertain)), uncertain_note),
         ("Rejected", f"{counts.get('reject', 0):,}", "by the rules, auditable"),
         ("Boards flagged", str(len(unhealthy)), "not all are problems"),
         ("Last run", run_val, run_note),
@@ -2113,7 +2378,7 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
     for t in tiers:
         label = f"T{t}" if t != "—" else "untiered"
         parts.append(
-            f'<button type="button" class="chip" data-attr="tier" '
+            f'<button type="button" class="fchip" data-attr="tier" '
             f'data-val="{html.escape(str(t))}" '
             f'aria-pressed="false">{html.escape(label)}</button>'
         )
@@ -2132,7 +2397,7 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
 
 def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
            interactive: bool = False, tracked=None, suggestions=None, built=None,
-           held=None, letters=None, letters_built=None) -> None:
+           held=None, letters=None, letters_built=None, lanes=None) -> None:
     parts.append(
         f'<h2>{html.escape(heading)} '
         f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
@@ -2148,23 +2413,64 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
     # header come out of the same two flags, in one place, so they cannot disagree.
     cols = (4 if reason else 3) + (1 if interactive else 0)
     parts.append("<thead><tr><th>Role</th>"
-                 "<th>Location</th>" + ("<th>Why uncertain</th>" if reason else "")
+                 "<th>Location</th>" + ("<th>Status</th>" if reason else "")
                  + "<th>First seen</th>"
                  + ('<th class="act">Actions</th>' if interactive else "")
                  + "</tr></thead>")
+
+    def render_row(r, badge: bool) -> None:
+        tier = _tier_of(r["company"], by_name)
+        company = by_name.get(r["company"])
+        ats = company.ats if company else ""
+        loc = r["location"] or ""
+        rank = location_rank(loc, criteria) if criteria is not None else None
+        loc_key = location_label(rank) if rank is not None else ""
+        # Company, tier and ats stay in the search blob even though their cells moved
+        # into the head above — otherwise typing a company name would stop matching
+        # its own rows, which is the first thing anyone tries.
+        search = " ".join(
+            x.lower() for x in (r["company"], r["title"], loc, str(tier), ats) if x
+        )
+        parts.append(
+            f'<tr data-tier="{html.escape(str(tier))}" data-ats="{html.escape(ats)}" '
+            f'data-loc="{html.escape(loc_key)}" '
+            f'data-search="{html.escape(search)}">'
+        )
+        # Inside the fold there is no company head above the row, so the company rides
+        # beside the role the way the Today drawer carries an employer.
+        co = (f' <span class="cobadge">{html.escape(r["company"])}</span>'
+              if badge else "")
+        parts.append(f'<td><a {_posting_attrs(r, interactive)}>'
+                     f'{html.escape(r["title"])}</a>{_thin_chip(r)}{co}</td>')
+        # The NYC pin is a marker on the single most-preferred band, not a per-row
+        # colored scale — four location colors beside seven tier chips would be noise.
+        pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
+        parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
+        if reason:
+            parts.append(_status_cell(r, lanes))
+        parts.append(
+            f'<td class="seen">{html.escape((r["first_seen"] or "")[:10])}</td>'
+        )
+        if interactive:
+            parts.append(
+                f'<td class="act">'
+                f'{_track_cell(r, tracked, suggestions, built, held, letters, letters_built)}'
+                f'</td>'
+            )
+        parts.append("</tr>")
+
+    kept, folded = _split_folded(rows, lanes) if reason else (list(rows), [])
 
     # Grouped by iterating the already location-sorted rows, so dict insertion order puts
     # each company where its best-placed role already was. NYC-first survives grouping
     # with no second comparator to keep in step with `_by_location`.
     groups: dict[str, list] = {}
-    for r in rows:
+    for r in kept:
         groups.setdefault(r["company"], []).append(r)
 
     for company_name, group in groups.items():
-        company = by_name.get(company_name)
         tier = _tier_of(company_name, by_name)
         var = _band_var(tier)
-        ats = company.ats if company else ""
         parts.append('<tbody class="grp">')
         parts.append(
             f'<tr class="cohead"><th colspan="{cols}" scope="colgroup">'
@@ -2177,41 +2483,109 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
             "</th></tr>"
         )
         for r in group:
-            loc = r["location"] or ""
-            rank = location_rank(loc, criteria) if criteria is not None else None
-            loc_key = location_label(rank) if rank is not None else ""
-            # Company, tier and ats stay in the search blob even though their cells moved
-            # into the head above — otherwise typing a company name would stop matching
-            # its own rows, which is the first thing anyone tries.
-            search = " ".join(
-                x.lower() for x in (r["company"], r["title"], loc, str(tier), ats) if x
-            )
-            parts.append(
-                f'<tr data-tier="{html.escape(str(tier))}" data-ats="{html.escape(ats)}" '
-                f'data-loc="{html.escape(loc_key)}" '
-                f'data-search="{html.escape(search)}">'
-            )
-            parts.append(f'<td><a {_posting_attrs(r, interactive)}>'
-                         f'{html.escape(r["title"])}</a></td>')
-            # The NYC pin is a marker on the single most-preferred band, not a per-row
-            # colored scale — four location colors beside seven tier chips would be noise.
-            pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
-            parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
-            if reason:
-                parts.append(f'<td class="why">{html.escape(r["reason"] or "")}</td>')
-            parts.append(
-                f'<td class="seen">{html.escape((r["first_seen"] or "")[:10])}</td>'
-            )
-            if interactive:
-                parts.append(
-                    f'<td class="act">'
-                    f'{_track_cell(r, tracked, suggestions, built, held, letters, letters_built)}'
-                    f'</td>'
-                )
-            parts.append("</tr>")
+            render_row(r, badge=False)
+        parts.append("</tbody>")
+    if folded:
+        _fold_head(parts, cols, len(folded))
+        for r in folded:
+            render_row(r, badge=True)
         parts.append("</tbody>")
     parts.append("</table>")
     parts.append(f'<div class="empty" id="{ident}-empty" hidden>No rows match the filters.</div>')
+
+
+# -- lanes on the Uncertain tables --------------------------------------------------
+# The lanes worth opening; the rest is the fold. Both halves come from `queue.FOLDED`,
+# so a lane added there moves on every surface at once.
+_WORTH_A_READ = frozenset(queue.Lane) - queue.FOLDED
+
+
+def _coverage_by_origin() -> dict:
+    """`origin` -> the import plugin's `coverage()`, for `queue.lane`'s feed band.
+
+    Imported here for `_origin_labels`' reason: a page that cannot import the registry
+    should still render, and an origin with no coverage simply has no feed band.
+    """
+    try:
+        from . import plugins as plugins_mod
+
+        return {
+            plugin.name: plugin.coverage()
+            for plugin in plugins_mod.plugins_of_kind(plugins_mod.KIND_IMPORT)
+        }
+    except Exception:  # pragma: no cover - a page must not 500 over a fold
+        return {}
+
+
+def _uncertain_lanes(conn, criteria, by_name) -> dict:
+    """`(company, ats_job_id)` -> `(lane, label)` for every open uncertain posting.
+
+    `queue.lane` is the single derivation; this only feeds it, from
+    `store.uncertain_with_context`, whose row is its own `reading`. Derived as the page
+    renders and never stored. Without criteria there is no field signal to read, so the
+    answer is empty and the tables show the rules' reason, unfolded, rather than guess.
+    """
+    if criteria is None:
+        return {}
+    coverage = _coverage_by_origin()
+    out = {}
+    for row in store.uncertain_with_context(conn):
+        lane = queue.lane(row, criteria, by_name, coverage, row)
+        out[(row["company"], row["ats_job_id"])] = (
+            lane, queue.label(lane, queue.feed_band(row, coverage)))
+    return out
+
+
+def _lane_of(row, lanes):
+    entry = (lanes or {}).get((row["company"], row["ats_job_id"]))
+    return entry[0] if entry else None
+
+
+def _split_folded(rows, lanes):
+    """`(rows worth a read, folded rows)`, each keeping the order it arrived in.
+
+    Folded rows are not removed — they render in the trailing group — so the table's
+    count and its "N of M shown" stay the whole list. Inside the fold `no_signal` comes
+    before `noise`, the fold inside the fold; the sort is stable, so location order
+    survives within each.
+    """
+    kept = [r for r in rows if _lane_of(r, lanes) not in queue.FOLDED]
+    folded = [r for r in rows if _lane_of(r, lanes) in queue.FOLDED]
+    folded.sort(key=lambda r: _lane_of(r, lanes) is queue.Lane.BOARD_NOISE)
+    return kept, folded
+
+
+def _status_cell(row, lanes) -> str:
+    """The lane's words, with the rules' raw reason kept in `title`.
+
+    The reason reads `no_level_token_in_title` on nearly every uncertain row, so as the
+    cell's text it carried no information; it is still the audit trail, so it stays one
+    hover away. With no lane (no criteria) the reason is all there is, and it shows.
+    """
+    raw = row["reason"] or ""
+    entry = (lanes or {}).get((row["company"], row["ats_job_id"]))
+    if entry is None:
+        return f'<td class="why">{html.escape(raw)}</td>'
+    return (f'<td class="why" title="{html.escape(raw, quote=True)}">'
+            f'{html.escape(entry[1])}</td>')
+
+
+def _fold_head(parts, cols, n) -> None:
+    """Open the trailing "No field signal" group: a group head like a company's.
+
+    Rendered open, like every group, and collapsed by the script on load; an active
+    filter force-expands it like any other. `data-noun` is what keeps the script's count
+    reading "rows" here rather than a company's "roles". The head carries no
+    `data-search`, so it is never counted as a posting. The caller closes the tbody.
+    """
+    parts.append('<tbody class="grp fold" data-noun="row">')
+    parts.append(
+        f'<tr class="cohead"><th colspan="{cols}" scope="colgroup">'
+        '<span class="coname">No field signal —</span>'
+        f'<span class="n">{n} {"row" if n == 1 else "rows"}</span>'
+        '<button type="button" class="cotoggle" aria-expanded="true">Hide</button>'
+        "</th></tr>"
+    )
 
 
 _STATUS_STYLE = {
@@ -2252,7 +2626,7 @@ def _company_keys(rows) -> dict:
 
 def _job_board_panel(parts, matches, uncertain, companies, criteria, interactive,
                      tracked, suggestions, built, held, letters, letters_built,
-                     company_keys, unhealthy=(), by_name=None) -> None:
+                     company_keys, unhealthy=(), by_name=None, lanes=None) -> None:
     """Every job board's postings, in one list, each row saying which board carried it.
 
     Deliberately **not** grouped by company the way the company pages are. There the
@@ -2285,7 +2659,7 @@ def _job_board_panel(parts, matches, uncertain, companies, criteria, interactive
                      held, letters, letters_built)
         _board_table(parts, "Uncertain — needs a human", uncertain, "buncertain", True,
                      criteria, interactive, labels, company_keys, tracked, suggestions,
-                     built, held, letters, letters_built)
+                     built, held, letters, letters_built, lanes)
 
     _manual_job_boards(parts, companies)
     _board_feed_health(parts, unhealthy, by_name or {})
@@ -2314,7 +2688,7 @@ def _board_filters(parts, rows, labels, criteria=None) -> None:
         parts.append("</select>")
     for source in sources:
         parts.append(
-            f'<button type="button" class="chip" data-attr="src" '
+            f'<button type="button" class="fchip" data-attr="src" '
             f'data-val="{html.escape(source, quote=True)}" '
             f'aria-pressed="false">{html.escape(source)}</button>'
         )
@@ -2327,7 +2701,7 @@ def _board_filters(parts, rows, labels, criteria=None) -> None:
 
 def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactive,
                  labels, company_keys, tracked=None, suggestions=None, built=None,
-                 held=None, letters=None, letters_built=None) -> None:
+                 held=None, letters=None, letters_built=None, lanes=None) -> None:
     parts.append(
         f'<h2>{html.escape(heading)} '
         f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
@@ -2340,12 +2714,16 @@ def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactiv
         f'data-empty-target="{ident}-empty">'
     )
     cols = ("<th>Role</th><th>Employer</th><th>Location</th>"
-            + ("<th>Why uncertain</th>" if reason else "")
+            + ("<th>Status</th>" if reason else "")
             + "<th>Posted</th>"
             + ('<th class="act">Actions</th>' if interactive else ""))
     parts.append(f"<thead><tr>{cols}</tr></thead><tbody>")
+    # Flat, with one exception that is a lane and not an employer: the uncertain table's
+    # trailing fold. Its colspan comes out of the same two flags as the header above.
+    span = 4 + (1 if reason else 0) + (1 if interactive else 0)
+    kept, folded = _split_folded(rows, lanes) if reason else (list(rows), [])
 
-    for row in rows:
+    def render_row(row) -> None:
         origin = _origin_of(row)
         tag = labels.get(origin, origin)
         loc = row["location"] or ""
@@ -2363,7 +2741,7 @@ def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactiv
             f'data-search="{html.escape(search)}">'
         )
 
-        chips = _tag_chip(origin, labels)
+        chips = _tag_chip(origin, labels) + _thin_chip(row)
         twin = company_keys.get(row["dedupe_key"] if "dedupe_key" in row.keys() else None)
         if twin is not None:
             # Not a warning and not a removal: the employer's own board carries this req
@@ -2387,7 +2765,7 @@ def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactiv
         pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
         parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
         if reason:
-            parts.append(f'<td class="why">{html.escape(row["reason"] or "")}</td>')
+            parts.append(_status_cell(row, lanes))
         posted = (row["posted_on"] if "posted_on" in row.keys() else None) or ""
         parts.append(
             f'<td class="seen">{html.escape(posted or (row["first_seen"] or "")[:10])}</td>'
@@ -2399,7 +2777,16 @@ def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactiv
                 f"</td>"
             )
         parts.append("</tr>")
-    parts.append("</tbody></table>")
+
+    for row in kept:
+        render_row(row)
+    parts.append("</tbody>")
+    if folded:
+        _fold_head(parts, span, len(folded))
+        for row in folded:
+            render_row(row)
+        parts.append("</tbody>")
+    parts.append("</table>")
     parts.append(f'<div class="empty" id="{ident}-empty" hidden>No rows match the filters.</div>')
 
 
@@ -2471,6 +2858,7 @@ def job_board_page_parts(conn, companies, today, criteria=None, interactive=True
     apps = store.all_applications(conn)
     tracked = {(a["company"], a["ats_job_id"]) for a in apps}
     suggestions = store.suggestions_by_posting(conn)
+    lanes = _uncertain_lanes(conn, criteria, by_name)
 
     parts: list = []
     _job_board_panel(
@@ -2478,8 +2866,185 @@ def job_board_page_parts(conn, companies, today, criteria=None, interactive=True
         tracked, suggestions, _built_resumes(), _held_by_posting(suggestions),
         store.letters_by_posting(conn), _built_letters(),
         _company_keys(matches + uncertain), store.unhealthy_boards(conn), by_name,
+        lanes,
     )
     return parts
+
+
+def _coverage_by_origin() -> dict:
+    """Each job board's `coverage()`, by origin. `_origin_labels`' sibling and its rule:
+    a page that cannot import the registry still renders, and an origin with no
+    coverage reads as a board that says nothing about level."""
+    try:
+        from . import plugins as plugins_mod
+
+        return plugins_mod.coverage_by_origin()
+    except Exception:  # pragma: no cover - a page must not 500 over a lane
+        return {}
+
+
+def review_split(conn, criteria, by_name, coverage_by_origin, today) -> "queue.Review":
+    """`queue.review` over every open uncertain row. The one read both `/review` and the
+    Today count make, so the number on Today is the length of the list it links to."""
+    if coverage_by_origin is None:
+        coverage_by_origin = _coverage_by_origin()
+    return queue.review(store.uncertain_with_context(conn), criteria, by_name,
+                        coverage_by_origin, today)
+
+
+def review_page_parts(conn, companies, criteria, coverage_by_origin, today,
+                      interactive: bool = True) -> list:
+    """`/review`'s body: the uncertain rows worth a look, one flat table. Pure read.
+
+    A read *across* the Company pages / Job boards partition, never a third home: every
+    row here is also on exactly one of those two pages, and nothing on this page decides
+    which. Serve-only — the static file has no `/review` and does not get one.
+
+    One filter scope holding a search box and this table and nothing else, so its bar
+    can drive no other panel's rows. No tier chips and no ATS select: a feed row has
+    neither, and a control filtering on a field many rows leave empty only ever hides.
+
+    The default view is the review lanes first seen inside the window, in
+    `queue.sort_key` order and open. Below it, three folds rendered as `tbody.grp` with
+    `data-closed="1"`: rows render visible and the script collapses them, the rule every
+    grouped table here follows. The board-noise fold sits inside the no-signal fold as a
+    `tbody.sub` that the stylesheet hides while its parent is closed — a table cannot
+    nest a `tbody`, and a second script owning the fold would be two owners of one
+    property.
+    """
+    by_name = {c.name: c for c in (companies or [])}
+    split = review_split(conn, criteria, by_name, coverage_by_origin, today)
+    labels = _origin_labels()
+    days = queue.REVIEW_WINDOW_DAYS
+    parts: list = [
+        f'<h1>Review <span class="count rvn">{len(split.recent)}</span> '
+        f"{version_chip()}</h1>",
+    ]
+    return parts + _review_body(split, labels, criteria, interactive, days)
+
+
+def _review_body(split, labels, criteria, interactive, days) -> list:
+    parts = [
+        '<p class="note">Uncertain postings the rules could not decide that carry a field '
+        f"signal, first seen in the last {days} days — a short list of possible misses. "
+        "Each is also on its Company page or the Job boards page; this is a read across "
+        "both.</p>",
+        '<section class="review" data-filter-scope>',
+        '<div class="filters">'
+        '<input type="search" data-f="q" placeholder="Filter by role, employer, location…" '
+        'aria-label="Filter the review list">'
+        f'<span class="count" id="review-count">{len(split)} on the list</span>'
+        "</div>",
+    ]
+    if not len(split):
+        parts.append('<div class="empty">Nothing uncertain is open.</div>')
+        parts.append("</section>")
+        return parts
+
+    parts.append('<table class="rv" data-filterable data-count-target="review-count" '
+                 'data-empty-target="review-empty">')
+    # The rulings column exists only under `serve`, header and cells from the one flag,
+    # and every colspan below is counted from it, so a fold head always spans the row.
+    cols = 6 if interactive else 5
+    parts.append("<thead><tr><th>Role</th><th>Employer</th><th>Location</th>"
+                 "<th>Why it is here</th><th>First seen</th>"
+                 + ("<th>Your call</th>" if interactive else "") + "</tr></thead>")
+    # The default view is a plain tbody, never `.grp`: the script collapses every group
+    # on load, and this is the part that must stay open.
+    parts.append('<tbody class="recent">')
+    if split.recent:
+        for placed in split.recent:
+            parts.append(_review_row(placed, labels, criteria, interactive))
+    else:
+        parts.append(
+            f'<tr class="rvnone"><td colspan="{cols}">Nothing new in the last {days} days.'
+            "</td></tr>"
+        )
+    parts.append("</tbody>")
+
+    def fold(rows, heading, cls):
+        if not rows:
+            return
+        parts.append(f'<tbody class="{cls}" data-closed="1">')
+        parts.append(
+            f'<tr class="cohead"><th colspan="{cols}" scope="colgroup">'
+            f'<span class="coname">{html.escape(heading)}</span>'
+            '<button type="button" class="cotoggle" aria-expanded="true">Hide</button>'
+            "</th></tr>"
+        )
+        for placed in rows:
+            parts.append(_review_row(placed, labels, criteria, interactive))
+        parts.append("</tbody>")
+
+    fold(split.older, f"{len(split.older)} older", "grp older")
+    no_signal = len(split.no_signal) + len(split.noise)
+    fold(split.no_signal, f"{no_signal} with no field signal", "grp nosignal")
+    names = ", ".join(sorted({p.row["company"] or "" for p in split.noise}))
+    # Nested only while it has a parent to be nested in: with no plain no-signal rows the
+    # parent group renders nothing, and a child hidden under an absent parent is a fold
+    # nobody can open.
+    fold(split.noise,
+         f"{len(split.noise)} from boards that list many non-field roles: {names}",
+         "grp noise sub" if split.no_signal else "grp noise")
+    parts.append("</table>")
+    parts.append('<div class="empty" id="review-empty" hidden>No rows match the filter.</div>')
+    parts.append("</section>")
+    return parts
+
+
+def _review_row(placed, labels, criteria, interactive) -> str:
+    row = placed.row
+    origin = _origin_of(row)
+    tag = labels.get(origin, origin) if origin else ""
+    loc = row["location"] or ""
+    rank = location_rank(loc, criteria) if criteria is not None else None
+    employer = _employer_of(row) or row["company"]
+    role = _role_of(row)
+    search = " ".join(x.lower() for x in (role, employer, loc, tag) if x)
+    pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
+    chip = f" {_tag_chip(origin, labels)}" if origin else ""
+    return (
+        f'<tr data-lane="{html.escape(placed.lane.value)}" '
+        f'data-search="{html.escape(search)}">'
+        f'<td class="role"><a {_posting_attrs(row, interactive)}>{html.escape(role)}</a>'
+        f"{chip}</td>"
+        f'<td class="emp"><span class="cobadge">{html.escape(employer)}</span></td>'
+        f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>'
+        f'<td class="why">{html.escape(placed.label)}</td>'
+        f'<td class="seen">{html.escape((row["first_seen"] or "")[:10])}</td>'
+        f"{_review_rulings(row) if interactive else ''}"
+        "</tr>"
+    )
+
+
+def _review_rulings(row) -> str:
+    """The last cell of a `/review` row under `serve`: two rulings, and their undo.
+
+    Every lane gets it, the folds included — folding is display, never a judgement, so a
+    folded row is as rulable as any other. Each button reuses `/api/decision`; the undo
+    is `/api/decision/clear`. None carries `data-act`, which must keep meaning exactly
+    the three disposition buttons on a pick.
+
+    Both chips are rendered here and start `hidden`, so every control the script toggles
+    is one the server wrote and a parity test can see. The script only moves `hidden`
+    inside this cell and never reloads: a ruled row stays put until the next render, so
+    a misclick is one undo away, and it is gone from the list after that because it is
+    no longer uncertain.
+    """
+    ident = (f'data-company="{html.escape(row["company"] or "")}" '
+             f'data-job="{html.escape(row["ats_job_id"] or "")}"')
+
+    def chip(ruled, words):
+        return (f'<span class="rvdone" data-ruled="{ruled}" hidden>&#10003; {words} · '
+                f'<button type="button" class="rv-undo" {ident}>undo</button></span>')
+
+    return (
+        '<td class="act rvact">'
+        f'<button type="button" class="rv-yes" {ident}>Worth a look</button> '
+        f'<button type="button" class="rv-no" {ident}>Not for me</button>'
+        f'{chip("match", "worth a look")}{chip("reject", "not for me")}'
+        "</td>"
+    )
 
 
 def _applications(parts, apps, events_by, today, by_name) -> None:

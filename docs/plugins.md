@@ -251,6 +251,32 @@ credential:
   scored, and `rank.available` filters it out — present in the table, absent from the
   product. Plugin postings are deliberately kept *out* of `wanted` for the same reason:
   that pass writes `''` through a bare UPDATE and would erase the message text.
+- **It records what kind of text that description is** (`postings.description_source`),
+  from `coverage()` on the plugin. `prose` is the listing's own words — a Discord
+  message, YC's `minExperience` line; `feed` is a stub the plugin assembled from fields,
+  which is what Simplify's `Category: … / Locations: …` text is. `coverage()` lives on
+  `Plugin` only — `{"bands": [...], "prose": bool}`, defaulting to
+  `{"bands": [], "prose": True}` — because a task plugin publishes no listings and nothing
+  may ask it for one. `plugins.description_sources()` maps every import plugin to its
+  value; `store` cannot import `plugins` (they import `tasks`, which import `store`), so
+  `cli._connect` and `server._connect` hand that mapping to `store.connect`, whose
+  backfill labels rows written before the column existed. An origin missing from the
+  mapping keeps NULL rather than a guess.
+- **A `feed` description is upgraded once, by `check`, when its link can be read.**
+  `_upgrade_descriptions` runs after the board pass and the plugins, over open
+  `match`/`uncertain` rows with `description_source='feed'`, and resolves each URL with
+  `dedupe.upgrade_target` — Greenhouse (`boards`/`job-boards` `…/X/jobs/N` and
+  `embed/job_app?for=X&token=N`), Lever (`jobs.lever.co/X/<uuid>`) and Ashby
+  (`jobs.ashbyhq.com/X/<uuid>`), read off **the URL with its case intact, never
+  `dedupe_key`**, which lowercases the slug and would break Lever. Anything else is not
+  fetched. Greenhouse costs one detail request per posting; Ashby and Lever cost one
+  board request per slug, whatever number of links point into it. Non-empty prose is written
+  with `source="ats"` — the single exception to write-once, and only from `feed`. A
+  failure, a job gone from its board or empty text leaves the stub, is counted in the
+  summary line, and never touches health. Its budget is its own, `--max-upgrades`
+  (default 100), and its rows are never added to `wanted`, for the reason above. What
+  resolves is provenance — the feed served the link — and is never logged as verified
+  identity.
 - **A verdict is recorded for every posting.** Every downstream query is
   `postings JOIN verdicts`.
 - **Postings close by age, never by absence.** A channel cannot report that a req was

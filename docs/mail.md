@@ -143,12 +143,11 @@ appear on the page it was read from, and it is what keeps a fabricated rejection
 review list.
 
 **`status: "none"` is an answer, not a failure**, and it is written — `read_at` is set and
-the message is never asked about again. This diverges from `level`, where `unclear`
-returns nothing and is retried three times, and the divergence is deliberate: copying it
-would spend three model calls on every newsletter that squeaked through the narrower, and
-would fill the blocked-unit count — which exists to signal breakage — with perfectly
-healthy readings. Nothing else will ever resolve a message that is simply not about an
-application. Only a transport failure returns nothing and leaves the candidate unread.
+the message is never asked about again. `level` records its `unclear` the same way.
+Reading it as no answer would spend three model calls on every newsletter that squeaked
+through the narrower, and would fill the blocked-unit count — which exists to signal
+breakage — with perfectly healthy readings. Nothing else will ever resolve a message
+that is simply not about an application. Only a transport failure returns nothing and leaves the candidate unread.
 
 `unit_key` is the **message id**, because the message *is* the question. It also fixes a
 real collision the obvious mapping would ship: two ambiguous messages at one company both

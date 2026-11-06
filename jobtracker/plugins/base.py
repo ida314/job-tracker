@@ -157,6 +157,22 @@ class Plugin(BasePlugin):
         """What a row from this board is labelled with. Never empty."""
         return self.tag or self.name
 
+    def coverage(self) -> dict:
+        """What this board's listings can tell us, beyond a title.
+
+        `prose`: whether the description it writes is the listing's own words (True) or
+        a stub assembled from its fields (False). It becomes `postings.description_source`
+        — `prose` or `feed` — through `description_source()` below, and it is the one
+        thing that tells a model pass whether there is anything to read.
+
+        `bands`: the career bands the board is curated to, where it is curated to any —
+        Simplify's is a new-grad list. Empty means the board says nothing about level.
+
+        On `Plugin` and not `BasePlugin`: a task plugin publishes no listings, so it has
+        no coverage to describe and nothing may ask it for one.
+        """
+        return {"bands": [], "prose": True}
+
     def page_urls(self, settings: dict, today: str) -> Optional[list]:
         """The fixed set of pages that together are this board's whole answer, or None.
 
@@ -307,3 +323,22 @@ def plugins_of_kind(kind: str) -> list:
 
 def plugin_names() -> list:
     return sorted(_REGISTRY)
+
+
+def description_source(plugin: Plugin) -> str:
+    """The `postings.description_source` value for rows this import plugin writes."""
+    return "prose" if plugin.coverage().get("prose", True) else "feed"
+
+
+def description_sources() -> dict:
+    """`{origin: description_source}` for every import plugin — what `store.connect`
+    takes to label job-board descriptions written before the column existed. Import
+    plugins only: a task plugin has no `coverage()` to ask."""
+    return {p.name: description_source(p) for p in plugins_of_kind(KIND_IMPORT)}
+
+
+def coverage_by_origin() -> dict:
+    """`{origin: coverage()}` for every import plugin — what `queue.lane` reads to tell
+    a feed curated to a band from one that says nothing about level. Import plugins
+    only, for the reason `description_sources` gives."""
+    return {p.name: p.coverage() for p in plugins_of_kind(KIND_IMPORT)}

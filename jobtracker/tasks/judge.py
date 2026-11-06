@@ -139,7 +139,11 @@ class JudgeTask(Task):
                 # The prose hash IS the question. Edit the prose and every posting
                 # becomes a new unit, with its retry count reset — correct, because a
                 # failure answering the old question says nothing about the new one.
-                unit_key=ctx.profile.prose_hash,
+                #
+                # The description is the other half, and it is per posting: when real
+                # prose replaces a feed's blurb, this one posting is a new unit — out
+                # from under a set-aside earned on the blurb — and no other posting is.
+                unit_key=f"{ctx.profile.prose_hash}:{row['description_hash']}",
                 title=row["title"],
                 payload={"description": row["description"]},
             )
@@ -164,6 +168,9 @@ class JudgeTask(Task):
         store.record_judgment(
             conn, unit.company, unit.ats_job_id, result,
             ctx.profile.prose_hash, ctx.today,
+            # The text the model read, not whatever is stored by the time this commits:
+            # a description that moved mid-run must leave this posting pending.
+            description_hash=store.description_hash(unit.payload["description"]),
         )
         return result.backend_fit
 

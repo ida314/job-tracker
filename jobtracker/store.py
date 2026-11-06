@@ -188,6 +188,27 @@ CREATE TABLE IF NOT EXISTS deferrals (
     PRIMARY KEY (company, ats_job_id)
 );
 
+-- What the `level` task read off a posting's description: one row per posting, every
+-- grounded answer, `unclear` included. `unclear` used to write nothing and count as no
+-- answer, so each one spent MAX_ATTEMPTS model calls and was then set aside as blocked —
+-- indistinguishable from a broken router, with nothing recording that the model had
+-- in fact read the posting. A reading is the record that it did.
+--
+-- `band` is `entry` | `not_entry` | `unclear` for now; it is free TEXT so a later band
+-- set widens the values without changing the table's shape. `source_hash` is
+-- `sha256[:16]` of exactly the text the model was shown (`level.shown_text`), so a
+-- description upgrade changes it and `level.pending()` asks again. Not an override:
+-- this row never decides a verdict by itself.
+CREATE TABLE IF NOT EXISTS level_readings (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    band        TEXT NOT NULL,
+    evidence    TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    read_at     TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
+
 -- A failure ledger for the task queue. NOT a queue: the queue is derived every run by
 -- each task's own SQL over the tables above, so there is nothing here to drift out of
 -- sync with what is actually pending. This exists for one purpose — to stop retrying a
@@ -195,7 +216,7 @@ CREATE TABLE IF NOT EXISTS deferrals (
 -- the whole budget forever while the rest of the queue starves.
 --
 -- `unit_key` identifies the *question*, not the posting: for `judge` it carries the
--- profile prose hash, for `prefill` the answers hash. Change the question and the unit
+-- profile prose hash and the posting's description hash, for `prefill` the answers hash. Change the question and the unit
 -- is new, so it is retried with a clean slate — which is correct, because a failure
 -- against the old question says nothing about the new one.
 CREATE TABLE IF NOT EXISTS task_attempts (
@@ -658,7 +679,41 @@ _ADDED_COLUMNS = [
     # "have I applied to this?" be a question about a *req* rather than about one row: the
     # same job arrives from a board and from two feeds, and you apply to it once.
     ("applications", "dedupe_key", "TEXT"),
+    # What kind of text `description` holds — one of DESCRIPTION_SOURCES. The column was
+    # one undifferentiated string for two different things: prose (an ATS detail payload,
+    # a Discord message, a YC listing's own words) and feed *metadata* that Simplify
+    # assembles from its JSON fields ("Category: … / Locations: …"). Nothing recorded
+    # which, so the `level` model was asked to read a metadata stub as if it were a job
+    # description. NULL goes with a NULL description; a non-NULL description with a NULL
+    # source is a row written before this existed, and `_backfill_description_sources`
+    # fills it in on connect.
+    ("postings", "description_source", "TEXT"),
+    # Which description each downstream answer was read from — `description_hash()` of
+    # the text the model was handed. A description is not write-once forever: an ATS
+    # fetch can replace a feed's blurb with the real prose, and an answer read off the
+    # blurb is an answer to a different question. Each pending query compares this to
+    # the hash of the description stored *now*, so a changed description re-asks that
+    # one posting and nothing else. Nullable on purpose: NULL means "written before this
+    # column existed", and `_backfill_description_hashes` fills it from the current text
+    # on connect, so an upgrade re-asks nothing.
+    ("rankings", "description_hash", "TEXT"),
+    ("resume_suggestions", "description_hash", "TEXT"),
+    ("cover_letters", "description_hash", "TEXT"),
 ]
+
+# The values `postings.description_source` may hold.
+#   ats   — written by `check`'s board path, from the ATS's own payload.
+#   prose — written by a job board whose text is the listing's own words.
+#   feed  — written by a job board that has no prose, only fields it assembled.
+DESCRIPTION_SOURCES = ("ats", "prose", "feed")
+
+
+def _check_description_source(source: Optional[str]) -> None:
+    if source is not None and source not in DESCRIPTION_SOURCES:
+        raise ValueError(
+            f"description source must be one of {', '.join(DESCRIPTION_SOURCES)}, "
+            f"not {source!r}"
+        )
 
 
 # Indexes over columns that _ADDED_COLUMNS creates. These CANNOT live in _SCHEMA:
@@ -742,14 +797,124 @@ def _apply_index_migrations(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
+def _backfill_description_sources(
+    conn: sqlite3.Connection, description_sources: Optional[dict] = None
+) -> int:
+    """Label every stored description that predates `description_source`.
+
+    Self-draining: it only ever reads rows with a description and no source, so from the
+    second connect it touches nothing. A NULL description stays NULL — there is no text
+    to say anything about.
+
+      * `origin IS NULL` is a curated board, and the only writer of its description is
+        `check`'s board path, so those rows are `ats` with no further knowledge needed.
+      * A job board row is whatever its plugin says it publishes, which only the plugin
+        knows. `store` must not import `plugins` — the plugins import `tasks`, and tasks
+        import this module — so the caller hands the answer in as `{origin: source}`
+        (`plugins.description_sources()`). An origin it does not name keeps its NULL
+        until a connect that does; guessing one would be the mislabel this column exists
+        to prevent.
+
+    Runs after `_apply_data_migrations`, which is what gives the legacy feed rows their
+    `origin` — before that, a Simplify row would read as a curated board.
+    """
+    labelled = conn.execute(
+        "UPDATE postings SET description_source='ats' "
+        "WHERE description_source IS NULL AND description IS NOT NULL "
+        "AND origin IS NULL"
+    ).rowcount
+    for origin, source in sorted((description_sources or {}).items()):
+        _check_description_source(source)
+        labelled += conn.execute(
+            "UPDATE postings SET description_source=? "
+            "WHERE description_source IS NULL AND description IS NOT NULL AND origin=?",
+            (source, origin),
+        ).rowcount
+    if labelled:
+        # Said out loud for the duplicate sweep's reason: a one-time relabelling of the
+        # corpus should read as a migration in the run log, not as nothing at all.
+        log.info(
+            "labelled the source of %d stored description(s) that predate the column",
+            labelled,
+        )
+    conn.commit()
+    return labelled
+
+
+def description_hash(text: Optional[str]) -> str:
+    """The identity of one description, as the downstream caches record it.
+
+    `sha256[:16]` of the text, and `''` for NULL or empty — neither is text a model was
+    ever handed, so neither has an identity worth comparing. This one function is the
+    whole definition: `connect` registers it as the SQL function of the same name, so the
+    pending queries, the writers and the upgrade backfill cannot disagree about what a
+    description's hash is.
+    """
+    if not text:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# The three tables whose rows are answers read off one posting's description, and that
+# therefore go stale when it changes. See the `description_hash` column comment.
+_DESCRIPTION_HASHED = ("rankings", "resume_suggestions", "cover_letters")
+
+
+def _backfill_description_hashes(conn: sqlite3.Connection) -> int:
+    """Stamp every pre-existing answer with the hash of the description stored now.
+
+    The alternative — reading NULL as "unknown, re-ask" — would re-judge, re-tailor and
+    re-write a letter for every posting the night this shipped: one upgrade spending the
+    whole budget re-answering questions whose input never moved. Stamping from the
+    current text says the only thing we can honestly say about an old row (it was read
+    off something, and this is what is there now), and leaves later changes to re-ask.
+    Self-draining: it only ever touches NULL, and writes '' rather than NULL for a row
+    whose posting has no description, so the second connect finds nothing to do.
+    """
+    stamped = 0
+    for table in _DESCRIPTION_HASHED:
+        stamped += conn.execute(
+            f"UPDATE {table} SET description_hash = description_hash(("
+            f"SELECT p.description FROM postings p "
+            f"WHERE p.company={table}.company AND p.ats_job_id={table}.ats_job_id"
+            f")) WHERE description_hash IS NULL"
+        ).rowcount
+    if stamped:
+        # Said out loud for the reason the duplicate sweep says its count: a migration
+        # that decides what the queue looks like tomorrow should not be invisible.
+        log.info(
+            "stamped %d existing judgment(s), suggestion(s) and letter(s) with the "
+            "hash of their current description; only later changes re-ask",
+            stamped,
+        )
+    return stamped
+
+
+def connect(
+    db_path: str | Path, description_sources: Optional[dict] = None
+) -> sqlite3.Connection:
+    """Open (and migrate) the database.
+
+    `description_sources` is `{origin: "prose" | "feed"}` for the job boards, from
+    `plugins.description_sources()`. It only feeds the description-source backfill; see
+    `_backfill_description_sources` for why it is passed in rather than looked up.
+    """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    # SQLite has no built-in hash, so the pending queries' "has this description
+    # changed?" calls the Python function, registered here as deterministic. It is in
+    # the SQL rather than a filter after it because those queries carry a LIMIT: a
+    # Python filter would run after the limit and hand a budgeted run a short batch.
+    conn.create_function(
+        "description_hash", 1, description_hash, deterministic=True
+    )
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
     _apply_column_migrations(conn)
     _apply_index_migrations(conn)  # after the columns they index — see _ADDED_INDEXES
     _apply_data_migrations(conn)  # after both, and self-draining
+    _backfill_description_sources(conn, description_sources)  # needs `origin` settled
+    _backfill_description_hashes(conn)  # also self-draining
     conn.commit()
     return conn
 
@@ -1082,6 +1247,7 @@ def append_postings(
     now: str,
     identity: Optional[tuple[str, str]] = None,
     origin: Optional[str] = None,
+    description_source: Optional[str] = None,
 ) -> list[Posting]:
     """Add what a feed just announced. Never close anything by absence.
 
@@ -1112,7 +1278,14 @@ def append_postings(
         posting would be in the table and absent from the product.
       * **`ON CONFLICT DO NOTHING`**, so re-reading the same messages after an
         interrupted run imports nothing twice and can never blank a stored description.
+
+    `description_source` is what kind of text the feed's descriptions are — `prose` or
+    `feed`, from the plugin's `coverage()` via `plugins.description_source`. It is
+    written beside a description and never beside a NULL one. An existing row only gains
+    one where it has none (COALESCE, like `origin`); the description itself is still
+    write-once and is not touched here.
     """
+    _check_description_source(description_source)
     existing = {
         row["ats_job_id"]
         for row in conn.execute(
@@ -1125,19 +1298,23 @@ def append_postings(
         if p.ats_job_id in existing:
             conn.execute(
                 "UPDATE postings SET last_seen=?, dedupe_key=?, "
-                "origin=COALESCE(?, origin), employer=COALESCE(?, employer) "
+                "origin=COALESCE(?, origin), employer=COALESCE(?, employer), "
+                "description_source=COALESCE(description_source, "
+                "CASE WHEN description IS NOT NULL THEN ? END) "
                 "WHERE company=? AND ats_job_id=?",
-                (now, key, origin, p.employer, company, p.ats_job_id),
+                (now, key, origin, p.employer, description_source,
+                 company, p.ats_job_id),
             )
             continue
         conn.execute(
             "INSERT INTO postings (company, ats_job_id, title, location, url, "
             "posted_at, posted_on, first_seen, last_seen, closed_at, description, "
-            "dedupe_key, origin, employer) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?) "
+            "dedupe_key, origin, employer, description_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?) "
             "ON CONFLICT(company, ats_job_id) DO NOTHING",
             (company, p.ats_job_id, p.title, p.location, p.url, p.posted_at,
-             p.posted_on, now, now, p.description, key, origin, p.employer),
+             p.posted_on, now, now, p.description, key, origin, p.employer,
+             description_source if p.description is not None else None),
         )
         existing.add(p.ats_job_id)
         inserted.append(p)
@@ -1225,6 +1402,8 @@ _PURGE_BY_COMPANY = [
     "postings", "verdicts", "rankings", "deferrals", "prefill_plans",
     "posting_resumes", "posting_letters", "task_attempts", "form_fields",
     "board_health", "manual_checks",
+    # What `level` read off a description. Re-derivable: the next `work` reads it again.
+    "level_readings",
     # Machine-authored and re-derivable: the next `work` proposes them again from the
     # description and the resume. Your ruling on one is not in here — accepting a
     # suggestion attaches a file, and that lives in `posting_resumes`.
@@ -1365,7 +1544,7 @@ def open_postings_by_verdict(conn: sqlite3.Connection, decision: str) -> list[sq
             """
             SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
                    p.first_seen, p.posted_on, p.origin, p.employer, p.dedupe_key,
-                   v.reason,
+                   p.description_source, v.reason,
                    COALESCE(
                      (SELECT ai.status FROM applications ai
                        WHERE ai.company=p.company AND ai.ats_job_id=p.ats_job_id),
@@ -1530,6 +1709,18 @@ def record_decision(
         """,
         (company, ats_job_id, title, location, decision, note, now),
     )
+
+
+def clear_decision(conn: sqlite3.Connection, company: str, ats_job_id: str) -> bool:
+    """Remove your judgment on one posting. False when there was none to remove.
+
+    The undo behind `/review`'s ruling buttons. It touches `decisions` only; whether the
+    pin goes too is the caller's call, because only a human pin may.
+    """
+    cur = conn.execute(
+        "DELETE FROM decisions WHERE company=? AND ats_job_id=?", (company, ats_job_id)
+    )
+    return cur.rowcount > 0
 
 
 def all_decisions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -1821,6 +2012,15 @@ def application_count(conn: sqlite3.Connection) -> int:
 DEFERRAL_KINDS = ("skipped", "snoozed")
 
 
+# The VALUES-slot expression the three writers share for `description_hash`: the hash
+# the caller passed, or — when it passed None — the hash of the posting's description as
+# stored now. Takes three parameters: the hash, then company and ats_job_id.
+_CURRENT_DESCRIPTION_HASH = (
+    "COALESCE(?, description_hash((SELECT description FROM postings "
+    "WHERE company=? AND ats_job_id=?)))"
+)
+
+
 def record_judgment(
     conn: sqlite3.Connection,
     company: str,
@@ -1828,20 +2028,28 @@ def record_judgment(
     judgment,
     prose_hash: str,
     now: str,
+    description_hash: Optional[str] = None,
 ) -> None:
-    """Store what the model made of one posting. Score is filled in separately."""
+    """Store what the model made of one posting. Score is filled in separately.
+
+    `description_hash` is the hash of the text the model actually read — the `judge`
+    task passes it. None means "the description stored now", which is right for a
+    caller that has no other text in hand.
+    """
     conn.execute(
         """
         INSERT INTO rankings (company, ats_job_id, backend_fit, growth, entry_risk,
-                              why, prose_hash, judged_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                              why, prose_hash, judged_at, description_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, """ + _CURRENT_DESCRIPTION_HASH + """)
         ON CONFLICT(company, ats_job_id) DO UPDATE SET
             backend_fit=excluded.backend_fit, growth=excluded.growth,
             entry_risk=excluded.entry_risk, why=excluded.why,
-            prose_hash=excluded.prose_hash, judged_at=excluded.judged_at
+            prose_hash=excluded.prose_hash, judged_at=excluded.judged_at,
+            description_hash=excluded.description_hash
         """,
         (company, ats_job_id, judgment.backend_fit, judgment.growth,
-         judgment.entry_risk, judgment.why, prose_hash, now),
+         judgment.entry_risk, judgment.why, prose_hash, now,
+         description_hash, company, ats_job_id),
     )
 
 
@@ -1857,21 +2065,29 @@ def set_score(
 def matches_needing_judgment(
     conn: sqlite3.Connection, prose_hash: str, limit: Optional[int] = None
 ) -> list[sqlite3.Row]:
-    """Open matches with no judgment at the *current* prose_hash.
+    """Open matches with no judgment at the *current* prose_hash and description.
 
     A row judged under older prose is treated as unjudged rather than deleted: if the
     model is unreachable tonight, the stale judgment still orders the queue, which
     beats an empty list. Newest first, so a --limit run spends its budget on the
     postings most likely to still be open tomorrow.
+
+    The description is the other half of the question, compared per posting: a ranking
+    read off a feed's blurb is stale once the real prose arrives, and only that posting
+    is re-asked. The hash is computed in SQL by the function `connect` registers, so the
+    LIMIT applies after it. `description_hash` comes back on the row because it is half
+    the task's `unit_key`.
     """
     sql = """
-        SELECT p.company, p.ats_job_id, p.title, p.description
+        SELECT p.company, p.ats_job_id, p.title, p.description,
+               description_hash(p.description) AS description_hash
         FROM postings p
         JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id
         LEFT JOIN rankings r ON p.company=r.company AND p.ats_job_id=r.ats_job_id
         WHERE v.verdict='match' AND p.closed_at IS NULL
           AND p.description IS NOT NULL AND p.description != ''
-          AND (r.prose_hash IS NULL OR r.prose_hash != ?)
+          AND (r.prose_hash IS NULL OR r.prose_hash != ?
+               OR COALESCE(r.description_hash, '') != description_hash(p.description))
         ORDER BY COALESCE(p.posted_on, p.first_seen) DESC, p.company
     """
     if limit is not None:
@@ -1890,6 +2106,7 @@ def ranked_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         """
         SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
                p.posted_on, p.first_seen, p.origin, p.employer, p.dedupe_key,
+               p.description_source,
                r.backend_fit, r.growth, r.entry_risk, r.why, r.score, r.prose_hash,
                COALESCE(a.status, (
                  SELECT ak.status FROM applications ak
@@ -1997,6 +2214,25 @@ def clear_override(conn: sqlite3.Connection, company: str, ats_job_id: str) -> N
     )
 
 
+def llm_pins(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every override the model wrote, joined to its posting — `audit-pins`' input.
+
+    `decided_by = 'llm'` is in the SQL, not a filter applied afterwards: the audit is a
+    bulk remover, and a human ruling must not be in the list it chooses from at all.
+    The join is inner because a pin with no posting has nothing to re-derive from.
+    """
+    return conn.execute(
+        """
+        SELECT o.company, o.ats_job_id, o.decision, o.reason,
+               p.title, p.url, p.location, p.description, p.description_source
+        FROM overrides o
+        JOIN postings p ON p.company = o.company AND p.ats_job_id = o.ats_job_id
+        WHERE o.decided_by = 'llm'
+        ORDER BY o.company, o.ats_job_id
+        """
+    ).fetchall()
+
+
 def load_overrides(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Row]:
     """All overrides keyed by (company, ats_job_id).
 
@@ -2045,11 +2281,18 @@ def uncertain_for_resolution(
     `--limit 40` considering 40 and resolving 0.
 
     Within that, newest first, so the budget goes to the freshest readable postings.
+
+    Each row also carries `description_source` and `reading_hash` — the `source_hash` of
+    the posting's `level_readings` row, NULL when it has none. `level.pending()` filters
+    on both in Python: the hash is of the text the model is shown, which is built there.
     """
     sql = """
-        SELECT p.company, p.ats_job_id, p.title, p.location, p.description
+        SELECT p.company, p.ats_job_id, p.title, p.location, p.description,
+               p.description_source, r.source_hash AS reading_hash
         FROM postings p JOIN verdicts v
           ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        LEFT JOIN level_readings r
+          ON r.company=p.company AND r.ats_job_id=p.ats_job_id
         WHERE v.verdict='uncertain' AND p.closed_at IS NULL
         ORDER BY (p.description IS NULL OR p.description = ''),
                  p.first_seen DESC, p.company
@@ -2060,12 +2303,45 @@ def uncertain_for_resolution(
 
 
 def set_description(
-    conn: sqlite3.Connection, company: str, ats_job_id: str, description: str
+    conn: sqlite3.Connection, company: str, ats_job_id: str, description: str,
+    source: str,
 ) -> None:
+    """Store a posting's description and what kind of text it is.
+
+    `source` is required and has no default, so a new caller cannot write text without
+    saying where it came from — an unlabelled description is the ambiguity the
+    `description_source` column was added to end. One of DESCRIPTION_SOURCES.
+    """
+    if source is None:
+        raise ValueError("set_description needs a source")
+    _check_description_source(source)
     conn.execute(
-        "UPDATE postings SET description=? WHERE company=? AND ats_job_id=?",
-        (description, company, ats_job_id),
+        "UPDATE postings SET description=?, description_source=? "
+        "WHERE company=? AND ats_job_id=?",
+        (description, source, company, ats_job_id),
     )
+
+
+def feed_descriptions_to_upgrade(conn: sqlite3.Connection) -> list:
+    """Open postings whose stored text is a feed's metadata stub, in the two buckets
+    anything reads: `match` and `uncertain`.
+
+    The work list for `check`'s description upgrade, and the only reader of
+    `description_source='feed'` that leads to a write. Scoped to `feed` and nothing
+    else, so a row the upgrade already filled (`ats`) or a job board's own prose
+    (`prose`) is never asked about again. Matches first, then newest first: when the
+    budget runs out, the oldest uncertain rows are the ones that wait.
+    """
+    return list(conn.execute(
+        """
+        SELECT p.company, p.ats_job_id, p.url
+        FROM postings p JOIN verdicts v
+          ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        WHERE p.description_source='feed' AND p.closed_at IS NULL
+          AND v.verdict IN ('match', 'uncertain')
+        ORDER BY (v.verdict='match') DESC, p.first_seen DESC, p.company, p.ats_job_id
+        """
+    ))
 
 
 def set_posted_on(
@@ -2090,6 +2366,72 @@ def get_description(
         (company, ats_job_id),
     ).fetchone()
     return row["description"] if row else None
+
+
+# -- level readings ----------------------------------------------------------------
+def record_level_reading(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    band: str,
+    evidence: str,
+    source_hash: str,
+    now: str,
+) -> None:
+    """Write what `level` read off one posting, replacing any earlier reading.
+
+    One row per posting: a reading is about the text shown now, and an older one about
+    a description that has since changed answers a question nobody is asking any more.
+    """
+    conn.execute(
+        """
+        INSERT INTO level_readings (company, ats_job_id, band, evidence,
+                                    source_hash, read_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            band=excluded.band,
+            evidence=excluded.evidence,
+            source_hash=excluded.source_hash,
+            read_at=excluded.read_at
+        """,
+        (company, ats_job_id, band, evidence or "", source_hash, now),
+    )
+
+
+def level_reading(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    """The posting's `level_readings` row, or None if the model never read it."""
+    return conn.execute(
+        "SELECT company, ats_job_id, band, evidence, source_hash, read_at "
+        "FROM level_readings WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
+
+
+def uncertain_with_context(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Open UNCERTAIN postings, each with what `queue.lane` needs to place it.
+
+    One query: the posting's `origin`, `employer` and `first_seen`, and its
+    `level_readings` row where it has one (`reading_band`, `reading_evidence`,
+    `reading_hash`, `reading_at` — all NULL when the model never read it). A row is a
+    valid `reading` argument to `queue.lane` as it stands. The lane itself is derived by
+    the caller and never stored.
+    """
+    return list(conn.execute(
+        """
+        SELECT p.company, p.ats_job_id, p.title, p.location, p.url, p.origin,
+               p.employer, p.first_seen, p.description_source,
+               r.band AS reading_band, r.evidence AS reading_evidence,
+               r.source_hash AS reading_hash, r.read_at AS reading_at
+        FROM postings p JOIN verdicts v
+          ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        LEFT JOIN level_readings r
+          ON r.company=p.company AND r.ats_job_id=p.ats_job_id
+        WHERE v.verdict='uncertain' AND p.closed_at IS NULL
+        ORDER BY p.first_seen DESC, p.company, p.ats_job_id
+        """
+    ))
 
 
 # -- the task ledger ---------------------------------------------------------------
@@ -2727,6 +3069,10 @@ def matches_needing_tailoring(
     everything. `COALESCE` so rows written before the column existed re-ask once and then
     settle, rather than being invisible forever.
 
+    `description_hash` is the third comparison and the only per-posting one: a proposal
+    grounded in a description that has since changed is re-asked for that posting alone.
+    Rows from before the column are stamped on connect, so it never re-asks everything.
+
     Postings you have already applied to or skipped are excluded — a suggestion for a job
     that is behind you is work nobody will read. A snooze excludes only until its `until`
     day, the rule `rank.is_available` and `plans_needing_refresh` apply: nothing deletes a
@@ -2736,7 +3082,8 @@ def matches_needing_tailoring(
     the bug.
     """
     sql = """
-        SELECT p.company, p.ats_job_id, p.title, p.description, r.score
+        SELECT p.company, p.ats_job_id, p.title, p.description, r.score,
+               description_hash(p.description) AS description_hash
         FROM postings p
         JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id
         JOIN rankings r ON p.company=r.company AND p.ats_job_id=r.ats_job_id
@@ -2751,7 +3098,8 @@ def matches_needing_tailoring(
           AND (d.company IS NULL
                OR (d.kind='snoozed' AND d.until IS NOT NULL AND d.until <= ?))
           AND (s.resume_hash IS NULL OR s.resume_hash != ?
-               OR COALESCE(s.keywords_hash, '') != ?)
+               OR COALESCE(s.keywords_hash, '') != ?
+               OR COALESCE(s.description_hash, '') != description_hash(p.description))
         ORDER BY r.score DESC, p.company
     """
     if limit is not None:
@@ -2762,25 +3110,33 @@ def matches_needing_tailoring(
 def record_suggestions(
     conn: sqlite3.Connection, company: str, ats_job_id: str, edits: str,
     resume_hash: str, now: str, flagged: str = "[]", keywords_hash: str = "",
+    description_hash: Optional[str] = None,
 ) -> None:
     """Store what `tailor` proposes for one posting. The caller commits.
 
-    Re-proposing resets `resolution` to pending, and that is right rather than rude: the
-    row is keyed by resume hash, so a re-proposal only happens when the resume itself
-    changed, and a ruling you made about the old wording is not a ruling about the new.
+    Re-proposing resets `resolution` to pending, and that is right rather than rude: a
+    re-proposal only happens when the question changed — the resume, the keyword lists,
+    or this posting's description — and a ruling you made about an answer to the old
+    question is not a ruling about the new one.
+
+    `description_hash` is the hash of the text the model read; None means the
+    description stored now — see `record_judgment`.
     """
     conn.execute(
         """
         INSERT INTO resume_suggestions (company, ats_job_id, edits, resume_hash,
                                         resolution, proposed_at, resolved_at,
-                                        flagged, keywords_hash)
-        VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, ?)
+                                        flagged, keywords_hash, description_hash)
+        VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, ?, """
+        + _CURRENT_DESCRIPTION_HASH + """)
         ON CONFLICT(company, ats_job_id) DO UPDATE SET
             edits=excluded.edits, resume_hash=excluded.resume_hash,
             resolution='pending', proposed_at=excluded.proposed_at, resolved_at=NULL,
-            flagged=excluded.flagged, keywords_hash=excluded.keywords_hash
+            flagged=excluded.flagged, keywords_hash=excluded.keywords_hash,
+            description_hash=excluded.description_hash
         """,
-        (company, ats_job_id, edits, resume_hash, now, flagged, keywords_hash),
+        (company, ats_job_id, edits, resume_hash, now, flagged, keywords_hash,
+         description_hash, company, ats_job_id),
     )
 
 
@@ -2803,13 +3159,18 @@ def matches_needing_a_letter(
     `pending_count` rather than subtracting, so a task whose queue does not shrink after
     `apply` reports a backlog forever.
 
+    The description is compared separately and per posting, through `description_hash`:
+    a letter argued from a description that has since changed is re-written for that
+    posting alone, and the configuration key stays what it was, so nothing else moves.
+
     Postings you have already applied to or skipped are excluded. A letter for a job that
     is behind you is a page of prose nobody will read, and it is the most expensive
     per-unit answer in the queue. A snooze excludes only until its `until` day — see
     `matches_needing_tailoring` for why `today` is required.
     """
     sql = """
-        SELECT p.company, p.ats_job_id, p.title, p.description, r.score
+        SELECT p.company, p.ats_job_id, p.title, p.description, r.score,
+               description_hash(p.description) AS description_hash
         FROM postings p
         JOIN verdicts v ON p.company=v.company AND p.ats_job_id=v.ats_job_id
         JOIN rankings r ON p.company=r.company AND p.ats_job_id=r.ats_job_id
@@ -2823,7 +3184,8 @@ def matches_needing_a_letter(
           AND a.company IS NULL
           AND (d.company IS NULL
                OR (d.kind='snoozed' AND d.until IS NOT NULL AND d.until <= ?))
-          AND (l.unit_key IS NULL OR l.unit_key != ?)
+          AND (l.unit_key IS NULL OR l.unit_key != ?
+               OR COALESCE(l.description_hash, '') != description_hash(p.description))
         ORDER BY r.score DESC, p.company
     """
     if limit is not None:
@@ -2833,24 +3195,32 @@ def matches_needing_a_letter(
 
 def record_letter(
     conn: sqlite3.Connection, company: str, ats_job_id: str, paragraphs: str,
-    unit_key: str, now: str,
+    unit_key: str, now: str, description_hash: Optional[str] = None,
 ) -> None:
     """Store the letter written for one posting. The caller commits.
 
     A re-write replaces the old one outright. There is no ruling to preserve — unlike
     `record_suggestions`, which resets a `resolution` and has to justify it — because a
     letter has no states: the row is the current draft under the current template, and a
-    re-write only happens when the configuration that produced it moved.
+    re-write only happens when the configuration that produced it, or the description it
+    argued from, moved.
+
+    `unit_key` here is the configuration key, the one `matches_needing_a_letter`
+    compares whole; `description_hash` is the hash of the text the model read, None
+    meaning the description stored now — see `record_judgment`.
     """
     conn.execute(
         """
-        INSERT INTO cover_letters (company, ats_job_id, paragraphs, unit_key, written_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO cover_letters (company, ats_job_id, paragraphs, unit_key, written_at,
+                                   description_hash)
+        VALUES (?, ?, ?, ?, ?, """ + _CURRENT_DESCRIPTION_HASH + """)
         ON CONFLICT(company, ats_job_id) DO UPDATE SET
             paragraphs=excluded.paragraphs, unit_key=excluded.unit_key,
-            written_at=excluded.written_at
+            written_at=excluded.written_at,
+            description_hash=excluded.description_hash
         """,
-        (company, ats_job_id, paragraphs, unit_key, now),
+        (company, ats_job_id, paragraphs, unit_key, now,
+         description_hash, company, ats_job_id),
     )
 
 

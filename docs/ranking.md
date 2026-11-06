@@ -62,7 +62,9 @@ Two halves, and the split is the point:
 
 `Profile.prose_hash` covers only the prose. That is the whole mechanism: a judgment is
 an *answer to a question*, so changing the question invalidates it and changing how you
-weigh the answer does not.
+weigh the answer does not. The posting's description is the other half of the question,
+so `rankings.description_hash` records which text was judged and a changed description
+re-judges that posting alone — see `docs/tasks.md`.
 
 ```bash
 $EDITOR profile.yaml      # bump `growth: 25` to `growth: 40`
@@ -105,6 +107,26 @@ list — is what an LLM is genuinely better at in isolation, but it costs ~log�
 per posting, produces a path-dependent order that changes if you re-run it, and cannot
 self-correct when the model's comparisons turn out non-transitive. A profile change
 would force a full n log n re-sort instead of a free rescore.
+
+### Thin rows are capped, and the model is never told
+
+A row whose description is a job board's stub assembled from listing fields
+(`description_source='feed'`, Simplify's — see `rank.is_thin`) is judged on almost
+nothing: a title, a location, an employer. The model can still answer "strong" about
+that, and on the raw formula it would outrank a row it read real prose for.
+
+So `score_posting(..., thin=True)` caps `fit` and `growth` at `moderate` (0.6) **before
+weighting**. An ordinal already below the cap is unchanged, and every other term —
+recency, tier, location, entry risk — is untouched. The cap lives in Python, in the one
+place that composes a score; the judge prompt is not changed and the model never learns
+a row is thin, so its answer about the text it saw stays an honest one and the cap lifts
+on its own the night real prose replaces the stub. An unjudged thin row still scores
+`None`: thinness caps a judgment, it never invents one.
+
+The row says so wherever its role is shown — picks, the drawer, both postings tables —
+with a `thin` chip titled *"judged from the feed's listing fields, not the posting's
+text"*. `prepare` names thin picks and counts them neither toward `ready` nor against it,
+so a thin pick never makes the nightly run exit 2.
 
 ## Two absences, handled deliberately
 

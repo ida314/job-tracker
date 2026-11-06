@@ -1,0 +1,14 @@
+{
+  "name": "job-tracker-agentation-overlay",
+  "private": true,
+  "description": "Dev-only: bundles the Agentation toolbar for overlay.py. Never part of the app or its images.",
+  "scripts": {
+    "build": "esbuild entry.jsx --bundle --minify --format=iife --jsx=automatic --define:process.env.NODE_ENV=\\\"production\\\" --outfile=dist/overlay.js"
+  },
+  "devDependencies": {
+    "agentation": "3.1.2",
+    "esbuild": "0.25.12",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  }
+}

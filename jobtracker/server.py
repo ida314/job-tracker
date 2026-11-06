@@ -518,6 +518,36 @@ def render_job_boards(conn: sqlite3.Connection, companies, today: str,
     return "\n".join(p)
 
 
+def render_review(conn: sqlite3.Connection, criteria, companies, coverage_by_origin,
+                  today: str) -> str:
+    """The review list: uncertain rows worth a weekly skim, at `/review`. Pure read.
+
+    Serve-only — the static dashboard has no `/review`, so its Today tab shows the count
+    with no link. The body is `dashboard.review_page_parts`, and the Today count is the
+    length of the same `queue.review` split, so the number and the list cannot disagree.
+
+    It carries `dashboard._JS` for the filter block its search box needs, and
+    `dashboard._REVIEW_JS` for the rulings column — both rendered by `dashboard`, so both
+    handlers come from there, in the one `<script>` this page emits.
+    """
+    p = [
+        "<!doctype html><meta charset=utf-8>",
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        "<title>Review</title>",
+        f"<style>{dashboard_mod._CSS}</style>",
+        "<body><div class=wrap>",
+    ]
+    body = dashboard_mod.review_page_parts(conn, companies, criteria, coverage_by_origin,
+                                           today, interactive=True)
+    # The heading first, then the nav under it — the order every other page here uses.
+    p.append(body[0])
+    p.append(_NAV)
+    p.extend(body[1:])
+    p.append("</div>")
+    p.append(f"<script>{dashboard_mod._JS}{dashboard_mod._REVIEW_JS}</script>")
+    return "\n".join(p)
+
+
 def render_applications(conn: sqlite3.Connection, companies, today: str,
                         sort: str = "") -> str:
     """Everything you applied to, and every control for changing it. Pure read.
@@ -596,63 +626,66 @@ _POSTING_CSS = """
 .pmeta{margin:.1rem 0 .9rem;display:flex;flex-wrap:wrap;gap:.4rem .55rem;align-items:center}
 .pmeta .quiet{color:var(--muted);font-style:italic}
 .applybar{margin:.2rem 0 1.2rem}
-.applybar .apply{display:inline-block;padding:.45rem .9rem;border-radius:7px;
-        border:1px solid var(--line);background:var(--card);color:inherit;
+.applybar .apply{display:inline-block;padding:.45rem .9rem;border-radius:var(--radius-control);
+        border:1px solid var(--rule);background:var(--surface);color:inherit;
         text-decoration:none;font-weight:600}
-.pblock{border:1px solid var(--line);border-radius:10px;padding:.85rem 1rem;
-        margin:.9rem 0;background:var(--card)}
+.pblock{border:1px solid var(--border);border-radius:var(--radius-card);padding:.85rem 1rem;
+        margin:.9rem 0;background:var(--surface)}
 .pblock h2{margin:0 0 .6rem;font-size:.95rem}
 .pblock .terms,.pblock .why{font-size:.85rem;color:var(--muted);margin:.15rem 0}
 .jd{white-space:pre-wrap;font-size:.83rem;line-height:1.5;max-height:26rem;
-        overflow-y:auto;margin-top:.5rem;color:var(--fg)}
+        overflow-y:auto;overscroll-behavior:contain;margin-top:.5rem;color:var(--ink)}
 .doc,.sdoc{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;
-        padding:.4rem 0;border-top:1px solid var(--line)}
+        padding:.4rem 0;border-top:1px solid var(--grid)}
 .doc:first-of-type,.sdoc:first-of-type{border-top:0}
 .dlabel{min-width:6.5rem;font-weight:600;font-size:.85rem}
 .dname{font-family:ui-monospace,monospace;font-size:.8rem}
 .dkind{font-size:.75rem;color:var(--muted)}
 .dnone{font-size:.8rem;color:var(--muted);font-style:italic}
-.ddl{text-decoration:none;border:1px solid var(--line);border-radius:5px;
+.ddl{text-decoration:none;border:1px solid var(--rule);border-radius:var(--radius-control);
         padding:.05rem .4rem;color:inherit}
+@media (hover:hover){.applybar .apply:hover,.ddl:hover{text-decoration:none;color:var(--ink);border-color:var(--ink-2)}}
 .pfile{font-size:.75rem;max-width:13rem}
 .q{display:grid;grid-template-columns:1fr;gap:.3rem;padding:.55rem 0;
-        border-top:1px solid var(--line)}
+        border-top:1px solid var(--grid)}
 .q:first-of-type{border-top:0}
 .q.seeded{opacity:.85}
-.qq,.qa{font:inherit;font-size:.85rem;padding:.35rem;border:1px solid var(--line);
-        border-radius:6px;background:var(--bg);color:var(--fg);width:100%;
+.qq,.qa{font:inherit;font-size:.85rem;padding:.35rem;border:1px solid var(--muted);
+        border-radius:var(--radius-control);background:var(--page);color:var(--ink);width:100%;
         box-sizing:border-box}
 .qa{resize:vertical}
 .qacts{display:flex;gap:.4rem;align-items:center}
 .qseed{font-size:.72rem;color:var(--muted);font-style:italic;margin-right:auto}
-.sub{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--line);border-radius:8px}
+.subrec{margin:.7rem 0;padding:.6rem .75rem;border:1px dashed var(--rule);border-radius:var(--radius-control)}
 .shead{font-size:.85rem;margin-bottom:.35rem}
 .sqa{display:grid;grid-template-columns:1fr;gap:.15rem;margin-top:.4rem}
 .sq{font-size:.8rem;font-weight:600}
 .sa{font-size:.8rem;color:var(--muted);white-space:pre-wrap;margin-bottom:.4rem}
-.qsec .danger,.aprow .danger{color:var(--warn)}
+.qsec .danger,.aprow .danger{color:var(--critical)}
 @media (max-width:620px){.dlabel{min-width:auto}}
 """
 
 _COMPANIES_CSS = """
-.cocard{border:1px solid var(--line);border-radius:10px;padding:1rem;margin:1rem 0;
-        background:var(--card)}
+.cocard{border:1px solid var(--border);border-radius:var(--radius-card);padding:1rem;margin:1rem 0;
+        background:var(--surface)}
 .cocard .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
         gap:.6rem .9rem;margin-top:.7rem}
 .cocard label{display:flex;flex-direction:column;gap:.25rem;font-size:.8rem;
         color:var(--muted)}
 .cocard input,.cocard select,.cocard textarea{font:inherit;font-size:.85rem;padding:.35rem;
-        border:1px solid var(--line);border-radius:6px;background:var(--bg);
-        color:var(--fg)}
+        border:1px solid var(--muted);border-radius:var(--radius-control);background:var(--page);
+        color:var(--ink)}
 .cocard textarea{min-height:3.4rem;resize:vertical}
 .cocard .wide{grid-column:1/-1}
+.cocard label.cocheck{flex-direction:row;align-items:center;gap:.45rem}
+.cocard label.cocheck input{padding:0;margin:0}
 .hint{font-size:.75rem;color:var(--muted);margin:.15rem 0 0}
-.coresult{margin-top:.9rem;padding:.7rem;border-radius:8px;border:1px solid var(--line)}
+.coresult{margin-top:.9rem;padding:.7rem;border-radius:var(--radius-control);border:1px solid var(--border)}
 .coresult pre{overflow-x:auto;font-size:.75rem;margin:.5rem 0 0;white-space:pre;
         max-height:22rem}
-.coresult.bad{border-color:var(--warn)}
-.cotable{width:100%;border-collapse:collapse;font-size:.85rem}
-.cotable td,.cotable th{padding:.3rem .5rem;border-bottom:1px solid var(--line);
+.coresult.bad{border-color:var(--critical)}
+.cotable{width:100%;font-size:.85rem}
+.cotable td,.cotable th{padding:.3rem .5rem;border-bottom:1px solid var(--grid);
         text-align:left}
 .cotable .muted{color:var(--muted)}
 """
@@ -872,13 +905,13 @@ def _posting_documents(conn, company: str, ats_job_id: str, answers) -> list:
     if letter_kind == "override":
         out.append(
             f'<a class="ddl" href="/api/document?company={qc}&amp;job={qj}&amp;kind=letter" '
-            'download>&#9993;</a>'
+            f'download>{dashboard_mod.LETTER_GLYPH}</a>'
         )
     elif letter_kind == "generated":
         # The existing route, which serves what `coverletter build` compiled.
         out.append(
             f'<a class="ddl" href="/api/coverletter?company={qc}&amp;job={qj}" '
-            'download>&#9993;</a>'
+            f'download>{dashboard_mod.LETTER_GLYPH}</a>'
         )
     out.append(
         '<input type="file" class="pfile" data-kind="letter" accept=".pdf,.docx" '
@@ -1067,14 +1100,14 @@ def _submitted_block(conn, company: str, ats_job_id: str, app) -> list:
     c = html.escape(company, quote=True)
     j = html.escape(ats_job_id, quote=True)
     row = store.get_submission(conn, company, ats_job_id)
-    out = ['<div class="sub">']
+    out = ['<div class="subrec">']
     if row is None:
         out.append('<div class="dnone">Nothing was recorded about what you sent.</div>')
     else:
         day = apps_mod.day_of(row["submitted_at"]) or ""
         out.append(f'<div class="shead">Submitted <strong>{html.escape(day)}</strong></div>')
         for kind, label, glyph in (("resume", "Resume", "&darr;"),
-                                   ("letter", "Cover letter", "&#9993;")):
+                                   ("letter", "Cover letter", dashboard_mod.LETTER_GLYPH)):
             name, word = row[kind], row[f"{kind}_kind"]
             if not name:
                 out.append(f'<div class="sdoc"><span class="dlabel">{label}</span>'
@@ -1178,6 +1211,13 @@ def _add_company_card() -> list:
         "<label>Tier"
         + _select("newco", "tier", ("", "1", "2", "3", "4", "5", "6", "7"), "")
         + "</label>"
+    )
+    # A checkbox whose value is the one word it writes; the script sends `value` when it
+    # is ticked and "" when not, so an unticked box omits the key from the entry.
+    p.append(
+        '<label class="wide cocheck"><input class=newco data-key="board_scope" type=checkbox '
+        'value="mixed"> Board serves many non-field roles (folds them in Review)'
+        "</label>"
     )
     p.append(
         '<label class=wide>Notes<textarea class=newco data-key="notes" '
@@ -2424,8 +2464,8 @@ def _downloads_card(downloads_path: Optional[Path]) -> list:
     p = ["<h2 id=downloads>Where saved documents go</h2>"]
     p.append(
         "<p class=note>The four documents this repo compiles for a posting. Saving one "
-        "is the <code>&darr;</code>, <code>&#9993;</code>, <code>tex</code> and "
-        "<code>tex&#9993;</code> controls beside a posting; this is where each lands. "
+        "is the <code>&darr;</code>, <code>" + dashboard_mod.LETTER_GLYPH + "</code>, <code>tex</code> and "
+        "<code>tex" + dashboard_mod.LETTER_GLYPH + "</code> controls beside a posting; this is where each lands. "
         f"Written to <code>{html.escape(str(path))}</code>.</p>"
     )
     if error:
@@ -2896,6 +2936,15 @@ class TuningServer(HTTPServer):
         self.downloads_path = downloads_path or config.DOWNLOADS_YAML
 
 
+def _connect(db_path) -> sqlite3.Connection:
+    """`store.connect`, told what kind of description each job board writes — the
+    same call `cli._connect` makes, for the same reason: `store` cannot import the
+    plugins, so the backfill's mapping is handed in by whoever opens the database."""
+    from . import plugins as plugins_mod
+
+    return store.connect(db_path, description_sources=plugins_mod.description_sources())
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "jobtracker"
 
@@ -2904,7 +2953,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- plumbing ------------------------------------------------------------------
     def _conn(self) -> sqlite3.Connection:
-        return store.connect(self.server.db_path)
+        return _connect(self.server.db_path)
 
     def _send(self, body: str, status: int = 200,
               ctype: str = "text/html; charset=utf-8") -> None:
@@ -2995,6 +3044,17 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     page = render_job_boards(conn, self._companies(), _today(),
                                              load_criteria(self.server.criteria_path))
+                finally:
+                    conn.close()
+                self._send(page)
+            elif path == "/review":
+                from . import plugins as plugins_mod
+
+                conn = self._conn()
+                try:
+                    page = render_review(conn, load_criteria(self.server.criteria_path),
+                                         self._companies(),
+                                         plugins_mod.coverage_by_origin(), _today())
                 finally:
                     conn.close()
                 self._send(page)
@@ -3092,6 +3152,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/decision":
                 self._send_json(self._api_decision(payload))
+            elif path == "/api/decision/clear":
+                self._send_json(self._api_decision_clear(payload))
             elif path == "/api/disposition":
                 self._send_json(self._api_disposition(payload))
             elif path == "/api/rule":
@@ -3296,6 +3358,55 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             conn.close()
         return {"ok": True, "decisions": n}
+
+    def _api_decision_clear(self, payload: dict) -> dict:
+        """Undo a ruling: `/review`'s undo, the inverse of `_api_decision`.
+
+        Removes the posting's `decisions` row, and its pin **only if the pin is yours** —
+        a model pin is not a ruling this undoes, and `set_override`'s rule that a machine
+        never displaces a human runs the other way here: an undo of a human ruling never
+        removes a machine one. The verdict is then re-derived the way `check` would,
+        `match()` with whatever pin is left applied on top.
+
+        Nothing to clear is a refusal, with both tables untouched.
+        """
+        company = str(payload.get("company") or "")
+        job_id = str(payload.get("ats_job_id") or "")
+        # Before anything is touched: a criteria file that does not parse must refuse the
+        # undo, not leave a decision deleted with its verdict still the ruling's.
+        try:
+            criteria = load_criteria(self.server.criteria_path)
+        except Exception as exc:  # noqa: BLE001 - reported, never stored
+            return {"ok": False, "error": f"criteria.yaml did not load: {exc}"}
+
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT title, url, location, posted_at, posted_on FROM postings "
+                "WHERE company=? AND ats_job_id=?",
+                (company, job_id),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "error": "no such posting"}
+            if not store.clear_decision(conn, company, job_id):
+                return {"ok": False, "error": "there is no ruling on this posting to undo"}
+            pin = conn.execute(
+                "SELECT decided_by FROM overrides WHERE company=? AND ats_job_id=?",
+                (company, job_id),
+            ).fetchone()
+            if pin is not None and pin["decided_by"] == "human":
+                store.clear_override(conn, company, job_id)
+            posting = Posting(company, job_id, row["title"], row["url"],
+                              row["location"] or "", posted_at=row["posted_at"],
+                              posted_on=row["posted_on"])
+            verdict = tuning.apply_override(match(posting, criteria),
+                                            store.load_overrides(conn))
+            store.record_verdict(conn, verdict, datetime.now().isoformat(timespec="seconds"))
+            conn.commit()
+            n = store.decision_count(conn)
+        finally:
+            conn.close()
+        return {"ok": True, "decisions": n, "verdict": verdict.decision.value}
 
     def _api_disposition(self, payload: dict) -> dict:
         """Act on one of today's picks: applied, skipped, or snoozed.
@@ -4645,6 +4756,7 @@ class Handler(BaseHTTPRequestHandler):
             careers_page=field("careers_page"),
             board_url=field("board_url"),
             notes=field("notes"),
+            board_scope=field("board_scope") or None,
         )
 
         path = self._companies_path()
@@ -4855,7 +4967,7 @@ class Handler(BaseHTTPRequestHandler):
         session = live.start(company_name, job_id, row["title"], url)
 
         def _run() -> None:
-            worker_conn = store.connect(self.server.db_path)
+            worker_conn = _connect(self.server.db_path)
             try:
                 browser_mod.fill_application(
                     worker_conn,
@@ -5741,6 +5853,7 @@ def _optional_day(payload: dict, key: str) -> tuple[Optional[str], Optional[str]
 
 _NAV = (
     '<nav class=nav><a href="/">Dashboard</a> · <a href="/jobboards">Job boards</a>'
+    ' · <a href="/review">Review</a>'
     ' · <a href="/applications">Applications</a>'
     ' · <a href="/companies">Companies</a> · <a href="/tuning">Tuning</a>'
     ' · <a href="/settings">Settings</a></nav>'
@@ -5750,26 +5863,26 @@ _SETTINGS_CSS = """
 .gap{padding:.7rem .9rem;margin:.5rem 0;border-left:3px solid #d97706;background:rgba(217,119,6,.07)}
 .gap .ask{font-weight:600;margin-bottom:.2rem}
 .gap .row{display:flex;gap:.5rem;margin-top:.5rem}
-.gap .answer{flex:1;padding:.3rem .5rem;border-radius:5px;
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
-.card{padding:.8rem .9rem;margin:.5rem 0;border:1px solid rgba(127,127,127,.35);border-radius:6px}
+.gap .answer{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit}
+.card{padding:.8rem .9rem;margin:.5rem 0;border:1px solid rgba(127,127,127,.35);border-radius:var(--radius-card)}
 .card .row{display:flex;gap:.5rem;margin-top:.8rem;align-items:center}
 .field{display:flex;align-items:center;gap:.6rem;margin:.25rem 0}
 .field>span{flex:0 0 11rem;font-size:.9rem;opacity:.85}
-.field input{flex:1;padding:.3rem .5rem;border-radius:5px;
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
+.field input{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit}
 .req{color:#d97706;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
 
 .flag{padding:.75rem .9rem;margin:.5rem 0;border:1px solid rgba(220,38,38,.4);
-border-left:4px solid #dc2626;border-radius:6px;background:rgba(220,38,38,.05)}
+border-left:4px solid #dc2626;border-radius:var(--radius-card);background:rgba(220,38,38,.05)}
 .flag .term{font-weight:700;font-size:1.05rem;letter-spacing:.01em}
 .flag .why{margin-top:.35rem;font-size:.9rem}
 .flag .quote{margin-top:.35rem;font-size:.88rem;opacity:.85}
 .flag .row{display:flex;gap:.5rem;margin-top:.6rem;flex-wrap:wrap}
-.flag button{padding:.35rem .7rem;border-radius:5px;border:1px solid currentColor;
-background:transparent;color:inherit;font:inherit;font-size:.85rem;cursor:pointer}
+.flag button{padding:.35rem .7rem;border-radius:var(--radius-control);font:inherit;font-size:.85rem}
 .flag button.kw-allow{border-color:#16a34a;color:#16a34a}
 .flag button.kw-deny{border-color:#dc2626;color:#dc2626}
+@media (hover:hover){.flag button.kw-allow:not(:disabled):hover,.flag button.kw-deny:not(:disabled):hover{background:color-mix(in srgb,currentColor 10%,transparent)}}
 
 /* The plugin switchboard. The card's own border carries the state, so the page can be
    read at a glance without parsing every pill — an enabled feed and a disabled one
@@ -5779,8 +5892,7 @@ background:transparent;color:inherit;font:inherit;font-size:.85rem;cursor:pointe
 .card.plugin.disabled{border-left:4px solid rgba(127,127,127,.5);opacity:.85}
 .card.plugin .row{margin-top:0;flex-wrap:wrap}
 .card.plugin button{align-self:flex-start;margin-top:.5rem;padding:.3rem .7rem;
-border-radius:5px;border:1px solid currentColor;background:transparent;color:inherit;
-font:inherit;font-size:.85rem;cursor:pointer}
+border-radius:var(--radius-control);font:inherit;font-size:.85rem}
 .pill{font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;
 padding:.1rem .45rem;border-radius:999px;border:1px solid currentColor}
 .pill.ok{color:#16a34a}
@@ -5796,9 +5908,9 @@ border-radius:999px;border:1px solid rgba(127,127,127,.5);font-size:.85rem}
 .chip.no{border-color:rgba(220,38,38,.55);opacity:.85}
 .chip button{appearance:none;background:transparent;border:0;color:inherit;font:inherit;
 cursor:pointer;opacity:.5;padding:0 .35rem;line-height:1}
-.chip button:hover{opacity:1}
-.kwbox{flex:1;padding:.3rem .5rem;border-radius:5px;
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
+@media (hover:hover){.chip button:hover{opacity:1}}
+.kwbox{flex:1;padding:.3rem .5rem;border-radius:var(--radius-control);
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit}
 """
 
 # Only the editable half. Everything that decides how an application *looks* — the
@@ -5806,20 +5918,20 @@ border:1px solid currentColor;background:transparent;color:inherit;font:inherit}
 # this page also loads, so the read-only tab and this page cannot drift apart.
 _APPS_CSS = """
 .addapp{padding:.9rem 1rem;margin:.6rem 0 1.4rem;border:1px solid rgba(127,127,127,.35);
-border-radius:8px}
+border-radius:var(--radius-card)}
 .addapp .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
 gap:.6rem;margin-top:.7rem}
 .addapp label{display:flex;flex-direction:column;gap:.25rem;font-size:.82rem;opacity:.85}
 .addapp input,.addapp select{padding:.35rem .5rem;
-border-radius:5px;border:1px solid currentColor;background:transparent;color:inherit;
+border-radius:var(--radius-control);border:1px solid var(--muted);background:transparent;color:inherit;
 font:inherit;font-size:.88rem;min-width:0}
 /* One compact row under each application, at the size of the text around it. Labels sit
    beside their field rather than above it, which is most of the height saved. */
 .appform{display:flex;flex-wrap:wrap;gap:.3rem .9rem;margin-top:.35rem;align-items:center;
 font-size:12px}
 .appform label{display:flex;align-items:center;gap:.3rem;color:var(--muted)}
-.appform input,.appform select{padding:1px 5px;height:22px;border-radius:4px;
-border:1px solid var(--rule);background:transparent;color:var(--ink);font:inherit;
+.appform input,.appform select{padding:1px 5px;height:22px;border-radius:var(--radius-control);
+border:1px solid var(--muted);background:transparent;color:var(--ink);font:inherit;
 font-size:12px;min-width:0}
 .appform .appnote{flex:0 1 13rem;width:13rem}
 .appform .appnextnote{flex:0 1 8rem;width:8rem}
@@ -5829,7 +5941,8 @@ max-width:100%}
 line-height:20px;white-space:nowrap}
 .appform .danger{margin-left:auto}
 .app .danger{border-color:rgba(220,53,69,.6);opacity:.75}
-.app .danger:hover{opacity:1;color:#dc3545}
+@media (hover:hover){.app .danger:not(:disabled):hover{opacity:1;color:#dc3545}}
+.app .danger:disabled{opacity:.5}
 /* A proposal from the mailbox. Marked as unwritten — the border is the reminder that
    nothing on this card has touched your application history yet. */
 .app.prop{border-left:3px solid var(--accent)}
@@ -5848,13 +5961,13 @@ gap:1.2rem;align-items:start}
 .phead{display:flex;gap:.6rem;align-items:center;font-weight:600;
 margin:.2rem 0 .6rem;flex-wrap:wrap}
 .phead .ago{font-weight:400;font-size:.8rem;opacity:.7;margin-left:auto}
-#preview{border:1px solid rgba(127,127,127,.35);border-radius:6px;
+#preview{outline:1px solid var(--image-outline);outline-offset:-1px;border-radius:var(--radius-control);
 background:rgba(127,127,127,.08);display:block;min-height:120px;margin:0 auto}
 /* Two ways to look at a page several thousand pixels tall. `fit` scales all of it into
    view — every field at once, the state of the form at a glance. `actual` is full width
    and legible, and it is the *box* that scrolls, never the document, so the field list
    beside it does not move while you look. */
-#shotbox{max-height:78vh;overflow:auto}
+#shotbox{max-height:78vh;overflow:auto;overscroll-behavior:contain}
 #preview.fit{width:auto;max-width:100%;max-height:78vh;object-fit:contain;
 cursor:zoom-in}
 #preview.actual{width:100%;height:auto;cursor:zoom-out}
@@ -5868,28 +5981,28 @@ cursor:zoom-in}
 .phase .pill{padding:.1rem .5rem;border-radius:99px;background:rgba(127,127,127,.18);
 font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}
 .lf{padding:.55rem .7rem;margin:.45rem 0;border:1px solid rgba(127,127,127,.3);
-border-radius:6px}
+border-radius:var(--radius-card)}
 .lf .lab{font-size:.86rem;margin-bottom:.35rem;display:flex;gap:.45rem;
 align-items:baseline;flex-wrap:wrap}
-.lf .lv,.lf input[type=file]{width:100%;padding:.35rem .5rem;border-radius:5px;
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+.lf .lv,.lf input[type=file]{width:100%;padding:.35rem .5rem;border-radius:var(--radius-control);
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit;
 font-size:.9rem}
 .lf textarea.lv{resize:vertical}
 .lf .cbx{display:flex;gap:.4rem;align-items:center;font-size:.9rem}
 .lf .cbx .lv{width:auto}
 .lf .bank{display:flex;gap:.4rem;align-items:center;margin-top:.45rem;font-size:.78rem;
 opacity:.85;flex-wrap:wrap}
-.lf .bank .bankkey{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:4px;
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+.lf .bank .bankkey{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:var(--radius-control);
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit;
 font-size:.78rem}
 .lf .bank input[type=checkbox]{width:auto}
-.bank .bankval{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:4px;
-border:1px solid currentColor;background:transparent;color:inherit;font:inherit;
+.bank .bankval{flex:1;min-width:8rem;padding:.15rem .35rem;border-radius:var(--radius-control);
+border:1px solid var(--muted);background:transparent;color:inherit;font:inherit;
 font-size:.78rem}
 /* One question, several boxes. The block is what makes "How did you hear about us?"
    read as a question with nine answers rather than as nine questions. */
 .lfg{padding:.55rem .7rem;margin:.45rem 0;border:1px solid rgba(127,127,127,.3);
-border-radius:6px}
+border-radius:var(--radius-card)}
 .lfg .lgh{font-size:.86rem;margin-bottom:.35rem;display:flex;gap:.45rem;
 align-items:baseline;flex-wrap:wrap;font-weight:600}
 .lfg .bank{display:flex;gap:.4rem;align-items:center;margin:.3rem 0 .5rem;
@@ -5921,9 +6034,9 @@ padding:.05rem .4rem;border-radius:99px}
 .viewwin{font-weight:600}
 /* A link that acts as a button. `button{}` above styles the element, not the role, so
    without this "Open application" renders as bare underlined text in a row of buttons. */
-a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
-background:transparent;color:inherit;font:inherit;font-size:.9rem;text-decoration:none}
-a.btn:hover{opacity:.7}
+a.btn{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid var(--rule);
+background:var(--page);color:var(--ink-2);font:inherit;font-size:.9rem;text-decoration:none}
+@media (hover:hover){a.btn:hover{color:var(--ink);border-color:var(--ink-2)}}
 #resetmsg{margin-left:0}
 .phead .note{font-weight:400;font-size:.8rem}
 
@@ -5940,7 +6053,7 @@ color:#dc2626;font-weight:700;margin-bottom:.2rem}
 padding-top:1rem}
 .pane.tailor h2{font-size:1rem;margin:0 0 .6rem}
 .pane.tailor h2 .note{font-weight:400;font-size:.8rem;opacity:.75;margin-left:.4rem}
-.sg{border:1px solid rgba(127,127,127,.25);border-radius:6px;padding:.5rem .6rem;
+.sg{border:1px solid rgba(127,127,127,.25);border-radius:var(--radius-card);padding:.5rem .6rem;
 margin-bottom:.5rem}
 .sg-sec{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;opacity:.6}
 .sg-was,.sg-now{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -5964,8 +6077,7 @@ _EXTRA_CSS = """
    rather than a tint, so the two are distinguishable at a glance on the same page. */
 .flagbanner{border-left:4px solid #dc2626;background:rgba(220,38,38,.1);font-weight:600}
 
-.nav{margin:0 0 1rem;font-size:.9rem}
-.banner{padding:.6rem .8rem;border-radius:6px;font-weight:600}
+.banner{padding:.6rem .8rem;border-radius:var(--radius-card);font-weight:600}
 .banner.ok{background:#0f5132;color:#d1e7dd}
 .banner.bad{background:#58151c;color:#f8d7da}
 /* Switched off is neither of the two above. Green would read as "it worked" and red as
@@ -5985,14 +6097,15 @@ font-size:.82rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .rules.reject .chip{border-color:#dc3545}
 .rules.accept .chip{border-color:#0f5132}
 .addbox{display:flex;gap:.4rem;align-items:center;flex-wrap:wrap}
-.addbox input{padding:.25rem .5rem;border-radius:5px;border:1px solid var(--rule);
+.addbox input{padding:.25rem .5rem;border-radius:var(--radius-control);border:1px solid var(--muted);
 background:transparent;color:inherit;font:inherit;min-width:16rem}
-select{padding:.2rem .4rem;border-radius:5px;border:1px solid currentColor;
+select{padding:.2rem .4rem;border-radius:var(--radius-control);border:1px solid var(--muted);
 background:transparent;color:inherit;font:inherit}
 .note{opacity:.75;font-size:.9rem}
-button{cursor:pointer;padding:.25rem .6rem;border-radius:5px;border:1px solid currentColor;
-background:transparent;color:inherit;font:inherit}
-button:hover{opacity:.7}
+button{cursor:pointer;padding:.25rem .6rem;border-radius:var(--radius-control);border:1px solid var(--rule);
+background:var(--page);color:var(--ink-2);font:inherit}
+@media (hover:hover){button:not(:disabled):hover{color:var(--ink);border-color:var(--ink-2)}}
+button:disabled{opacity:.5;cursor:default}
 """
 
 # Every control on the apply page has its handler here, in the file that renders it.
@@ -6717,7 +6830,10 @@ document.addEventListener('click', async (e) => {
   const cosave = e.target.closest('button.co-save, button.co-force');
   if (cosave) {
     const body = {force: cosave.classList.contains('co-force')};
-    document.querySelectorAll('.newco').forEach(el => { body[el.dataset.key] = el.value; });
+    // A checkbox's `value` is constant whether or not it is ticked; read `checked`.
+    document.querySelectorAll('.newco').forEach(el => {
+      body[el.dataset.key] = el.type === 'checkbox' ? (el.checked ? el.value : '') : el.value;
+    });
     const out = document.getElementById('coout');
     const force = document.querySelector('button.co-force');
     cosave.disabled = true;

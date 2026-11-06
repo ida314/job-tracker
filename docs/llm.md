@@ -25,6 +25,7 @@ UNCERTAIN + engineering-looking title
              ├─ entry     → re-apply the RULES' engineering gate → match or reject
              ├─ not_entry → reject
              └─ unclear   → stays uncertain
+        every grounded answer, unclear included → a row in level_readings
 ```
 
 An `entry` reading does not by itself produce a match. It still has to pass the same
@@ -38,7 +39,65 @@ distinguishable from rules verdicts, and the reason carries the evidence:
 ```
 Asana    Backend Software Engineer     reject   llm:not_entry:3+ years
 Discord  Software Engineer, Notifications  reject   llm:not_entry:Senior
+Acme     Backend Engineer              match    llm:entry+role:backend:recent graduates
 ```
+
+An `entry` reason carried no quote before 2026-11-06 (`llm:entry+eng:generic`), so a pin
+written then cannot be audited against the text it claims to have read; since then it
+carries one, as `not_entry` always did. The older rows are kept as they are; every
+surface prints the reason string and none parses it, so both forms render.
+
+## The quote must be in what the model saw
+
+**A usable reading (`entry` or `not_entry`) whose evidence does not occur in the text
+the model was shown is no answer**, exactly like malformed JSON, and the posting stays
+`uncertain`. The quote is the only part of the reply that can be checked; without the
+check an invented phrase would pin a match or a reject that nothing on the page
+supports.
+
+- **"Shown" means one string.** `shown_text(title, description)` builds the prompt's
+  user turn, and `run()` passes that same string to `parse_verdict(text, shown)`, so the
+  prompt and the check cannot drift apart. The title is part of it — `Graduate` quoted
+  off *"Software Engineer, Graduate"* is grounded — and the description is truncated at
+  `MAX_DESCRIPTION_CHARS` there too, so a phrase past the cut the model never read does
+  not ground.
+- **Whitespace-normalized and case-insensitive**, with `letter.flat`, the normalizer
+  `tailor`, `inbox` and `coverletter` already use. The stored evidence is the flattened
+  quote.
+- **Empty evidence on a usable level is ungrounded.** `unclear` with empty evidence is
+  still a valid reading; it is recorded and moves no verdict.
+
+## Every reading is recorded, `unclear` included
+
+`unclear` is an answer: the model read the page, and the page does not say. It used to
+come back to the runner as *no answer*, so each such posting spent three model calls and
+was then set aside as blocked — counted beside a dead router, with nothing recording
+that it had been read at all. Now every grounded answer writes one row to
+`level_readings`:
+
+```
+company · ats_job_id · band (entry | not_entry | unclear) · evidence · source_hash · read_at
+```
+
+- **`unclear` is `ok`.** The unit's failure count resets and it leaves the queue. This is
+  the rule `inbox` has always had for "this message is not about an application".
+- **Only junk is still a failure.** Malformed JSON, prose, an off-enum level, an
+  ungrounded quote: `run` returns None and the unit counts against its three lives, with
+  no reading written.
+- **The reading is written before the override**, so a posting you have ruled on keeps
+  your ruling *and* records what the model read. A reading is not an override and moves
+  no verdict by itself; `entry` and `not_entry` pin exactly as they did.
+- **`source_hash` is `sha256[:16]` of `shown_text`** — title plus the truncated
+  description, the string the model saw. `pending()` skips a posting whose reading
+  matches what it would show now, so a description upgrade re-asks that posting and
+  nothing else. `store.level_reading(conn, company, ats_job_id)` reads one back.
+
+## Feed metadata is not a description
+
+A job board that has no prose assembles a description out of its fields — employer,
+location, a date — and stores it with `description_source = 'feed'`. There is no level
+to read in that, so `level` does not queue it. It stays `uncertain`, visible, until a
+description with prose replaces it.
 
 ## Failure is absence, never a wrong answer
 

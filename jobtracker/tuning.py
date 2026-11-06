@@ -253,3 +253,135 @@ def suggest_rules(
     out = [s for s in out if " " in s.phrase or s.phrase not in covered]
 
     return out[:limit]
+
+
+# -- replay over the whole posting corpus ------------------------------------------
+# The transitions that block. A posting the old rules matched and the new rules no
+# longer match is the one change `eval` exists to catch; with no `decisions` to replay,
+# "the rules used to say match" is the nearest thing to a judgment there is. Moving an
+# `uncertain` row is not on this list — `uncertain` is not a ruling (see `Outcome`).
+GATED_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
+    (Decision.MATCH.value, Decision.REJECT.value),
+    (Decision.MATCH.value, Decision.UNCERTAIN.value),
+})
+
+_DECISION_ORDER = (Decision.MATCH.value, Decision.UNCERTAIN.value, Decision.REJECT.value)
+
+# Every off-diagonal pair, in a fixed order, so a report prints the same six lines
+# whether or not anything moved — "all zeros" is a statement worth being able to read.
+TRANSITIONS: tuple[tuple[str, str], ...] = tuple(
+    (a, b) for a in _DECISION_ORDER for b in _DECISION_ORDER if a != b
+)
+
+
+@dataclass(frozen=True)
+class ReplaySample:
+    company: str
+    ats_job_id: str
+    title: str
+    old_reason: str
+    new_reason: str
+
+
+@dataclass
+class ReplayReport:
+    """What a criteria change would do to every stored posting.
+
+    `transitions` counts *effective* verdicts — after overrides — because that is what
+    the pages would show. A pinned row cannot move there by construction, so a pinned
+    row whose rules verdict did move is counted under `held` instead, keyed by the rules
+    transition it is being held against. That is the row a criteria edit may need
+    `store.clear_override` for, and only the caller can decide whether it does.
+    """
+
+    total: int = 0
+    pinned: int = 0
+    before: Counter = field(default_factory=Counter)
+    after: Counter = field(default_factory=Counter)
+    transitions: Counter = field(default_factory=Counter)
+    held: Counter = field(default_factory=Counter)
+    samples: dict = field(default_factory=dict)
+    held_samples: dict = field(default_factory=dict)
+
+    def gated(self, intended: Iterable[tuple[str, str]] = ()) -> dict[tuple[str, str], int]:
+        """The blocking transitions that occurred and were not declared intended."""
+        allowed = set(intended)
+        return {
+            t: n for t, n in self.transitions.items()
+            if n and t in GATED_TRANSITIONS and t not in allowed
+        }
+
+
+def _replay_posting(row) -> Posting:
+    keys = row.keys()
+    return Posting(
+        company=row["company"],
+        ats_job_id=row["ats_job_id"],
+        title=row["title"],
+        url=(row["url"] or "") if "url" in keys else "",
+        location=(row["location"] or "") if "location" in keys else "",
+    )
+
+
+def replay(
+    postings: Iterable,
+    old: Criteria,
+    new: Criteria,
+    overrides: dict,
+    samples: int = 20,
+) -> ReplayReport:
+    """Diff every posting's verdict under `old` and `new` criteria.
+
+    The empty-corpus form of `evaluate`: where that replays rules against what you
+    decided, this replays them against what the *previous* rules decided, over every
+    posting stored — open and closed, every origin. Pure, like the rest of this module:
+    rows in (anything with `.keys()` and item access), a report out. The caller owns the
+    connection, which is how it stays read-only.
+
+    `samples` bounds the examples kept per transition, not the counting.
+    """
+    report = ReplayReport()
+    for row in postings:
+        posting = _replay_posting(row)
+        old_rules = match(posting, old)
+        new_rules = match(posting, new)
+        old_eff = apply_override(old_rules, overrides)
+        new_eff = apply_override(new_rules, overrides)
+        a, b = old_eff.decision.value, new_eff.decision.value
+
+        report.total += 1
+        report.before[a] += 1
+        report.after[b] += 1
+        pinned = (posting.company, posting.ats_job_id) in overrides
+        report.pinned += pinned
+
+        moved = (old_rules.decision.value, new_rules.decision.value)
+        sample = ReplaySample(
+            posting.company, posting.ats_job_id, posting.title,
+            old_rules.reason, new_rules.reason,
+        )
+        if a != b:
+            report.transitions[(a, b)] += 1
+            kept = report.samples.setdefault((a, b), [])
+            if len(kept) < samples:
+                kept.append(sample)
+        elif pinned and moved[0] != moved[1]:
+            report.held[moved] += 1
+            kept = report.held_samples.setdefault(moved, [])
+            if len(kept) < samples:
+                kept.append(sample)
+    return report
+
+
+def parse_transition(text: str) -> tuple[str, str]:
+    """`"uncertain->match"` (or `→`) as a pair of decision values. ValueError otherwise."""
+    for arrow in ("->", "→"):
+        if arrow in text:
+            a, _, b = (part.strip().lower() for part in text.partition(arrow))
+            break
+    else:
+        raise ValueError(f"not a transition (want 'old->new'): {text!r}")
+    valid = {d.value for d in Decision}
+    if a not in valid or b not in valid or a == b:
+        raise ValueError(f"not a transition between two verdicts: {text!r}")
+    return a, b

@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: real-data-no-samples
+expected_outcome: |
+  The preview runs a copy with no samples, and the user is told plainly that the laptop's data is stale rather than being shown it as their real applications.

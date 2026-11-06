@@ -366,7 +366,7 @@ def _seed_scored(conn, score=88.5):
     # `sync_postings` deliberately does not write descriptions — `check` caches them in
     # a separate pass — so a seed that skipped this would leave the column NULL and every
     # assertion below would pass for the wrong reason.
-    store.set_description(conn, "Acme", "1", DESCRIPTION)
+    store.set_description(conn, "Acme", "1", DESCRIPTION, source="ats")
     store.record_verdict(
         conn,
         Verdict(company="Acme", ats_job_id="1", decision=Decision.MATCH,
