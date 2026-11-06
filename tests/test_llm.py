@@ -32,8 +32,13 @@ from jobtracker.tasks.level import (
     LevelVerdict,
     looks_engineering,
     parse_verdict,
+    shown_text,
     verdict_from_level,
 )
+
+# What the model is shown in the parse tests below. Every usable reading has to quote it.
+_SHOWN = shown_text("Software Engineer",
+                    "We welcome recent graduates. Requires 8+ years in some teams.")
 
 
 @pytest.fixture
@@ -138,7 +143,7 @@ def test_per_model_endpoints_alone_count_as_configured(monkeypatch, sdk_installe
 
 # -- verdict parsing ---------------------------------------------------------------
 def test_parse_verdict_accepts_a_well_formed_answer():
-    v = parse_verdict(json.dumps({"level": "entry", "evidence": "recent graduates"}))
+    v = parse_verdict(json.dumps({"level": "entry", "evidence": "recent graduates"}), _SHOWN)
     assert v == LevelVerdict(level="entry", evidence="recent graduates")
     assert v.usable
 
@@ -155,13 +160,56 @@ def test_parse_verdict_rejects_anything_unexpected(text):
     Routing through `sir` does not change it — the router forwards the body untouched,
     so a backend that ignores the key still answers in prose.
     """
-    assert parse_verdict(text) is None
+    assert parse_verdict(text, _SHOWN) is None
 
 
 def test_unclear_is_parsed_but_not_usable():
-    v = parse_verdict('{"level":"unclear","evidence":""}')
+    v = parse_verdict('{"level":"unclear","evidence":""}', _SHOWN)
     assert v.level == "unclear"
     assert not v.usable          # -> posting stays UNCERTAIN
+
+
+# -- grounding: the quote must be in what the model was shown ----------------------
+@pytest.mark.parametrize("level", ["entry", "not_entry"])
+def test_ungrounded_level_reading_parses_to_none(level):
+    """An invented phrase must not pin a MATCH or REJECT.
+
+    The quote is the only part of the reply that can be checked against the page; a
+    reading whose quote is not there is treated exactly like malformed JSON.
+    """
+    invented = json.dumps({"level": level, "evidence": "0-2 years of experience"})
+    assert parse_verdict(invented, _SHOWN) is None
+
+
+@pytest.mark.parametrize("level", ["entry", "not_entry"])
+def test_a_usable_reading_with_no_evidence_is_no_answer(level):
+    assert parse_verdict(json.dumps({"level": level, "evidence": ""}), _SHOWN) is None
+    assert parse_verdict(json.dumps({"level": level, "evidence": "   "}), _SHOWN) is None
+
+
+def test_grounding_ignores_whitespace_and_case():
+    shown = shown_text("Software Engineer", "Open to\n   Recent   Graduates\tand interns.")
+    v = parse_verdict(json.dumps({"level": "entry", "evidence": "recent graduates"}), shown)
+    assert v is not None and v.usable
+    v = parse_verdict(json.dumps({"level": "entry", "evidence": "OPEN TO recent\ngraduates"}),
+                      shown)
+    assert v is not None and v.evidence == "OPEN TO recent graduates"   # stored flat
+
+
+def test_evidence_may_come_from_the_title():
+    """The model is shown the title too, so a quote off it is grounded."""
+    shown = shown_text("Software Engineer, Graduate", "We build payments infrastructure.")
+    v = parse_verdict(json.dumps({"level": "entry", "evidence": "Graduate"}), shown)
+    assert v is not None and v.level == "entry"
+
+
+def test_evidence_past_the_truncation_point_is_not_grounded():
+    """Grounding reads what the model saw, not the whole cached description."""
+    from jobtracker.llm import MAX_DESCRIPTION_CHARS
+    description = "x " * MAX_DESCRIPTION_CHARS + "new grads welcome"
+    shown = shown_text("Software Engineer", description)
+    assert parse_verdict(json.dumps({"level": "entry", "evidence": "new grads welcome"}),
+                         shown) is None
 
 
 # -- degradation: the whole safety story -------------------------------------------
@@ -229,7 +277,7 @@ def test_entry_on_a_non_engineering_title_still_rejects(criteria):
     """
     v = verdict_from_level("Acme", "1", "Finance Analyst", "entry", "new grads", criteria)
     assert v.decision is Decision.REJECT
-    assert v.reason == "llm:entry+non_engineering"
+    assert v.reason == "llm:entry+non_engineering:new grads"
 
 
 def test_not_entry_rejects_and_keeps_the_evidence(criteria):
@@ -239,13 +287,57 @@ def test_not_entry_rejects_and_keeps_the_evidence(criteria):
     assert "8+ years" in v.reason
 
 
+def test_entry_reason_carries_evidence(criteria):
+    """An entry pin has to be auditable later, the way a not_entry pin already was."""
+    v = verdict_from_level("Acme", "1", "Software Engineer", "entry",
+                           "recent graduates", criteria)
+    assert v.reason == "llm:entry+eng:generic:recent graduates"
+    v = verdict_from_level("Acme", "1", "Backend Engineer", "entry", "g" * 200, criteria)
+    assert v.reason == "llm:entry+role:backend:" + "g" * 80
+
+
+def test_old_entry_reason_without_evidence_still_renders(criteria):
+    """Pins written before grounding carry the bare form. Both forms still render.
+
+    Nothing parses the reason string: `apply_override` prefixes it and `/tuning`'s Fired
+    column escapes and prints it. This pins that, so a later reader that splits on the
+    evidence suffix has to cope with rows that have none.
+    """
+    from jobtracker import store
+    from jobtracker.models import Verdict
+    from jobtracker.server import render_tuning
+    from jobtracker.tuning import apply_override
+
+    conn = store.connect(":memory:")
+    for job, reason in (("old", "llm:entry+eng:generic"),
+                        ("new", "llm:entry+eng:generic:recent graduates")):
+        conn.execute(
+            "INSERT INTO postings (company, ats_job_id, title, location, url, "
+            "first_seen, last_seen, closed_at) VALUES (?,?,?,?,?,?,?,NULL)",
+            ("Acme", job, f"Software Engineer {job}", "NYC",
+             f"https://example.com/{job}", "2026-01-01", "2026-01-01"),
+        )
+        assert store.set_override(conn, "Acme", job, "match", "2026-01-01",
+                                  reason=reason, decided_by="llm")
+    overrides = store.load_overrides(conn)
+    for job in ("old", "new"):
+        v = apply_override(Verdict("Acme", job, Decision.UNCERTAIN, "no_level", "rules"),
+                           overrides)
+        assert v.decision is Decision.MATCH and v.decided_by == "llm"
+        store.record_verdict(conn, v, "2026-01-01")
+    conn.commit()
+    page = render_tuning(conn, criteria)
+    assert "<code>override:llm:entry+eng:generic</code>" in page
+    assert "<code>override:llm:entry+eng:generic:recent graduates</code>" in page
+
+
 def test_unclear_leaves_the_verdict_alone(criteria):
     assert verdict_from_level("Acme", "1", "Software Engineer", "unclear", "", criteria) is None
 
 
 def test_backend_title_is_reported_as_backend_relevant(criteria):
     v = verdict_from_level("Acme", "1", "Backend Engineer", "entry", "grad", criteria)
-    assert v.reason == "llm:entry+role:backend"
+    assert v.reason == "llm:entry+role:backend:grad"
 
 
 # -- scoping -----------------------------------------------------------------------

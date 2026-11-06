@@ -26,6 +26,7 @@ from typing import Optional
 
 from .. import store
 from ..criteria import Criteria
+from ..letter import flat
 from ..llm import MAX_DESCRIPTION_CHARS
 from ..models import Decision, Verdict
 from .base import Task, TaskContext, TaskUnit, register
@@ -73,12 +74,42 @@ class LevelVerdict:
         return self.level in ("entry", "not_entry")
 
 
-def parse_verdict(text: Optional[str]) -> Optional[LevelVerdict]:
+def shown_text(title: str, description: str) -> str:
+    """Exactly what the model is shown: the prompt's user turn and the grounding corpus.
+
+    One function builds both, so the text a quote is checked against can never drift
+    from the text the model was handed. Grounding against the full description would
+    accept a quote from past the truncation point, one the model cannot have read.
+    """
+    return (
+        f"Job title: {title}\n\n"
+        f"Job description:\n{(description or '')[:MAX_DESCRIPTION_CHARS]}"
+    )
+
+
+def grounded(evidence: str, shown: str) -> bool:
+    """Does `evidence` occur in `shown`, whitespace-normalized and case-insensitive?
+
+    `letter.flat` is the normalizer `tailor`, `inbox` and `coverletter` already use; the
+    casefold is the one thing added, because a model that quotes "New Grad" off a title
+    reading "new grad" has still quoted it.
+    """
+    quote = flat(evidence).casefold()
+    return bool(quote) and quote in flat(shown).casefold()
+
+
+def parse_verdict(text: Optional[str], shown: str) -> Optional[LevelVerdict]:
     """Validate the model's JSON. Anything unexpected is treated as no answer.
 
     Constrained decoding should make this total, but a server that silently ignores
     `response_format` would otherwise let free-form prose through as a verdict — the
     exact regression that made this pass a no-op for a month. See `llm/wire.py`.
+
+    `shown` is the text the model was given (`shown_text`). A usable reading — `entry`
+    or `not_entry` — must quote evidence that occurs in it, or it is no answer: the
+    quote is the only thing in the reply that can be checked, and an invented phrase
+    would otherwise pin a MATCH or REJECT that nothing on the page supports. `unclear`
+    with empty evidence is still a valid reading; it changes nothing.
     """
     if not text:
         return None
@@ -91,7 +122,10 @@ def parse_verdict(text: Optional[str]) -> Optional[LevelVerdict]:
     level = data.get("level")
     if level not in ("entry", "not_entry", "unclear"):
         return None
-    return LevelVerdict(level=level, evidence=str(data.get("evidence") or "")[:300])
+    evidence = flat(str(data.get("evidence") or ""))
+    if level != "unclear" and not grounded(evidence, shown):
+        return None
+    return LevelVerdict(level=level, evidence=evidence[:300])
 
 
 def looks_engineering(title: str, criteria: Criteria) -> bool:
@@ -112,6 +146,19 @@ def looks_engineering(title: str, criteria: Criteria) -> bool:
         criteria.first_hit("engineering_terms", lowered)
         or criteria.first_hit("role_type_include", lowered)
     )
+
+
+def _entry_reason(detail: str, evidence: str) -> str:
+    """`llm:entry+<detail>:<evidence[:80]>`, the shape `not_entry` already had.
+
+    An `entry` pin used to store no quote at all, so it could not be audited later
+    against the text it claimed to have read. Rows written before this keep the bare
+    `llm:entry+<detail>` form; every reader displays the string and none parses it, so
+    both render. Empty evidence (a direct call, never a grounded reading) keeps the
+    bare form rather than ending in a dangling colon.
+    """
+    reason = f"llm:entry+{detail}"
+    return f"{reason}:{evidence[:80]}" if evidence else reason
 
 
 def verdict_from_level(
@@ -140,11 +187,11 @@ def verdict_from_level(
         if eng:
             detail = "role:" + role if role else "eng:generic"
             return Verdict(company, ats_job_id, Decision.MATCH,
-                           f"llm:entry+{detail}", "llm")
+                           _entry_reason(detail, evidence), "llm")
         # Entry level but not an engineering role — the same conclusion match.py
         # reaches for "Finance Associate".
         return Verdict(company, ats_job_id, Decision.REJECT,
-                       "llm:entry+non_engineering", "llm")
+                       _entry_reason("non_engineering", evidence), "llm")
 
     return None  # 'unclear' — no new information, leave the verdict untouched
 
@@ -184,17 +231,16 @@ class LevelTask(Task):
         return units
 
     async def run(self, unit, client, ctx):
+        # Built once: the prompt and the grounding check read the same string.
+        shown = shown_text(unit.title, unit.payload["description"])
         text = await client.complete(
             system=SYSTEM_PROMPT,
-            user=(
-                f"Job title: {unit.title}\n\n"
-                f"Job description:\n{unit.payload['description'][:MAX_DESCRIPTION_CHARS]}"
-            ),
+            user=shown,
             schema=LEVEL_SCHEMA,
             schema_name="level",
             idempotency_key=unit.idempotency_key(),
         )
-        reading = parse_verdict(text)
+        reading = parse_verdict(text, shown)
         if reading is None or not reading.usable:
             # 'unclear' is an answer, but not one that changes anything — same outcome
             # as no answer at all, which is what None means to the runner.

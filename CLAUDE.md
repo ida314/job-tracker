@@ -696,6 +696,13 @@ API-key handling anywhere in `jobtracker/llm/`. Do not add a hosted provider.
   reproduces it exactly.
 - **Scope is level extraction only.** The model never decides that a role is on-target; an `entry`
   reading still has to pass the rules' engineering gate.
+- **The evidence must occur in the text the model was shown, or the reading is no answer.**
+  `parse_verdict(text, shown)` checks an `entry`/`not_entry` quote against `shown_text`
+  — title plus the truncated description, the same string the prompt sends —
+  whitespace-normalized (`letter.flat`) and case-insensitive. Empty evidence on a usable
+  level is ungrounded too; `unclear` needs none. Both reasons carry the quote
+  (`llm:entry+<detail>:<evidence>`, `llm:not_entry:<evidence>`); `entry` pins written
+  before 2026-11-06 carry none, and nothing parses the string, so both forms render.
 - **Every failure path must leave the posting UNCERTAIN.** Unreachable, timeout, malformed,
   unsure. Nothing here may raise for a down server, and a code path that can produce a verdict from
   a failed call is a bug.

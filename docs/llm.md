@@ -38,7 +38,33 @@ distinguishable from rules verdicts, and the reason carries the evidence:
 ```
 Asana    Backend Software Engineer     reject   llm:not_entry:3+ years
 Discord  Software Engineer, Notifications  reject   llm:not_entry:Senior
+Acme     Backend Engineer              match    llm:entry+role:backend:recent graduates
 ```
+
+An `entry` reason carried no quote before 2026-11-06 (`llm:entry+eng:generic`), so a pin
+written then cannot be audited against the text it claims to have read; since then it
+carries one, as `not_entry` always did. The older rows are kept as they are; every
+surface prints the reason string and none parses it, so both forms render.
+
+## The quote must be in what the model saw
+
+**A usable reading (`entry` or `not_entry`) whose evidence does not occur in the text
+the model was shown is no answer**, exactly like malformed JSON, and the posting stays
+`uncertain`. The quote is the only part of the reply that can be checked; without the
+check an invented phrase would pin a match or a reject that nothing on the page
+supports.
+
+- **"Shown" means one string.** `shown_text(title, description)` builds the prompt's
+  user turn, and `run()` passes that same string to `parse_verdict(text, shown)`, so the
+  prompt and the check cannot drift apart. The title is part of it — `Graduate` quoted
+  off *"Software Engineer, Graduate"* is grounded — and the description is truncated at
+  `MAX_DESCRIPTION_CHARS` there too, so a phrase past the cut the model never read does
+  not ground.
+- **Whitespace-normalized and case-insensitive**, with `letter.flat`, the normalizer
+  `tailor`, `inbox` and `coverletter` already use. The stored evidence is the flattened
+  quote.
+- **Empty evidence on a usable level is ungrounded.** `unclear` with empty evidence is
+  still a valid reading; it changes nothing either way.
 
 ## Failure is absence, never a wrong answer
 
