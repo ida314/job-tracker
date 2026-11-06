@@ -335,3 +335,10 @@ def description_sources() -> dict:
     takes to label job-board descriptions written before the column existed. Import
     plugins only: a task plugin has no `coverage()` to ask."""
     return {p.name: description_source(p) for p in plugins_of_kind(KIND_IMPORT)}
+
+
+def coverage_by_origin() -> dict:
+    """`{origin: coverage()}` for every import plugin — what `queue.lane` reads to tell
+    a feed curated to a band from one that says nothing about level. Import plugins
+    only, for the reason `description_sources` gives."""
+    return {p.name: p.coverage() for p in plugins_of_kind(KIND_IMPORT)}
