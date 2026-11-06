@@ -297,6 +297,116 @@ def _cache_descriptions(conn, fetcher, wanted, budget: int, today: str) -> None:
     )
 
 
+def _board_descriptions(fetcher, company: Company) -> dict | None:
+    """`{job id (lowercased): description}` for one Ashby or Lever board, or None.
+
+    Both ship the text in the bulk payload, and neither adapter has a per-posting
+    endpoint, so one board request answers every feed link pointing into it. None means
+    the fetch failed; an empty dict is a board that answered with no jobs.
+    """
+    res = fetcher.fetch_company(company)
+    if res.error or not res.ok:
+        return None
+    return {p.ats_job_id.lower(): p.description or "" for p in res.postings}
+
+
+def _upgrade_descriptions(conn, fetcher, budget: int) -> None:
+    """Swap a feed's metadata stub for the real prose of the posting it links to.
+
+    Simplify's description is `Category: … / Locations: …` assembled from its fields
+    (`description_source='feed'`), and `judge`, `tailor` and `coverletter` then work
+    from almost nothing. Many of those links point straight at a Greenhouse, Lever or
+    Ashby posting whose public JSON has the posting's own words, so the link is
+    resolved (`dedupe.upgrade_target`, from the URL with its case intact — never from
+    `dedupe_key`, which lowercases the Lever slug) and fetched once through the same
+    adapters and the same per-host limiter as the board sweep.
+
+    The one exception to write-once, and a narrow one: `feed` → `ats`, only when the
+    fetch returns non-empty prose. Everything else — a failed request, a job no longer
+    on its board, a payload with no text — leaves the row exactly as it was, and is
+    counted in the summary line. Like `_cache_descriptions`, nothing here touches board
+    health or can produce EXIT_DEGRADED: the board in question is not one we curate.
+
+    What resolves is *provenance* — the feed served the link — not verified identity,
+    and the log says so. `budget` counts requests: one per Greenhouse posting, one per
+    Ashby or Lever board however many links point into it.
+
+    Deliberately not `wanted`: that list feeds `_cache_descriptions`, whose
+    no-detail-endpoint branch writes '' over whatever a feed row already holds.
+    """
+    from . import dedupe
+
+    rows = store.feed_descriptions_to_upgrade(conn)
+    if not rows:
+        return
+    targets = []
+    for row in rows:
+        target = dedupe.upgrade_target(row["url"])
+        if target is not None:
+            targets.append((row, target))
+    unresolved = len(rows) - len(targets)
+    by_ats = collections.Counter(target[0] for _row, target in targets)
+    log.info(
+        "description upgrade: %d of %d feed-text posting(s) link straight at an ATS "
+        "posting (%s) — provenance, the feed served the link; not verified identity "
+        "(budget %d request(s))",
+        len(targets), len(rows),
+        ", ".join(f"{a} {n}" for a, n in sorted(by_ats.items())) or "none",
+        budget,
+    )
+
+    boards: dict[tuple[str, str], dict | None] = {}
+    requests = upgraded = failed = not_on_board = no_prose = deferred = 0
+    for row, (ats, slug, job_id) in targets:
+        company = Company(name=f"{ats}:{slug}", ats=ats, slug=slug, check_method="api")
+        if ats == "greenhouse":
+            if requests >= budget:
+                deferred += 1
+                continue
+            requests += 1
+            try:
+                text, _posted_at = fetcher.fetch_job_detail(company, job_id)
+            except Exception as exc:  # one link must never fail the run
+                log.warning("description upgrade: %s fetch raised: %s", ats, exc)
+                text = None
+            if text is None:
+                # The adapter folds a failed request and an empty `content` together.
+                failed += 1
+                continue
+        else:
+            key = (ats, slug)
+            if key not in boards:
+                if requests >= budget:
+                    deferred += 1
+                    continue
+                requests += 1
+                try:
+                    boards[key] = _board_descriptions(fetcher, company)
+                except Exception as exc:  # one board must never fail the run
+                    log.warning("description upgrade: %s fetch raised: %s", ats, exc)
+                    boards[key] = None
+            board = boards[key]
+            if board is None:
+                failed += 1
+                continue
+            text = board.get(job_id.lower())
+            if text is None:
+                not_on_board += 1
+                continue
+        if not text.strip():
+            no_prose += 1
+            continue
+        store.set_description(conn, row["company"], row["ats_job_id"], text, source="ats")
+        upgraded += 1
+
+    log.info(
+        "description upgrade: %d upgraded, %d failed or empty, %d no longer on their "
+        "board, %d had no prose, %d deferred to tomorrow, %d link nowhere we can read "
+        "(%d request(s))",
+        upgraded, failed, not_on_board, no_prose, deferred, unresolved, requests,
+    )
+
+
 def _connect(db_path):
     """`store.connect`, told what kind of description each job board writes.
 
@@ -758,6 +868,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     try:
         _cache_descriptions(conn, fetcher, wanted, args.max_descriptions, today)
+        # After the board pass and after the plugins, so tonight's feed rows are in it.
+        # Its own work list and its own budget — never rows added to `wanted`.
+        _upgrade_descriptions(conn, fetcher, getattr(args, "max_upgrades", 100))
     finally:
         fetcher.close()
 
@@ -2864,6 +2977,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-descriptions", type=int, default=400,
         help="cap per-posting description fetches this run (default: 400). The "
              "remainder is picked up tomorrow; only Greenhouse costs a request.",
+    )
+    c.add_argument(
+        "--max-upgrades", type=int, default=100,
+        help="cap requests spent replacing job-board metadata with the linked "
+             "Greenhouse/Lever/Ashby posting's own text (default: 100). One per "
+             "Greenhouse posting, one per Ashby or Lever board.",
     )
     c.add_argument("--plugins", default=None,
                    help=f"path to plugins.yaml (default: {config.PLUGINS_YAML})")
