@@ -33,9 +33,9 @@ import sqlite3
 import urllib.parse
 from collections import Counter
 from datetime import date
-from typing import Optional
+from typing import Mapping, Optional
 
-from . import applications as apps_mod, config, rank as rank_mod, store
+from . import applications as apps_mod, config, queue, rank as rank_mod, store
 from . import build_version
 from .criteria import Criteria
 from .match import location_label, location_rank
@@ -433,6 +433,30 @@ tr.cohead .n { color: var(--muted); font-weight: 400; margin-left: 4px;
                        font: inherit; font-size: 12.5px; cursor: pointer; }
 
 @media (hover: hover) { .js-groups .cotoggle:hover { text-decoration: underline; } }
+
+/* -- /review ----------------------------------------------------------------------
+   The board-noise fold lives inside the no-signal fold. A table cannot nest a tbody, so
+   it is the next sibling, and it goes with its parent: hidden whenever the parent is
+   collapsed. Collapsing still owns `.closed` and filtering still owns `hidden` — this
+   reads the one and touches neither. */
+.js-groups tbody.grp.closed + tbody.grp.sub { display: none; }
+tbody.grp.sub tr.cohead th { padding-left: 28px; font-weight: 500; }
+.rv .rvnone td { color: var(--muted); text-align: center; }
+.rv td.emp .cobadge { white-space: normal; }
+/* At phone width the five columns do not fit, and a page that scrolls sideways is the
+   failure. Each row becomes a wrapped line of its cells. `:not([hidden])` on every
+   display rule, or the rule would outrank `tr[hidden]` and a filtered row would stay. */
+@media (max-width: 640px) {
+  table.rv, .rv tbody:not([hidden]) { display: block; }
+  .rv thead { display: none; }
+  .rv tr:not([hidden]) { display: flex; flex-wrap: wrap; align-items: baseline;
+                         gap: 2px 10px; padding: 8px 12px;
+                         border-bottom: 1px solid var(--grid); }
+  .rv tr.cohead:not([hidden]) { padding: 0; border-bottom: 0; }
+  .rv tr.cohead th { flex: 1 1 100%; display: block; white-space: normal; }
+  .rv td { display: block; padding: 0; border: 0; }
+  .rv td.role { flex: 1 1 100%; }
+}
 
 /* The applications view bar. In the static file it only works with the script, so it
    is hidden until the script says it is running — the same rule as .tabs. */
@@ -1076,6 +1100,7 @@ def build_dashboard(
     criteria: Criteria | None = None,
     interactive: bool = False,
     include_job_boards: bool = True,
+    coverage_by_origin: Mapping | None = None,
 ) -> str:
     """Return a complete HTML document. Pure read — never writes to `conn`.
 
@@ -1089,6 +1114,8 @@ def build_dashboard(
     by `jobtracker dashboard` must stay a self-contained, offline, read-only artifact,
     and dead buttons in it would be worse than no buttons.
 
+    `coverage_by_origin` is each job board's `coverage()`, which the Today tab's review
+    count reads through `queue.review`; absent, it is asked of the plugin registry.
     """
     by_name = {c.name: c for c in companies}
     # Two pages out of one corpus, split on `postings.origin`: a row with no origin came
@@ -1122,6 +1149,12 @@ def build_dashboard(
     letters = store.letters_by_posting(conn)
     letters_built = _built_letters()
     pending_mail = store.pending_mail_count(conn)
+    # The Today line counting the review list. Lanes read the criteria, so with none
+    # there is no count to give — absent, never a guessed zero.
+    review_count = None
+    if criteria is not None:
+        review_count = len(review_split(conn, criteria, by_name, coverage_by_origin,
+                                        today).recent)
 
     # Read straight off `applications` rather than joining through `postings`, which is
     # what lets a hand-entered job — no board, no verdict, no posting row — show up here
@@ -1153,7 +1186,7 @@ def build_dashboard(
     parts.append('<section data-panel-body="today">')
     _picks(parts, picks, by_name, unranked, today, interactive, criteria, plans,
            rest, overrides, suggestions, tracked, built, held, letters, letters_built,
-           applied_today)
+           applied_today, review_count)
     parts.append("</section>")
 
     parts.append('<section data-panel-body="applications" hidden>')
@@ -1239,7 +1272,7 @@ def _tabs(parts, picks, applications, matches, uncertain, unhealthy,
 def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
            plans=None, rest=(), overrides=None, suggestions=None, tracked=None,
            built=None, held=None, letters=None, letters_built=None,
-           applied_today: int = 0) -> None:
+           applied_today: int = 0, review_count: Optional[int] = None) -> None:
     """The three to apply to today, less the ones you already applied to.
 
     Deliberately not a `data-filterable` table. The filter JS selects
@@ -1281,9 +1314,29 @@ def _picks(parts, picks, by_name, unranked, today, interactive, criteria=None,
             "the model has not read them yet. Run <code>jobtracker rank</code>.</p>"
         )
 
+    _review_count_line(parts, review_count, interactive)
+
     _rest_of_ranking(parts, rest, by_name, today, criteria, plans, interactive,
                      tracked, suggestions, built, held, letters, letters_built,
                      start=len(picks) + 1)
+
+
+def _review_count_line(parts, count: Optional[int], interactive: bool) -> None:
+    """"N to review": the size of `/review`'s default view, under the picks.
+
+    A link under `serve` and a bare count in the static file, which has no `/review` —
+    a file:// page pointing at a server that is not running is worse than no link.
+    `None` means no criteria were passed, so no lane could be derived; nothing renders.
+    """
+    if count is None:
+        return
+    text = f"{count} to review"
+    if interactive:
+        text = f'<a href="/review">{text} →</a>'
+    parts.append(
+        f'<p class="note reviewcount">{text} — uncertain rows with a field signal, '
+        f"first seen in the last {queue.REVIEW_WINDOW_DAYS} days.</p>"
+    )
 
 
 def _rest_of_ranking(parts, rest, by_name, today, criteria=None, plans=None,
@@ -2581,6 +2634,147 @@ def job_board_page_parts(conn, companies, today, criteria=None, interactive=True
         _company_keys(matches + uncertain), store.unhealthy_boards(conn), by_name,
     )
     return parts
+
+
+def _coverage_by_origin() -> dict:
+    """Each job board's `coverage()`, by origin. `_origin_labels`' sibling and its rule:
+    a page that cannot import the registry still renders, and an origin with no
+    coverage reads as a board that says nothing about level."""
+    try:
+        from . import plugins as plugins_mod
+
+        return plugins_mod.coverage_by_origin()
+    except Exception:  # pragma: no cover - a page must not 500 over a lane
+        return {}
+
+
+def review_split(conn, criteria, by_name, coverage_by_origin, today) -> "queue.Review":
+    """`queue.review` over every open uncertain row. The one read both `/review` and the
+    Today count make, so the number on Today is the length of the list it links to."""
+    if coverage_by_origin is None:
+        coverage_by_origin = _coverage_by_origin()
+    return queue.review(store.uncertain_with_context(conn), criteria, by_name,
+                        coverage_by_origin, today)
+
+
+def review_page_parts(conn, companies, criteria, coverage_by_origin, today,
+                      interactive: bool = True) -> list:
+    """`/review`'s body: the uncertain rows worth a look, one flat table. Pure read.
+
+    A read *across* the Company pages / Job boards partition, never a third home: every
+    row here is also on exactly one of those two pages, and nothing on this page decides
+    which. Serve-only — the static file has no `/review` and does not get one.
+
+    One filter scope holding a search box and this table and nothing else, so its bar
+    can drive no other panel's rows. No tier chips and no ATS select: a feed row has
+    neither, and a control filtering on a field many rows leave empty only ever hides.
+
+    The default view is the review lanes first seen inside the window, in
+    `queue.sort_key` order and open. Below it, three folds rendered as `tbody.grp` with
+    `data-closed="1"`: rows render visible and the script collapses them, the rule every
+    grouped table here follows. The board-noise fold sits inside the no-signal fold as a
+    `tbody.sub` that the stylesheet hides while its parent is closed — a table cannot
+    nest a `tbody`, and a second script owning the fold would be two owners of one
+    property.
+    """
+    by_name = {c.name: c for c in (companies or [])}
+    split = review_split(conn, criteria, by_name, coverage_by_origin, today)
+    labels = _origin_labels()
+    days = queue.REVIEW_WINDOW_DAYS
+    parts: list = [
+        f'<h1>Review <span class="count rvn">{len(split.recent)}</span> '
+        f"{version_chip()}</h1>",
+    ]
+    return parts + _review_body(split, labels, criteria, interactive, days)
+
+
+def _review_body(split, labels, criteria, interactive, days) -> list:
+    parts = [
+        '<p class="note">Uncertain postings the rules could not decide that carry a field '
+        f"signal, first seen in the last {days} days — a short list of possible misses. "
+        "Each is also on its Company page or the Job boards page; this is a read across "
+        "both.</p>",
+        '<section class="review" data-filter-scope>',
+        '<div class="filters">'
+        '<input type="search" data-f="q" placeholder="Filter by role, employer, location…" '
+        'aria-label="Filter the review list">'
+        f'<span class="count" id="review-count">{len(split)} on the list</span>'
+        "</div>",
+    ]
+    if not len(split):
+        parts.append('<div class="empty">Nothing uncertain is open.</div>')
+        parts.append("</section>")
+        return parts
+
+    parts.append('<table class="rv" data-filterable data-count-target="review-count" '
+                 'data-empty-target="review-empty">')
+    parts.append("<thead><tr><th>Role</th><th>Employer</th><th>Location</th>"
+                 "<th>Why it is here</th><th>First seen</th></tr></thead>")
+    # The default view is a plain tbody, never `.grp`: the script collapses every group
+    # on load, and this is the part that must stay open.
+    parts.append('<tbody class="recent">')
+    if split.recent:
+        for placed in split.recent:
+            parts.append(_review_row(placed, labels, criteria, interactive))
+    else:
+        parts.append(
+            f'<tr class="rvnone"><td colspan="5">Nothing new in the last {days} days.'
+            "</td></tr>"
+        )
+    parts.append("</tbody>")
+
+    def fold(rows, heading, cls):
+        if not rows:
+            return
+        parts.append(f'<tbody class="{cls}" data-closed="1">')
+        parts.append(
+            '<tr class="cohead"><th colspan="5" scope="colgroup">'
+            f'<span class="coname">{html.escape(heading)}</span>'
+            '<button type="button" class="cotoggle" aria-expanded="true">Hide</button>'
+            "</th></tr>"
+        )
+        for placed in rows:
+            parts.append(_review_row(placed, labels, criteria, interactive))
+        parts.append("</tbody>")
+
+    fold(split.older, f"{len(split.older)} older", "grp older")
+    no_signal = len(split.no_signal) + len(split.noise)
+    fold(split.no_signal, f"{no_signal} with no field signal", "grp nosignal")
+    names = ", ".join(sorted({p.row["company"] or "" for p in split.noise}))
+    # Nested only while it has a parent to be nested in: with no plain no-signal rows the
+    # parent group renders nothing, and a child hidden under an absent parent is a fold
+    # nobody can open.
+    fold(split.noise,
+         f"{len(split.noise)} from boards that list many non-field roles: {names}",
+         "grp noise sub" if split.no_signal else "grp noise")
+    parts.append("</table>")
+    parts.append('<div class="empty" id="review-empty" hidden>No rows match the filter.</div>')
+    parts.append("</section>")
+    return parts
+
+
+def _review_row(placed, labels, criteria, interactive) -> str:
+    row = placed.row
+    origin = _origin_of(row)
+    tag = labels.get(origin, origin) if origin else ""
+    loc = row["location"] or ""
+    rank = location_rank(loc, criteria) if criteria is not None else None
+    employer = _employer_of(row) or row["company"]
+    role = _role_of(row)
+    search = " ".join(x.lower() for x in (role, employer, loc, tag) if x)
+    pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
+    chip = f" {_tag_chip(origin, labels)}" if origin else ""
+    return (
+        f'<tr data-lane="{html.escape(placed.lane.value)}" '
+        f'data-search="{html.escape(search)}">'
+        f'<td class="role"><a {_posting_attrs(row, interactive)}>{html.escape(role)}</a>'
+        f"{chip}</td>"
+        f'<td class="emp"><span class="cobadge">{html.escape(employer)}</span></td>'
+        f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>'
+        f'<td class="why">{html.escape(placed.label)}</td>'
+        f'<td class="seen">{html.escape((row["first_seen"] or "")[:10])}</td>'
+        "</tr>"
+    )
 
 
 def _applications(parts, apps, events_by, today, by_name) -> None:

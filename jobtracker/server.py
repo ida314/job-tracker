@@ -518,6 +518,35 @@ def render_job_boards(conn: sqlite3.Connection, companies, today: str,
     return "\n".join(p)
 
 
+def render_review(conn: sqlite3.Connection, criteria, companies, coverage_by_origin,
+                  today: str) -> str:
+    """The review list: uncertain rows worth a weekly skim, at `/review`. Pure read.
+
+    Serve-only — the static dashboard has no `/review`, so its Today tab shows the count
+    with no link. The body is `dashboard.review_page_parts`, and the Today count is the
+    length of the same `queue.review` split, so the number and the list cannot disagree.
+
+    It carries `dashboard._JS` for the one filter block its search box needs. The page
+    renders no buttons; the actions column is still to come.
+    """
+    p = [
+        "<!doctype html><meta charset=utf-8>",
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        "<title>Review</title>",
+        f"<style>{dashboard_mod._CSS}</style>",
+        "<body><div class=wrap>",
+    ]
+    body = dashboard_mod.review_page_parts(conn, companies, criteria, coverage_by_origin,
+                                           today, interactive=True)
+    # The heading first, then the nav under it — the order every other page here uses.
+    p.append(body[0])
+    p.append(_NAV)
+    p.extend(body[1:])
+    p.append("</div>")
+    p.append(f"<script>{dashboard_mod._JS}</script>")
+    return "\n".join(p)
+
+
 def render_applications(conn: sqlite3.Connection, companies, today: str,
                         sort: str = "") -> str:
     """Everything you applied to, and every control for changing it. Pure read.
@@ -3014,6 +3043,17 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     page = render_job_boards(conn, self._companies(), _today(),
                                              load_criteria(self.server.criteria_path))
+                finally:
+                    conn.close()
+                self._send(page)
+            elif path == "/review":
+                from . import plugins as plugins_mod
+
+                conn = self._conn()
+                try:
+                    page = render_review(conn, load_criteria(self.server.criteria_path),
+                                         self._companies(),
+                                         plugins_mod.coverage_by_origin(), _today())
                 finally:
                     conn.close()
                 self._send(page)
@@ -5761,6 +5801,7 @@ def _optional_day(payload: dict, key: str) -> tuple[Optional[str], Optional[str]
 
 _NAV = (
     '<nav class=nav><a href="/">Dashboard</a> · <a href="/jobboards">Job boards</a>'
+    ' · <a href="/review">Review</a>'
     ' · <a href="/applications">Applications</a>'
     ' · <a href="/companies">Companies</a> · <a href="/tuning">Tuning</a>'
     ' · <a href="/settings">Settings</a></nav>'

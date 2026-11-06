@@ -749,7 +749,7 @@ API-key handling anywhere in `jobtracker/llm/`. Do not add a hosted provider.
 
 ## The review queue
 
-`jobtracker/queue.py`, `store.uncertain_with_context`, `docs/queue.md`. Which part of the
+`jobtracker/queue.py`, `store.uncertain_with_context`, `/review`, `docs/queue.md`. Which part of the
 uncertain list a row is in: `feed`, `read`, `signal`, and the two folds, `no_signal` and
 `noise`.
 
@@ -763,6 +763,14 @@ uncertain list a row is in: `feed`, `read`, `signal`, and the two folds, `no_sig
   `queue.py` is pure — no SQLite, no files, no clock.
 - **`board_scope` is read here only.** It decides which fold a no-signal row lands in.
 - **`targets` is a parameter** (default `("entry",)`), never read from config inside `queue.py`.
+- **`/review` is serve-only.** The static dashboard has no `/review`; Today shows "N to review"
+  under the picks in both, a link only under `serve`. The count is `len(queue.review(...).recent)`
+  through `dashboard.review_split`, the same split the page renders.
+- **`/review` is a read across the partition**, never a third home: every row on it is on exactly
+  one of the Company pages and Job boards.
+- **It is never `data-filterable` beside another panel** — one `[data-filter-scope]`, one search
+  box, one table. The board-noise fold is a sibling `tbody.sub` the stylesheet hides while the
+  no-signal fold is closed; `data-closed="1"` on each fold, `.closed` still JS-owned.
 
 ---
 
