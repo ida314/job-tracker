@@ -225,3 +225,168 @@ def test_record_decision_rejects_a_bad_verdict():
     conn = store.connect(":memory:")
     with pytest.raises(ValueError):
         store.record_decision(conn, "Acme", "1", "T", "maybe", "2026-07-23")
+
+
+# -- replay over every stored posting ----------------------------------------------
+def _row(title, company="Acme", jid="1"):
+    return {"company": company, "ats_job_id": jid, "title": title,
+            "location": "", "url": ""}
+
+
+def _crit(**lists):
+    return Criteria(**lists)
+
+
+# "graduate" matching is the change under test; "senior" rejecting is the control.
+_OLD = dict(level_include=["new grad"], exclude_titles=["senior"],
+            engineering_terms=["engineer"], role_type_include=["software"])
+
+
+def test_replay_is_pure():
+    """Rows in, report out — no connection parameter, and no hidden state between calls."""
+    import inspect
+
+    params = inspect.signature(tuning.replay).parameters
+    assert not any("conn" in name or name == "db" for name in params)
+    rows = [_row("Software Engineer, New Grad", jid="1"),
+            _row("Software Engineer, Graduate", jid="2"),
+            _row("Senior Software Engineer", jid="3")]
+    old = _crit(**_OLD)
+    new = _crit(**{**_OLD, "level_include": ["new grad", "graduate"]})
+    a = tuning.replay(rows, old, new, {})
+    b = tuning.replay(list(rows), old, new, {})
+    assert a == b
+    assert a.total == 3
+    assert a.transitions == {("uncertain", "match"): 1}
+    assert [s.ats_job_id for s in a.samples[("uncertain", "match")]] == ["2"]
+
+
+def test_replay_reports_held_rows_under_overrides():
+    """A pin outranks the rules, so the pages do not move — but the report says it held."""
+    rows = [_row("Software Engineer, New Grad", jid="1"),
+            _row("Software Engineer, New Grad", jid="2")]
+    old = _crit(**_OLD)
+    new = _crit(**{**_OLD, "exclude_titles": ["senior", "new grad"]})
+    overrides = {("Acme", "1"): {"decision": "match", "reason": "keep",
+                                 "decided_by": "human"}}
+    report = tuning.replay(rows, old, new, overrides)
+    assert report.pinned == 1
+    assert report.held == {("match", "reject"): 1}
+    assert [s.ats_job_id for s in report.held_samples[("match", "reject")]] == ["1"]
+    # Only the unpinned row is an effective transition.
+    assert report.transitions == {("match", "reject"): 1}
+    assert [s.ats_job_id for s in report.samples[("match", "reject")]] == ["2"]
+
+
+def test_replay_gates_on_match_loss_only():
+    """uncertain moving either way is counted, never blocking; losing a match blocks."""
+    rows = [_row("Software Engineer, Graduate", jid="1"),   # uncertain -> match
+            _row("Software Engineer Platform", jid="2"),    # uncertain -> reject
+            _row("Software Engineer, New Grad", jid="3")]   # match -> ...
+    old = _crit(**_OLD)
+    moves_uncertain = _crit(**{**_OLD, "level_include": ["new grad", "graduate"],
+                               "exclude_titles": ["senior", "platform"]})
+    report = tuning.replay(rows, old, moves_uncertain, {})
+    assert report.transitions[("uncertain", "match")] == 1
+    assert report.transitions[("uncertain", "reject")] == 1
+    assert report.gated() == {}
+
+    loses_match = _crit(**{**_OLD, "level_include": ["graduate"]})
+    report = tuning.replay(rows, old, loses_match, {})
+    assert report.gated() == {("match", "uncertain"): 1}
+
+    rejects_match = _crit(**{**_OLD, "exclude_titles": ["senior", "new grad"]})
+    report = tuning.replay(rows, old, rejects_match, {})
+    assert report.gated() == {("match", "reject"): 1}
+
+
+def _replay_db(tmp_path, titles):
+    db = tmp_path / "state.db"
+    conn = store.connect(db)
+    for jid, (title, closed) in enumerate(titles, start=1):
+        conn.execute(
+            "INSERT INTO postings (company, ats_job_id, title, location, url, "
+            "first_seen, last_seen, closed_at) VALUES (?, ?, ?, '', 'u', "
+            "'2026-07-01', '2026-07-01', ?)",
+            ("Acme", str(jid), title, closed),
+        )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def _write_criteria(path, **lists):
+    import yaml
+
+    path.write_text(yaml.safe_dump(lists))
+    return str(path)
+
+
+def _eval(argv):
+    from jobtracker import cli
+
+    args = cli.build_parser().parse_args(["eval", "--replay-all", *argv])
+    return cli.cmd_eval(args)
+
+
+def test_replay_intended_file_clears_the_gate(tmp_path, capsys):
+    db = _replay_db(tmp_path, [("Software Engineer, New Grad", None),
+                               ("Software Engineer, New Grad", "2026-07-02")])
+    old = _write_criteria(tmp_path / "old.yaml", **_OLD)
+    new = _write_criteria(tmp_path / "new.yaml", **{**_OLD, "level_include": ["graduate"]})
+    base = ["--db", str(db), "--against", old, "--criteria", new]
+
+    assert _eval(base) == 1
+    out = capsys.readouterr().out
+    assert "replayed 2 postings" in out          # the closed posting is replayed too
+    assert "BLOCKS" in out
+
+    intended = tmp_path / "intended.yaml"
+    intended.write_text('"match->uncertain": "new grad is going to the level task"\n')
+    assert _eval([*base, "--intended", str(intended)]) == 0
+    assert "intended: new grad is going to the level task" in capsys.readouterr().out
+
+    # A transition the file declares but this change does not need is harmless; one
+    # that is not a transition at all means the file is wrong, and nothing ran.
+    intended.write_text('"match->uncertain": ok\n"match->reject": ok\n')
+    assert _eval([*base, "--intended", str(intended)]) == 0
+    intended.write_text('"match->sideways": ok\n')
+    assert _eval([*base, "--intended", str(intended)]) == 2
+
+
+def test_replay_exits_2_when_criteria_do_not_load(tmp_path):
+    db = _replay_db(tmp_path, [("Software Engineer, New Grad", None)])
+    good = _write_criteria(tmp_path / "good.yaml", **_OLD)
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("not_a_key: [x]\n")
+    assert _eval(["--db", str(db), "--against", str(bad), "--criteria", good]) == 2
+    assert _eval(["--db", str(db), "--against", good, "--criteria", str(bad)]) == 2
+    assert _eval(["--db", str(db), "--criteria", good]) == 2     # no --against
+
+
+def test_replay_opens_db_read_only(tmp_path, monkeypatch, capsys):
+    """Evidence gathered before a change must be safe to point at a copy of production.
+
+    `store.connect()` migrates on open, so the replay must never reach it; and a file it
+    cannot write must still be readable.
+    """
+    import hashlib
+    import os
+    import stat
+
+    db = _replay_db(tmp_path, [("Software Engineer, New Grad", None),
+                               ("Senior Software Engineer", None)])
+    crit = _write_criteria(tmp_path / "c.yaml", **_OLD)
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    os.chmod(db, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+
+    def _refuse(*_a, **_k):
+        raise AssertionError("replay went through store.connect(), which migrates")
+
+    monkeypatch.setattr(store, "connect", _refuse)
+    try:
+        assert _eval(["--db", str(db), "--against", crit, "--criteria", crit]) == 0
+    finally:
+        os.chmod(db, stat.S_IRUSR | stat.S_IWUSR)
+    assert "replayed 2 postings" in capsys.readouterr().out
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before

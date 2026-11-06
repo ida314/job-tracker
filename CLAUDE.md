@@ -132,6 +132,8 @@ silently changes the verdict on thousands of postings already judged. See `docs/
   and `eval` has no corpus, replay `match()` over all stored postings under old and new criteria
   and diff every verdict instead. A criteria edit with no regression evidence is the thing this
   loop exists to prevent.
+  That replay is `jobtracker eval --replay-all --against OLD.yaml` (read-only, `mode=ro`, never
+  `store.connect()`); it blocks only on a lost match, and `--intended` declares the ones you mean.
 - **`uncertain` is not a regression.** Only active contradiction blocks. Counting it as failure
   pushes toward rules that guess level from titles.
 - **The admission test for a token is not "does it catch the bad thing", it is "what else does

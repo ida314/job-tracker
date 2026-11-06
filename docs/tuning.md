@@ -61,6 +61,68 @@ counted those against you, it would push you toward writing rules that guess lev
 from titles, which is exactly the over-fitting this whole mechanism exists to prevent.
 Only regressions block.
 
+## When there is no corpus: `eval --replay-all`
+
+`eval` needs recorded judgments. With `decisions` empty it has nothing to replay, and a
+criteria edit would ship with no evidence at all. `--replay-all` is the fallback: it
+replays `match()` over **every stored posting** — open and closed, every origin — under
+the old criteria and the new, and diffs every verdict.
+
+```sh
+git show HEAD:criteria.yaml > /tmp/criteria.old.yaml
+$EDITOR criteria.yaml
+jobtracker eval --replay-all --against /tmp/criteria.old.yaml
+```
+
+```
+replayed 9150 postings, open and closed (0 override(s), 0 held)
+  old: /tmp/criteria.old.yaml
+  new: criteria.yaml
+  match       33 → 14  (-19)
+  reject      7513 → 7512  (-1)
+  uncertain   1604 → 1624  (+20)
+
+transitions:
+  match → uncertain         19  BLOCKS
+  match → reject             0
+  uncertain → match          0
+  ...
+
+match → uncertain:
+  Notion             Software Engineer, New Grad
+                     └─ level:new grad+eng:generic  →  no_level_token_in_title
+```
+
+The delta table is `rematch`'s; the six transition lines always print, so "nothing
+moved" reads as six zeros rather than as silence. Up to `--samples N` (default 20)
+examples follow per transition, each with the reason the old rules gave and the reason
+the new ones give.
+
+- **`--against` is required.** The old file is named, not fetched: running `git` here
+  would make this the second module that shells out, and `assemble.py` is the only one
+  (a test in `tests/test_resume.py` keeps it that way).
+- **It gates only on a lost match.** Exit **1** when a posting goes `match → reject` or
+  `match → uncertain` and that transition is not declared intended; `uncertain → match`
+  and `uncertain → reject` are counted and printed and never block, for the reason in
+  *Regression vs unresolved* above. Exit **2** when it could not run — either criteria
+  file, the `--intended` file or the database did not load.
+- **`--intended PATH`** is a YAML mapping of the transitions this change means to make,
+  each with its reason, which is printed beside the count:
+
+  ```yaml
+  "match->uncertain": "bare 'grad' moves to the level task"
+  ```
+
+- **Overrides are applied to both sides.** A pinned posting cannot move on the pages, so
+  it is never a transition; when the rules under it *did* move, it is reported as
+  **held**, with its own samples. Those are the rows a criteria edit may need
+  `store.clear_override` for — only where a model guess contradicts the new rules.
+- **It is read-only.** The database is opened through a `mode=ro` URI, never through
+  `store.connect()`, which migrates on open, so it is safe against a copy of production
+  or a file you cannot write. It writes nothing anywhere and needs no `decisions`.
+  A WAL database in a directory you cannot write either will not open: SQLite needs to
+  create the `-shm` file beside it. Copy it somewhere writable.
+
 ## Suggestions
 
 `eval` also proposes phrases that appear in several postings you rejected and in **no**

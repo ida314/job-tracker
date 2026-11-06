@@ -1402,6 +1402,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
     Exits 1 when a regression exists, so this composes into a pre-apply gate rather
     than being something you have to remember to read.
     """
+    if getattr(args, "replay_all", False):
+        return _cmd_eval_replay(args)
     criteria = load_criteria(args.criteria)
     conn = _connect(config.DB_PATH if args.db is None else Path(args.db))
     decisions = store.all_decisions(conn)
@@ -1433,6 +1435,136 @@ def cmd_eval(args: argparse.Namespace) -> int:
             print(f"  {s.phrase!r:<28} {s.rejected} rejects   e.g. {s.examples[0][:44]!r}")
 
     return 1 if report.regressions else 0
+
+
+def _read_only_rows(db_path: Path) -> tuple[list, dict]:
+    """Every posting, and the overrides, read through a `mode=ro` URI.
+
+    Deliberately not `store.connect()`: connecting migrates, and a replay is evidence
+    gathered *before* a change — it must be safe to point at a copy of a production
+    database, or at one you cannot write. A database that predates `decided_by` reads
+    as human overrides, the same rule `apply_override` applies to a row without it.
+    """
+    import sqlite3
+
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT company, ats_job_id, title, location, url FROM postings "
+            "ORDER BY company, ats_job_id"
+        ).fetchall()
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        overrides: dict = {}
+        if "overrides" in tables:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(overrides)")}
+            by = "decided_by" if "decided_by" in cols else "'human' AS decided_by"
+            overrides = {
+                (r["company"], r["ats_job_id"]): r
+                for r in conn.execute(
+                    f"SELECT company, ats_job_id, decision, reason, {by} FROM overrides"
+                )
+            }
+    finally:
+        conn.close()
+    return rows, overrides
+
+
+def _load_intended(path: str | None) -> dict[tuple[str, str], str]:
+    """`--intended`: a YAML mapping of `"old->new": why`. ValueError on anything else."""
+    import yaml
+
+    if not path:
+        return {}
+    data = yaml.safe_load(Path(path).read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping of 'old->new': reason")
+    return {tuning.parse_transition(str(k)): str(v or "") for k, v in data.items()}
+
+
+def _cmd_eval_replay(args: argparse.Namespace) -> int:
+    """`eval --replay-all`: diff every stored posting's verdict under two criteria files.
+
+    The empty-corpus replay CLAUDE.md asks for when `decisions` has nothing in it. Reads
+    the database read-only, writes nothing, and gates only on a posting that stops
+    matching — a moved `uncertain` is counted and printed, never blocking.
+
+    Exit 0 clean (or every blocking transition declared in `--intended`), 1 on an
+    undeclared match loss, 2 when it could not run: either criteria file, the intended
+    file or the database did not load.
+    """
+    import sqlite3
+
+    if not args.against:
+        # The obvious default is `git show HEAD:criteria.yaml`, but `assemble.py` is the
+        # only module allowed to run a subprocess (tests/test_resume.py), so the old file
+        # is named rather than fetched.
+        print("eval --replay-all needs --against PATH, the criteria to compare with — e.g.",
+              file=sys.stderr)
+        print("  git show HEAD:criteria.yaml > /tmp/criteria.old.yaml", file=sys.stderr)
+        return 2
+    try:
+        old = load_criteria(args.against)
+        new = load_criteria(args.criteria)
+    except (OSError, ValueError) as exc:
+        print(f"criteria did not load: {exc}", file=sys.stderr)
+        return 2
+    try:
+        intended = _load_intended(args.intended)
+    except (OSError, ValueError) as exc:
+        print(f"--intended did not load: {exc}", file=sys.stderr)
+        return 2
+    db_path = config.DB_PATH if args.db is None else Path(args.db)
+    try:
+        rows, overrides = _read_only_rows(db_path)
+    except sqlite3.Error as exc:
+        print(f"could not read {db_path}: {exc}", file=sys.stderr)
+        return 2
+
+    report = tuning.replay(rows, old, new, overrides, samples=args.samples)
+    held = sum(report.held.values())
+    print(f"replayed {report.total} postings, open and closed "
+          f"({len(overrides)} override(s), {held} held)")
+    print(f"  old: {args.against}")
+    print(f"  new: {args.criteria}")
+    # rematch's delta table: the question after a rule change is always "what moved".
+    for verdict in sorted(set(report.before) | set(report.after)):
+        b, a = report.before.get(verdict, 0), report.after.get(verdict, 0)
+        arrow = f"  {b} → {a}" + (f"  ({a - b:+d})" if a != b else "")
+        print(f"  {verdict:<10}{arrow}")
+
+    print("\ntransitions:")
+    for t in tuning.TRANSITIONS:
+        flag = ""
+        if t in tuning.GATED_TRANSITIONS and report.transitions.get(t):
+            flag = "  intended: " + (intended[t] or "yes") if t in intended else "  BLOCKS"
+        print(f"  {t[0] + ' → ' + t[1]:<22}{report.transitions.get(t, 0):>6}{flag}")
+    if held:
+        print("held by an override (the rules moved, the pin did not):")
+        for t in tuning.TRANSITIONS:
+            if report.held.get(t):
+                print(f"  {t[0] + ' → ' + t[1]:<22}{report.held[t]:>6}")
+
+    def _samples(title: str, groups: dict) -> None:
+        for t in tuning.TRANSITIONS:
+            kept = groups.get(t)
+            if not kept:
+                continue
+            print(f"\n{title}{t[0]} → {t[1]}:")
+            for s in kept:
+                print(f"  {s.company:<18} {s.title[:72]}")
+                print(f"  {'':<18} └─ {s.old_reason}  →  {s.new_reason}")
+
+    _samples("", report.samples)
+    _samples("held, ", report.held_samples)
+
+    blocking = report.gated(intended)
+    if blocking:
+        lost = sum(blocking.values())
+        print(f"\n{lost} posting(s) stop matching and are not in --intended — exit 1")
+        return 1
+    return 0
 
 
 # -- rank --------------------------------------------------------------------------
@@ -2933,6 +3065,16 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--db", default=None)
     e.add_argument("--min-count", type=int, default=3,
                    help="rejects a phrase needs before it is suggested (default: 3)")
+    e.add_argument("--replay-all", action="store_true",
+                   help="diff every stored posting's verdict under --against and "
+                        "--criteria (read-only; needs no decisions)")
+    e.add_argument("--against", default=None, metavar="PATH",
+                   help="with --replay-all: the old criteria file (required)")
+    e.add_argument("--samples", type=int, default=20,
+                   help="with --replay-all: examples kept per transition (default: 20)")
+    e.add_argument("--intended", default=None, metavar="PATH",
+                   help="with --replay-all: YAML of 'old->new': reason, the transitions "
+                        "this change means to make")
     e.set_defaults(func=cmd_eval)
 
     pl = sub.add_parser(
