@@ -156,6 +156,11 @@ silently changes the verdict on thousands of postings already judged. See `docs/
   may need `store.clear_override` — **only** where a model guess contradicts the new rules.
 - **`check` re-derives a rules verdict from the title for every posting it fetches**, so an
   unpinned model verdict lasts one night. That is why `resolve`/`level` pins.
+- **`audit-pins` is the only bulk remover of model pins, and it can only see `llm` ones.**
+  `decided_by = 'llm'` is in its SQL (`store.llm_pins`). Dry by default, `--write` applies, by
+  hand only — never from `check`, `work` or `prepare`. A cleared pin re-derives from `match()`
+  alone; the model is not asked, and `decisions`, `applications`, `rankings` and
+  `level_readings` are untouched.
 - **Rejects are kept.** Do not replace them with a hash set of "seen and rejected": `cmd_check`
   re-deriving `match()` over every posting is what makes a criteria edit reclassify all of
   history with no backfill, and `eval` replays against that same corpus. The fetch unit is the

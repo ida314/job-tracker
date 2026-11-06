@@ -2201,6 +2201,25 @@ def clear_override(conn: sqlite3.Connection, company: str, ats_job_id: str) -> N
     )
 
 
+def llm_pins(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every override the model wrote, joined to its posting — `audit-pins`' input.
+
+    `decided_by = 'llm'` is in the SQL, not a filter applied afterwards: the audit is a
+    bulk remover, and a human ruling must not be in the list it chooses from at all.
+    The join is inner because a pin with no posting has nothing to re-derive from.
+    """
+    return conn.execute(
+        """
+        SELECT o.company, o.ats_job_id, o.decision, o.reason,
+               p.title, p.url, p.location, p.description, p.description_source
+        FROM overrides o
+        JOIN postings p ON p.company = o.company AND p.ats_job_id = o.ats_job_id
+        WHERE o.decided_by = 'llm'
+        ORDER BY o.company, o.ats_job_id
+        """
+    ).fetchall()
+
+
 def load_overrides(conn: sqlite3.Connection) -> dict[tuple[str, str], sqlite3.Row]:
     """All overrides keyed by (company, ats_job_id).
 
