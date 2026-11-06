@@ -538,6 +538,27 @@ def test_it_names_the_reason_a_pick_could_not_be_prepared(answers, tmp_path, cap
     assert "apply-to Stripe 8077887" in out
 
 
+def test_prepare_does_not_exit_2_for_thin_picks(form, answers, tmp_path, capsys):
+    """A pick judged from a feed's listing fields is named, and not counted against ready.
+
+    Planless here, on a curated company, which would otherwise be NOT READY and exit 2.
+    """
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    _seed(conn, answers)
+    store.set_description(conn, "Stripe", "8077887", "Backend Engineer · NYC", source="feed")
+    conn.commit()
+    conn.close()
+
+    form.fields = []
+    assert _prepare(db, answers, tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "NOT READY" not in out
+    assert "0/0 ready" in out and "1 thin, not counted" in out
+    assert "1 thin pick(s), judged from the feed's listing fields" in out
+    assert out.count("Stripe — Backend Engineer") == 2  # its line, and the thin list
+
+
 def test_prepare_with_nothing_queued_is_not_a_failure(form, answers, tmp_path, capsys):
     db = tmp_path / "s.db"
     store.connect(db).close()

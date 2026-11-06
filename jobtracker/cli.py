@@ -2066,19 +2066,53 @@ def _report_picks(picks) -> int:
     print(f"\nTomorrow: {len(picks)} pick(s)\n")
     for i, row in enumerate(picks, 1):
         print(f"  {i}. {row['company']} — {row['title'][:52]}")
+    _report_thin(picks)
     return EXIT_OK
 
 
+def _report_thin(picks) -> None:
+    """Name the picks whose judgment rests on a feed's listing fields (`rank.is_thin`).
+
+    Said once, by name, under the list: their score is already capped at moderate fit
+    and growth, and what you can do about one is read the posting before trusting it.
+    """
+    from . import rank as rank_mod
+
+    thin = [row for row in picks if rank_mod.is_thin(row)]
+    if not thin:
+        return
+    print(f"\n{len(thin)} thin pick(s), {rank_mod.THIN_WHY}:")
+    for row in thin:
+        print(f"  {row['company']} — {row['title'][:52]}")
+
+
 def _report_readiness(conn, picks, ctx) -> int:
-    """Print whether each pick can actually be applied to, and exit accordingly."""
+    """Print whether each pick can actually be applied to, and exit accordingly.
+
+    A thin pick (`rank.is_thin`) is reported and named, and counts neither toward
+    `ready` nor against it: whether it has a plan says nothing about whether it is worth
+    applying to, which is the open question about it, and a nightly exit 2 for a row only
+    reading the posting can settle is the dbt Labs trap again.
+    """
+    from . import rank as rank_mod
+
     plans = store.plans_by_posting(conn)
     ready = 0
     unprefillable = 0
+    thin = 0
     lines: list[str] = []
 
     for i, row in enumerate(picks, 1):
         plan = plans.get((row["company"], row["ats_job_id"]))
         head = f"  {i}. {row['company']} — {row['title'][:52]}"
+        if rank_mod.is_thin(row):
+            thin += 1
+            if plan is not None:
+                state = f"prefill {plan['fields'] - plan['gaps']}/{plan['fields']} fields"
+            else:
+                state = _unprefillable_reason(ctx, row) or "no plan"
+            lines.append(f"{head}\n       thin — {rank_mod.THIN_WHY} · {state}")
+            continue
         if plan is None:
             why = _unprefillable_reason(ctx, row)
             if why:
@@ -2092,12 +2126,15 @@ def _report_readiness(conn, picks, ctx) -> int:
         tail = f"{plan['gaps']} need you" if plan["gaps"] else "nothing left to type"
         lines.append(f"{head}\n       prefill {filled}/{plan['fields']} fields · {tail}")
 
-    prefillable = len(picks) - unprefillable
+    prefillable = len(picks) - unprefillable - thin
     summary = f"Tomorrow: {ready}/{prefillable} ready to apply to"
     if unprefillable:
         summary += f" ({unprefillable} apply on the employer's own page)"
+    if thin:
+        summary += f" ({thin} thin, not counted)"
     print(summary + "\n")
     print("\n".join(lines))
+    _report_thin(picks)
 
     if ready < prefillable:
         print("\nA pick with no plan opens as a blank form. See docs/prefill.md.")

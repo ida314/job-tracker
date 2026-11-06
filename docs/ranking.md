@@ -125,7 +125,8 @@ on its own the night real prose replaces the stub. An unjudged thin row still sc
 
 The row says so wherever its role is shown — picks, the drawer, both postings tables —
 with a `thin` chip titled *"judged from the feed's listing fields, not the posting's
-text"*.
+text"*. `prepare` names thin picks and counts them neither toward `ready` nor against it,
+so a thin pick never makes the nightly run exit 2.
 
 ## Two absences, handled deliberately
 
