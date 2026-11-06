@@ -148,6 +148,19 @@ def looks_engineering(title: str, criteria: Criteria) -> bool:
     )
 
 
+def _entry_reason(detail: str, evidence: str) -> str:
+    """`llm:entry+<detail>:<evidence[:80]>`, the shape `not_entry` already had.
+
+    An `entry` pin used to store no quote at all, so it could not be audited later
+    against the text it claimed to have read. Rows written before this keep the bare
+    `llm:entry+<detail>` form; every reader displays the string and none parses it, so
+    both render. Empty evidence (a direct call, never a grounded reading) keeps the
+    bare form rather than ending in a dangling colon.
+    """
+    reason = f"llm:entry+{detail}"
+    return f"{reason}:{evidence[:80]}" if evidence else reason
+
+
 def verdict_from_level(
     company: str,
     ats_job_id: str,
@@ -174,11 +187,11 @@ def verdict_from_level(
         if eng:
             detail = "role:" + role if role else "eng:generic"
             return Verdict(company, ats_job_id, Decision.MATCH,
-                           f"llm:entry+{detail}", "llm")
+                           _entry_reason(detail, evidence), "llm")
         # Entry level but not an engineering role — the same conclusion match.py
         # reaches for "Finance Associate".
         return Verdict(company, ats_job_id, Decision.REJECT,
-                       "llm:entry+non_engineering", "llm")
+                       _entry_reason("non_engineering", evidence), "llm")
 
     return None  # 'unclear' — no new information, leave the verdict untouched
 

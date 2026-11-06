@@ -38,7 +38,13 @@ distinguishable from rules verdicts, and the reason carries the evidence:
 ```
 Asana    Backend Software Engineer     reject   llm:not_entry:3+ years
 Discord  Software Engineer, Notifications  reject   llm:not_entry:Senior
+Acme     Backend Engineer              match    llm:entry+role:backend:recent graduates
 ```
+
+An `entry` reason carried no quote before 2026-11-06 (`llm:entry+eng:generic`), so a pin
+written then cannot be audited against the text it claims to have read; since then it
+carries one, as `not_entry` always did. The older rows are kept as they are; every
+surface prints the reason string and none parses it, so both forms render.
 
 ## The quote must be in what the model saw
 

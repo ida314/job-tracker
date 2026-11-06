@@ -277,7 +277,7 @@ def test_entry_on_a_non_engineering_title_still_rejects(criteria):
     """
     v = verdict_from_level("Acme", "1", "Finance Analyst", "entry", "new grads", criteria)
     assert v.decision is Decision.REJECT
-    assert v.reason == "llm:entry+non_engineering"
+    assert v.reason == "llm:entry+non_engineering:new grads"
 
 
 def test_not_entry_rejects_and_keeps_the_evidence(criteria):
@@ -287,13 +287,57 @@ def test_not_entry_rejects_and_keeps_the_evidence(criteria):
     assert "8+ years" in v.reason
 
 
+def test_entry_reason_carries_evidence(criteria):
+    """An entry pin has to be auditable later, the way a not_entry pin already was."""
+    v = verdict_from_level("Acme", "1", "Software Engineer", "entry",
+                           "recent graduates", criteria)
+    assert v.reason == "llm:entry+eng:generic:recent graduates"
+    v = verdict_from_level("Acme", "1", "Backend Engineer", "entry", "g" * 200, criteria)
+    assert v.reason == "llm:entry+role:backend:" + "g" * 80
+
+
+def test_old_entry_reason_without_evidence_still_renders(criteria):
+    """Pins written before grounding carry the bare form. Both forms still render.
+
+    Nothing parses the reason string: `apply_override` prefixes it and `/tuning`'s Fired
+    column escapes and prints it. This pins that, so a later reader that splits on the
+    evidence suffix has to cope with rows that have none.
+    """
+    from jobtracker import store
+    from jobtracker.models import Verdict
+    from jobtracker.server import render_tuning
+    from jobtracker.tuning import apply_override
+
+    conn = store.connect(":memory:")
+    for job, reason in (("old", "llm:entry+eng:generic"),
+                        ("new", "llm:entry+eng:generic:recent graduates")):
+        conn.execute(
+            "INSERT INTO postings (company, ats_job_id, title, location, url, "
+            "first_seen, last_seen, closed_at) VALUES (?,?,?,?,?,?,?,NULL)",
+            ("Acme", job, f"Software Engineer {job}", "NYC",
+             f"https://example.com/{job}", "2026-01-01", "2026-01-01"),
+        )
+        assert store.set_override(conn, "Acme", job, "match", "2026-01-01",
+                                  reason=reason, decided_by="llm")
+    overrides = store.load_overrides(conn)
+    for job in ("old", "new"):
+        v = apply_override(Verdict("Acme", job, Decision.UNCERTAIN, "no_level", "rules"),
+                           overrides)
+        assert v.decision is Decision.MATCH and v.decided_by == "llm"
+        store.record_verdict(conn, v, "2026-01-01")
+    conn.commit()
+    page = render_tuning(conn, criteria)
+    assert "<code>override:llm:entry+eng:generic</code>" in page
+    assert "<code>override:llm:entry+eng:generic:recent graduates</code>" in page
+
+
 def test_unclear_leaves_the_verdict_alone(criteria):
     assert verdict_from_level("Acme", "1", "Software Engineer", "unclear", "", criteria) is None
 
 
 def test_backend_title_is_reported_as_backend_relevant(criteria):
     v = verdict_from_level("Acme", "1", "Backend Engineer", "entry", "grad", criteria)
-    assert v.reason == "llm:entry+role:backend"
+    assert v.reason == "llm:entry+role:backend:grad"
 
 
 # -- scoping -----------------------------------------------------------------------
