@@ -92,6 +92,13 @@ company · ats_job_id · band (entry | not_entry | unclear) · evidence · sourc
   matches what it would show now, so a description upgrade re-asks that posting and
   nothing else. `store.level_reading(conn, company, ats_job_id)` reads one back.
 
+## Feed metadata is not a description
+
+A job board that has no prose assembles a description out of its fields — employer,
+location, a date — and stores it with `description_source = 'feed'`. There is no level
+to read in that, so `level` does not queue it. It stays `uncertain`, visible, until a
+description with prose replaces it.
+
 ## Failure is absence, never a wrong answer
 
 No router configured, connection refused, timeout, malformed response, an unroutable

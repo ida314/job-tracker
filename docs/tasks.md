@@ -215,8 +215,9 @@ register(MyTask())
 ```
 
 `pending()` must return only work the task can actually do. `level` excludes postings
-with no cached description, because counting those as pending overstates a backlog no
-model could drain — and sends a `--budget` run to units guaranteed to be no-ops. It also skips postings already read
+with no cached description and prose-less feed rows (`description_source = 'feed'`),
+because counting those as pending overstates a backlog no model could drain — and sends
+a `--budget` run to units guaranteed to be no-ops. It also skips postings already read
 off the text it would show now (`level_readings.source_hash`).
 
 ## Running it

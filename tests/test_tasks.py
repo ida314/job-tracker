@@ -386,6 +386,29 @@ def test_unclear_is_recorded_and_not_retried(criteria):
     conn.close()
 
 
+def _feed_row(conn, jid, title="Backend Software Engineer"):
+    """A job board row whose description is metadata the feed assembled, not prose."""
+    store.append_postings(
+        conn, "Simplify", [Posting("Simplify", jid, title, f"https://x/f{jid}",
+                                   description="Acme · New York, NY · posted 2026-08-01")],
+        TODAY, origin="simplify", description_source="feed",
+    )
+    store.record_verdict(
+        conn, Verdict("Simplify", jid, Decision.UNCERTAIN, "r", "rules"), TODAY)
+    conn.commit()
+
+
+def test_prose_less_feed_row_is_not_level_work(criteria):
+    """A feed's assembled fields carry no level. Reading them is not work `level` can do."""
+    conn = store.connect(":memory:")
+    _feed_row(conn, "f1")
+    assert conn.execute(
+        "SELECT description_source FROM postings WHERE ats_job_id='f1'"
+    ).fetchone()[0] == "feed"
+    assert get_task("level").pending(conn, _ctx(criteria)) == []
+    conn.close()
+
+
 def test_changed_description_is_asked_again(criteria):
     """A reading is of one text. A description upgrade is a new text and is read again."""
     conn = store.connect(":memory:")
@@ -458,6 +481,22 @@ def test_reading_written_even_when_override_is_yours(criteria):
     assert (override["decision"], override["decided_by"]) == ("match", "human")
     reading = store.level_reading(conn, "Acme", "1")
     assert reading["band"] == "not_entry" and reading["evidence"] == "10+ years"
+    conn.close()
+
+
+def test_pending_counts_only_unread_prose(criteria):
+    """Three already read as unclear, two prose-less feed rows, one fresh: one unit."""
+    conn = store.connect(":memory:")
+    _uncertain(conn, "1", "2", "3", "4")
+    ctx = _ctx(criteria)
+    task = get_task("level")
+    three = [u for u in task.pending(conn, ctx) if u.ats_job_id != "4"]
+    asyncio.run(run_task(conn, task, _Answering({"level": "unclear", "evidence": ""}),
+                         ctx, units=three))
+    _feed_row(conn, "f1")
+    _feed_row(conn, "f2")
+    assert task.pending_count(conn, ctx) == 1
+    assert [u.ats_job_id for u in task.pending(conn, ctx)] == ["4"]
     conn.close()
 
 

@@ -20,7 +20,8 @@ One thing did change, and it is an improvement worth naming. The old pass counte
 postings with no description as "considered, no description" — work it had queued and
 could not do. Here they are simply not pending: since `resolve` stopped fetching, a
 posting with no cached description is a guaranteed no-op, and calling it queued work
-overstated the backlog every night.
+overstated the backlog every night. A feed row whose description is assembled metadata
+(`description_source = 'feed'`) is the same case: there is no prose to read a level off.
 """
 
 from __future__ import annotations
@@ -244,6 +245,10 @@ class LevelTask(Task):
         for row in rows:
             description = row["description"]
             if not description:
+                continue
+            # A feed's assembled metadata — employer, location, a date — is not a
+            # description. There is no level to read in it, so it is not work.
+            if row["description_source"] == "feed":
                 continue
             if not looks_engineering(row["title"], ctx.criteria):
                 continue

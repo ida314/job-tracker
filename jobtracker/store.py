@@ -2250,13 +2250,13 @@ def uncertain_for_resolution(
 
     Within that, newest first, so the budget goes to the freshest readable postings.
 
-    Each row also carries `reading_hash` — the `source_hash` of the posting's
-    `level_readings` row, NULL when it has none. `level.pending()` compares it in Python:
-    the hash is of the text the model is shown, which is built there.
+    Each row also carries `description_source` and `reading_hash` — the `source_hash` of
+    the posting's `level_readings` row, NULL when it has none. `level.pending()` filters
+    on both in Python: the hash is of the text the model is shown, which is built there.
     """
     sql = """
         SELECT p.company, p.ats_job_id, p.title, p.location, p.description,
-               r.source_hash AS reading_hash
+               p.description_source, r.source_hash AS reading_hash
         FROM postings p JOIN verdicts v
           ON p.company=v.company AND p.ats_job_id=v.ats_job_id
         LEFT JOIN level_readings r
