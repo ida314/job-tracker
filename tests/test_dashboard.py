@@ -1395,3 +1395,44 @@ def test_the_static_applications_tab_prerenders_every_view_and_hides_all_but_one
     assert 'class="appsort js-only"' in doc
     assert ".appsort.js-only" in dashboard._JS
     assert doc.count("<script>") == 1
+
+
+# -- thin rows ----------------------------------------------------------------------
+def test_thin_chip_renders_on_picks_and_tables():
+    """A row judged from a feed's listing fields says so wherever its role is shown.
+
+    Picks, the drawer, the company pages table and the job boards table all render the
+    same `span.thin`, from `rank.is_thin`; a row with real text renders none.
+    """
+    conn = _matches(*[("Acme", str(j), "Backend Engineer, New Grad", "New York, NY")
+                      for j in range(1, 6)])
+    companies = [_company("Acme", 1)]
+    for j in range(1, 6):
+        store.set_description(conn, "Acme", str(j), "text",
+                              source="feed" if j in (1, 4) else "ats")
+        _ranked(conn, "Acme", str(j), 100.0 - j)
+    store.append_postings(
+        conn, "Simplify New-Grad-Positions",
+        [Posting("Simplify New-Grad-Positions", "s1", "Klaviyo — Backend Engineer",
+                 "https://x/s1", "New York, NY", employer="Klaviyo", description="d")],
+        "2026-07-01", origin="simplify", description_source="feed")
+    store.record_verdict(conn, Verdict("Simplify New-Grad-Positions", "s1", Decision.MATCH,
+                                       "r", "rules"), "2026-07-01")
+    conn.commit()
+
+    for interactive in (False, True):
+        doc = dashboard.build_dashboard(conn, companies, "2026-07-22",
+                                        interactive=interactive)
+        doc = doc[:doc.rindex("<script>")]
+        chip = '<span class="thin" title="judged from the feed&#x27;s listing fields, '
+        today = doc[doc.index('data-panel-body="today"'):doc.index('data-panel-body="all"')]
+        picks = today[:today.index('<details class="rest">')]
+        rest = today[today.index('<details class="rest">'):]
+        assert picks.count(chip) == 1      # pick 1 of 3
+        assert rest.count(chip) == 1       # row 4 of the drawer's two
+        assert _all_panel(doc).count(chip) == 2
+        if not interactive:  # under `serve` the job boards are their own page
+            boards = doc[doc.index('data-panel-body="jobboards"'):
+                         doc.index('data-panel-body="boards"')]
+            assert boards.count(chip) == 1
+    assert ".thin {" in dashboard._CSS

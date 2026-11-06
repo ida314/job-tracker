@@ -1544,7 +1544,7 @@ def open_postings_by_verdict(conn: sqlite3.Connection, decision: str) -> list[sq
             """
             SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
                    p.first_seen, p.posted_on, p.origin, p.employer, p.dedupe_key,
-                   v.reason,
+                   p.description_source, v.reason,
                    COALESCE(
                      (SELECT ai.status FROM applications ai
                        WHERE ai.company=p.company AND ai.ats_job_id=p.ats_job_id),
@@ -2094,6 +2094,7 @@ def ranked_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         """
         SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
                p.posted_on, p.first_seen, p.origin, p.employer, p.dedupe_key,
+               p.description_source,
                r.backend_fit, r.growth, r.entry_risk, r.why, r.score, r.prose_hash,
                COALESCE(a.status, (
                  SELECT ak.status FROM applications ak

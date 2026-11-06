@@ -119,18 +119,43 @@ class ScoreBreakdown:
         return " · ".join(parts)
 
 
+# What "thin" means, in the words every surface that marks a thin row uses.
+THIN_WHY = "judged from the feed's listing fields, not the posting's text"
+
+
+def is_thin(row) -> bool:
+    """Was this row's description assembled from a feed's listing fields?
+
+    `description_source='feed'` is a stub a job board built from fields (Simplify), not
+    anything the employer wrote, so a judgment of it rests on almost nothing. A row that
+    predates the column, or a query that does not select it, is not thin: absence is not
+    evidence of a stub.
+    """
+    keys = row.keys()
+    return "description_source" in keys and row["description_source"] == "feed"
+
+
 def score_posting(
     row,
     profile: Profile,
     criteria: Criteria,
     tier: Optional[int],
     today: str,
+    *,
+    thin: bool = False,
 ) -> Optional[ScoreBreakdown]:
     """Compose one posting's score. None if the model has not judged it yet.
 
     Returning None rather than 0.0 is deliberate: an unjudged posting is unknown, not
     bad, and scoring it zero would bury it at the bottom of the list where nobody would
     ever notice the model had failed to read it.
+
+    `thin` (see `is_thin`) caps `fit` and `growth` at `moderate` before weighting. A
+    judgment read off a feed's listing fields can say "strong" about a title and a
+    location, and without the cap it outranks a row the model read real prose for. The
+    cap is applied here, in Python; the model is never told, so its answer about the
+    text it saw is unchanged and the cap lifts on its own once prose arrives. An unjudged
+    thin row is still None — thinness caps a judgment, it does not invent one.
     """
     fit = row["backend_fit"] if "backend_fit" in row.keys() else None
     if fit is None or fit not in ORDINAL_VALUE:
@@ -140,11 +165,16 @@ def score_posting(
     if growth not in ORDINAL_VALUE or risk not in RISK_VALUE:
         return None
 
+    fit_value, growth_value = ORDINAL_VALUE[fit], ORDINAL_VALUE[growth]
+    if thin:
+        fit_value = min(fit_value, ORDINAL_VALUE["moderate"])
+        growth_value = min(growth_value, ORDINAL_VALUE["moderate"])
+
     w = profile.weights
     posted_on = row["posted_on"] if "posted_on" in row.keys() else None
     terms = {
-        "fit": w["fit"] * ORDINAL_VALUE[fit],
-        "growth": w["growth"] * ORDINAL_VALUE[growth],
+        "fit": w["fit"] * fit_value,
+        "growth": w["growth"] * growth_value,
         "recency": w["recency"] * recency_value(
             posted_on, today, profile.recency_half_life_days
         ),
