@@ -1210,7 +1210,8 @@ def _rescore(conn, profile, criteria, tiers, today) -> tuple[int, int]:
     scored = unranked = 0
     for row in store.ranked_matches(conn):
         breakdown = rank_mod.score_posting(
-            row, profile, criteria, tiers.get(row["company"]), today
+            row, profile, criteria, tiers.get(row["company"]), today,
+            thin=rank_mod.is_thin(row),
         )
         if breakdown is None:
             unranked += 1

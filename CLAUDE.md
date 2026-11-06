@@ -791,6 +791,10 @@ deliberately is not a task** — it needs no model and must run regardless.
 - **Two absences that must not be "simplified":** an unjudged posting scores `None`, not `0.0`
   (zero buries a model failure at the bottom); an undated one scores mid-scale, not "today" (that
   floats stale reqs to the top). Both have tests.
+- **A thin row's fit and growth are capped at moderate in Python; the model is never told.** Thin
+  is `description_source='feed'` (`rank.is_thin`): a stub a job board assembled from fields, so a
+  "strong" read off it would outrank real prose. `_rescore` passes `thin=` to `score_posting`; an
+  unjudged thin row still scores `None`.
 - **Rankings live in their own table, never in `verdicts`** — `check` rewrites `verdicts` nightly,
   which is what erased the model's work before.
 - **`rank` never fails for want of a model**; yesterday's order beats nothing. A large "still

@@ -2071,6 +2071,7 @@ def ranked_matches(conn: sqlite3.Connection) -> list[sqlite3.Row]:
         """
         SELECT p.company, p.ats_job_id, p.title, p.location, p.url,
                p.posted_on, p.first_seen, p.origin, p.employer, p.dedupe_key,
+               p.description_source,
                r.backend_fit, r.growth, r.entry_risk, r.why, r.score, r.prose_hash,
                COALESCE(a.status, (
                  SELECT ak.status FROM applications ak

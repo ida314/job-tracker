@@ -50,6 +50,57 @@ def test_an_unjudged_posting_scores_none_not_zero(profile, criteria):
     assert _score(_row(entry_risk="unknown"), profile, criteria) is None
 
 
+# -- thin rows: judged from a feed's listing fields ----------------------------------
+def test_thin_row_score_is_capped(profile, criteria):
+    """A "strong" read off a title and a location must not outrank real prose.
+
+    Fit and growth are capped at moderate before weighting; entry risk, recency, tier and
+    location are untouched, and an ordinal already below the cap stays where it was.
+    """
+    full = _score(_row(), profile, criteria)
+    thin = rank.score_posting(_row(), profile, criteria, 1, "2026-08-02", thin=True)
+    moderate = _score(_row(backend_fit="moderate", growth="moderate"), profile, criteria)
+    assert thin.total < full.total
+    assert thin.terms == moderate.terms
+    for term in ("recency", "tier", "location", "entry_risk"):
+        assert thin.terms[term] == full.terms[term]
+
+    weak = _row(backend_fit="weak", growth="none")
+    assert (rank.score_posting(weak, profile, criteria, 1, "2026-08-02", thin=True).terms
+            == _score(weak, profile, criteria).terms)
+
+    # The flag comes off the row's `description_source`, which `ranked_matches` selects,
+    # and `_rescore` is the caller that passes it — so a stored thin row is stored capped.
+    assert rank.is_thin(_row(description_source="feed"))
+    assert not rank.is_thin(_row(description_source="ats"))
+    assert not rank.is_thin(_row(description_source="prose"))
+    assert not rank.is_thin(_row())  # a row predating the column is not thin
+
+    from jobtracker.cli import _rescore
+
+    conn = store.connect(":memory:")
+    store.sync_postings(conn, "Acme", [Posting("Acme", jid, "SWE", f"u{jid}", "New York, NY")
+                                       for jid in ("1", "2")], "2026-08-02")
+    for jid, source in (("1", "ats"), ("2", "feed")):
+        store.set_description(conn, "Acme", jid, "text", source=source)
+        store.record_verdict(
+            conn, Verdict("Acme", jid, Decision.MATCH, "r", "rules"), "2026-08-02")
+        store.record_judgment(conn, "Acme", jid, RankJudgment("strong", "strong", "low", ""),
+                              "h", "2026-08-02")
+    _rescore(conn, profile, criteria, {"Acme": 1}, "2026-08-02")
+    scores = {r["ats_job_id"]: r["score"] for r in store.ranked_matches(conn)}
+    assert scores["2"] < scores["1"]
+    assert [r["description_source"] for r in store.ranked_matches(conn)] == ["ats", "feed"]
+    conn.close()
+
+
+def test_unjudged_thin_row_still_scores_none(profile, criteria):
+    """Thinness caps a judgment; it never invents one. An unjudged row stays a gap."""
+    for row in (_row(backend_fit=None), _row(backend_fit="excellent"),
+                _row(entry_risk="unknown")):
+        assert rank.score_posting(row, profile, criteria, 1, "2026-08-02", thin=True) is None
+
+
 def test_an_undated_posting_is_mid_scale_not_fresh(profile, criteria):
     """NULL posted_on must read as 'unknown', never as 'posted today'."""
     fresh = _score(_row(posted_on="2026-08-02"), profile, criteria).terms["recency"]
