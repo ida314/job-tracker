@@ -10,6 +10,12 @@ of that stays in criteria.yaml where you can read it, diff it, and test it.
            not_entry : REJECT
            unclear   : leave UNCERTAIN
 
+Every grounded answer, `unclear` included, is also written to `level_readings` with a
+hash of the text the model was shown. `unclear` is an answer — the model read the page
+and the page does not say — so it is recorded and the unit is done, the way `inbox`
+records "nothing here". It used to read as no answer, which spent three model calls on
+every such posting and then set it aside as blocked, beside the transport failures.
+
 One thing did change, and it is an improvement worth naming. The old pass counted
 postings with no description as "considered, no description" — work it had queued and
 could not do. Here they are simply not pending: since `resolve` stopped fetching, a
@@ -19,6 +25,7 @@ overstated the backlog every night.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -74,6 +81,21 @@ class LevelVerdict:
         return self.level in ("entry", "not_entry")
 
 
+@dataclass(frozen=True)
+class LevelAnswer:
+    """What `run` hands `apply`: the reading to record, and the verdict it implies.
+
+    `verdict` is None for `unclear`, which is recorded and changes nothing. A separate
+    type rather than a bare Verdict because the reading is written for every grounded
+    answer and the verdict only for some — returning None for `unclear`, as this once
+    did, told the runner "no answer" about a posting the model had in fact read.
+    """
+
+    reading: LevelVerdict
+    source_hash: str
+    verdict: Optional[Verdict] = None
+
+
 def shown_text(title: str, description: str) -> str:
     """Exactly what the model is shown: the prompt's user turn and the grounding corpus.
 
@@ -85,6 +107,15 @@ def shown_text(title: str, description: str) -> str:
         f"Job title: {title}\n\n"
         f"Job description:\n{(description or '')[:MAX_DESCRIPTION_CHARS]}"
     )
+
+
+def source_hash(shown: str) -> str:
+    """`sha256[:16]` of the text the model was shown — `level_readings.source_hash`.
+
+    Of `shown`, not of the description: the title is part of what was read, and so is
+    the truncation, so either moving is a different question.
+    """
+    return hashlib.sha256(shown.encode("utf-8")).hexdigest()[:16]
 
 
 def grounded(evidence: str, shown: str) -> bool:
@@ -211,10 +242,15 @@ class LevelTask(Task):
         rows = store.uncertain_for_resolution(conn, limit=None)
         units: list[TaskUnit] = []
         for row in rows:
-            description = row["description"] if "description" in row.keys() else None
+            description = row["description"]
             if not description:
                 continue
             if not looks_engineering(row["title"], ctx.criteria):
+                continue
+            # Already read, off this exact text. Hashed here rather than in SQL because
+            # `shown_text` is the one builder of what the model sees; a description
+            # upgrade moves the hash and the posting is asked again.
+            if row["reading_hash"] == source_hash(shown_text(row["title"], description)):
                 continue
             units.append(TaskUnit(
                 task=self.name,
@@ -241,17 +277,30 @@ class LevelTask(Task):
             idempotency_key=unit.idempotency_key(),
         )
         reading = parse_verdict(text, shown)
-        if reading is None or not reading.usable:
-            # 'unclear' is an answer, but not one that changes anything — same outcome
-            # as no answer at all, which is what None means to the runner.
+        if reading is None:
+            # Malformed, ungrounded, or nothing at all: no answer, and the runner counts
+            # it as a failure. Only this is None — 'unclear' is an answer.
             return None
-        return verdict_from_level(
-            unit.company, unit.ats_job_id, unit.title,
-            reading.level, reading.evidence, ctx.criteria,
-        )
+        verdict = None
+        if reading.usable:
+            verdict = verdict_from_level(
+                unit.company, unit.ats_job_id, unit.title,
+                reading.level, reading.evidence, ctx.criteria,
+            )
+        return LevelAnswer(reading=reading, source_hash=source_hash(shown),
+                           verdict=verdict)
 
     def apply(self, conn, unit, result, ctx):
-        verdict: Verdict = result
+        answer: LevelAnswer = result
+        # The reading first, and whatever follows: it records what the model read, which
+        # stays true whether or not the verdict is ours to write.
+        store.record_level_reading(
+            conn, unit.company, unit.ats_job_id, answer.reading.level,
+            answer.reading.evidence, answer.source_hash, ctx.today,
+        )
+        verdict = answer.verdict
+        if verdict is None:
+            return "unclear"
         # Pin before recording. `check` re-derives a rules verdict from the title for
         # every posting it fetches, and the title is exactly what the rules already
         # found insufficient — so an unpinned llm verdict lasts one night. A posting you

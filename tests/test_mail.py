@@ -349,9 +349,9 @@ def test_an_unparseable_answer_is_no_answer():
 
 
 def test_a_message_read_as_nothing_is_marked_read_and_never_asked_again():
-    """Deliberately unlike `level`'s `unclear`, which returns None and is retried three
-    times. Here that would spend three calls on every newsletter, and nothing else will
-    ever resolve a message that is simply not about an application."""
+    """Like `level`'s `unclear`, an answer that changes nothing is still written. Read as
+    no answer it would spend three calls on every newsletter, and nothing else will ever
+    resolve a message that is simply not about an application."""
     conn = store.connect(":memory:")
     _seed(conn)
     _record(conn)

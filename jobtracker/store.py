@@ -188,6 +188,27 @@ CREATE TABLE IF NOT EXISTS deferrals (
     PRIMARY KEY (company, ats_job_id)
 );
 
+-- What the `level` task read off a posting's description: one row per posting, every
+-- grounded answer, `unclear` included. `unclear` used to write nothing and count as no
+-- answer, so each one spent MAX_ATTEMPTS model calls and was then set aside as blocked —
+-- indistinguishable from a broken router, with nothing recording that the model had
+-- in fact read the posting. A reading is the record that it did.
+--
+-- `band` is `entry` | `not_entry` | `unclear` for now; it is free TEXT so a later band
+-- set widens the values without changing the table's shape. `source_hash` is
+-- `sha256[:16]` of exactly the text the model was shown (`level.shown_text`), so a
+-- description upgrade changes it and `level.pending()` asks again. Not an override:
+-- this row never decides a verdict by itself.
+CREATE TABLE IF NOT EXISTS level_readings (
+    company     TEXT NOT NULL,
+    ats_job_id  TEXT NOT NULL,
+    band        TEXT NOT NULL,
+    evidence    TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    read_at     TEXT NOT NULL,
+    PRIMARY KEY (company, ats_job_id)
+);
+
 -- A failure ledger for the task queue. NOT a queue: the queue is derived every run by
 -- each task's own SQL over the tables above, so there is nothing here to drift out of
 -- sync with what is actually pending. This exists for one purpose — to stop retrying a
@@ -1381,6 +1402,8 @@ _PURGE_BY_COMPANY = [
     "postings", "verdicts", "rankings", "deferrals", "prefill_plans",
     "posting_resumes", "posting_letters", "task_attempts", "form_fields",
     "board_health", "manual_checks",
+    # What `level` read off a description. Re-derivable: the next `work` reads it again.
+    "level_readings",
     # Machine-authored and re-derivable: the next `work` proposes them again from the
     # description and the resume. Your ruling on one is not in here — accepting a
     # suggestion attaches a file, and that lives in `posting_resumes`.
@@ -2226,11 +2249,18 @@ def uncertain_for_resolution(
     `--limit 40` considering 40 and resolving 0.
 
     Within that, newest first, so the budget goes to the freshest readable postings.
+
+    Each row also carries `reading_hash` — the `source_hash` of the posting's
+    `level_readings` row, NULL when it has none. `level.pending()` compares it in Python:
+    the hash is of the text the model is shown, which is built there.
     """
     sql = """
-        SELECT p.company, p.ats_job_id, p.title, p.location, p.description
+        SELECT p.company, p.ats_job_id, p.title, p.location, p.description,
+               r.source_hash AS reading_hash
         FROM postings p JOIN verdicts v
           ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        LEFT JOIN level_readings r
+          ON r.company=p.company AND r.ats_job_id=p.ats_job_id
         WHERE v.verdict='uncertain' AND p.closed_at IS NULL
         ORDER BY (p.description IS NULL OR p.description = ''),
                  p.first_seen DESC, p.company
@@ -2282,6 +2312,47 @@ def get_description(
         (company, ats_job_id),
     ).fetchone()
     return row["description"] if row else None
+
+
+# -- level readings ----------------------------------------------------------------
+def record_level_reading(
+    conn: sqlite3.Connection,
+    company: str,
+    ats_job_id: str,
+    band: str,
+    evidence: str,
+    source_hash: str,
+    now: str,
+) -> None:
+    """Write what `level` read off one posting, replacing any earlier reading.
+
+    One row per posting: a reading is about the text shown now, and an older one about
+    a description that has since changed answers a question nobody is asking any more.
+    """
+    conn.execute(
+        """
+        INSERT INTO level_readings (company, ats_job_id, band, evidence,
+                                    source_hash, read_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(company, ats_job_id) DO UPDATE SET
+            band=excluded.band,
+            evidence=excluded.evidence,
+            source_hash=excluded.source_hash,
+            read_at=excluded.read_at
+        """,
+        (company, ats_job_id, band, evidence or "", source_hash, now),
+    )
+
+
+def level_reading(
+    conn: sqlite3.Connection, company: str, ats_job_id: str
+) -> Optional[sqlite3.Row]:
+    """The posting's `level_readings` row, or None if the model never read it."""
+    return conn.execute(
+        "SELECT company, ats_job_id, band, evidence, source_hash, read_at "
+        "FROM level_readings WHERE company=? AND ats_job_id=?",
+        (company, ats_job_id),
+    ).fetchone()
 
 
 # -- the task ledger ---------------------------------------------------------------

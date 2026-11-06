@@ -25,6 +25,7 @@ UNCERTAIN + engineering-looking title
              ├─ entry     → re-apply the RULES' engineering gate → match or reject
              ├─ not_entry → reject
              └─ unclear   → stays uncertain
+        every grounded answer, unclear included → a row in level_readings
 ```
 
 An `entry` reading does not by itself produce a match. It still has to pass the same
@@ -64,7 +65,32 @@ supports.
   `tailor`, `inbox` and `coverletter` already use. The stored evidence is the flattened
   quote.
 - **Empty evidence on a usable level is ungrounded.** `unclear` with empty evidence is
-  still a valid reading; it changes nothing either way.
+  still a valid reading; it is recorded and moves no verdict.
+
+## Every reading is recorded, `unclear` included
+
+`unclear` is an answer: the model read the page, and the page does not say. It used to
+come back to the runner as *no answer*, so each such posting spent three model calls and
+was then set aside as blocked — counted beside a dead router, with nothing recording
+that it had been read at all. Now every grounded answer writes one row to
+`level_readings`:
+
+```
+company · ats_job_id · band (entry | not_entry | unclear) · evidence · source_hash · read_at
+```
+
+- **`unclear` is `ok`.** The unit's failure count resets and it leaves the queue. This is
+  the rule `inbox` has always had for "this message is not about an application".
+- **Only junk is still a failure.** Malformed JSON, prose, an off-enum level, an
+  ungrounded quote: `run` returns None and the unit counts against its three lives, with
+  no reading written.
+- **The reading is written before the override**, so a posting you have ruled on keeps
+  your ruling *and* records what the model read. A reading is not an override and moves
+  no verdict by itself; `entry` and `not_entry` pin exactly as they did.
+- **`source_hash` is `sha256[:16]` of `shown_text`** — title plus the truncated
+  description, the string the model saw. `pending()` skips a posting whose reading
+  matches what it would show now, so a description upgrade re-asks that posting and
+  nothing else. `store.level_reading(conn, company, ats_job_id)` reads one back.
 
 ## Failure is absence, never a wrong answer
 

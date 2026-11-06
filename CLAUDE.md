@@ -469,9 +469,9 @@ first thing other than the user to touch the outer loop, which is why it may onl
 - **`read_at` NULL is the queue**; non-NULL with no proposal means "read, and not application
   news". Rejected messages are deliberately not stored, so a message predating an application can
   become a candidate later.
-- **"Nothing here" is an answer and is written**, unlike `level`'s `unclear` — copying `level`
-  would fill the blocked-unit count with healthy readings. Only a transport failure leaves a
-  message unread.
+- **"Nothing here" is an answer and is written**, as `level`'s `unclear` is — reading it as no
+  answer would fill the blocked-unit count with healthy readings. Only a transport failure
+  leaves a message unread.
 - **The model's quote must appear in the message verbatim.** It is the only free text it
   produces, and grounding it is what keeps a fabricated rejection off the list.
 - **`unit_key` is the message id**, or two ambiguous messages at one company collapse onto one
@@ -713,6 +713,18 @@ API-key handling anywhere in `jobtracker/llm/`. Do not add a hosted provider.
   level is ungrounded too; `unclear` needs none. Both reasons carry the quote
   (`llm:entry+<detail>:<evidence>`, `llm:not_entry:<evidence>`); `entry` pins written
   before 2026-11-06 carry none, and nothing parses the string, so both forms render.
+- **Every grounded answer writes a `level_readings` row, `unclear` included.** `unclear` is an
+  answer — the model read the page and the page does not say — and is written like `inbox`'s
+  "nothing here": the unit is `ok` and leaves the queue. Read as no answer, as it once was, it
+  spent three calls per posting and then sat in the blocked count beside transport failures.
+  `run` returns a `LevelAnswer` (the reading plus the verdict it implies, None for `unclear`);
+  only a malformed or ungrounded reply is None. `apply` writes the reading **before**
+  `set_override`, so a posting you ruled on still records what was read. A reading is not an
+  override and moves no verdict by itself.
+- **`level_readings.source_hash` is `sha256[:16]` of `shown_text`**, hashed in Python by
+  `level.source_hash`, and `pending()` skips a posting whose reading matches the text it would
+  show now. A description upgrade moves the hash and the posting is asked again. The
+  `unit_key` stays `"level"`.
 - **Every failure path must leave the posting UNCERTAIN.** Unreachable, timeout, malformed,
   unsure. Nothing here may raise for a down server, and a code path that can produce a verdict from
   a failed call is a bug.
