@@ -747,6 +747,25 @@ API-key handling anywhere in `jobtracker/llm/`. Do not add a hosted provider.
 
 ---
 
+## The review queue
+
+`jobtracker/queue.py`, `store.uncertain_with_context`, `docs/queue.md`. Which part of the
+uncertain list a row is in: `feed`, `read`, `signal`, and the two folds, `no_signal` and
+`noise`.
+
+- **`queue.lane` is the single derivation.** Every surface that splits the uncertain list —
+  `/review`, the dashboard tables, the Today count, the folds — calls it, and the labels come
+  from `queue.label`. A test greps the package for the label strings. The field signal is
+  `level.looks_engineering` and nothing else; the feed band's wording is `queue.BAND_WORDS`.
+- **A lane is derived when a page renders and is never stored.** It reads the title, criteria,
+  curation and reading as they are now; no column or table holds one.
+- **Folding is display, never a verdict.** No lane moves a posting out of `uncertain`, and
+  `queue.py` is pure — no SQLite, no files, no clock.
+- **`board_scope` is read here only.** It decides which fold a no-signal row lands in.
+- **`targets` is a parameter** (default `("entry",)`), never read from config inside `queue.py`.
+
+---
+
 ## Descriptions are cached by `check`
 
 `cmd_check` stores a description for every posting whose verdict is `match` or `uncertain`. That
