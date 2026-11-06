@@ -23,6 +23,39 @@ def test_every_css_variable_used_is_defined():
     assert used and used <= defined, sorted(used - defined)
 
 
+def test_every_css_variable_on_the_review_page_resolves():
+    """The page-level check above reads the modules; this one reads a rendered `/review`,
+    so a variable in markup the page builds at run time is caught too."""
+    from jobtracker import config, store
+    from jobtracker.criteria import load_criteria
+    from jobtracker.models import Company
+
+    conn = store.connect(":memory:")
+    for jid, title, company, origin in (
+        ("1", "Software Engineer", "Acme", None),
+        ("2", "Barista", "Acme", None),
+        ("3", "Store Team Member", "Target Tech", None),
+        ("4", "Klaviyo — Software Engineer", "Simplify New-Grad-Positions", "simplify"),
+    ):
+        conn.execute(
+            "INSERT INTO postings (company, ats_job_id, title, location, url, first_seen, "
+            "last_seen, origin) VALUES (?,?,?,?,?,?,?,?)",
+            (company, jid, title, "New York, NY", "https://x/" + jid, "2026-11-01",
+             "2026-11-01", origin))
+        conn.execute(
+            "INSERT INTO verdicts (company, ats_job_id, verdict, reason, decided_by, "
+            "decided_at) VALUES (?,?,?,?,?,?)",
+            (company, jid, "uncertain", "r", "rules", "2026-11-01"))
+    companies = [Company(name="Target Tech", ats="workday", slug="t/wd5/x",
+                         board_scope="mixed")]
+    page = server.render_review(conn, load_criteria(config.CRITERIA_YAML), companies,
+                                {"simplify": {"bands": ["entry"], "prose": False}},
+                                "2026-11-06")
+    defined = set(re.findall(r"(--[\w-]+)\s*:", page))
+    used = set(re.findall(r"var\((--[\w-]+)", page))
+    assert used and used <= defined, sorted(used - defined)
+
+
 SHEETS = {name: getattr(server, name) for name in dir(server)
           if name.endswith("_CSS") and name.startswith("_")}
 SHEETS["dashboard._CSS"] = dashboard._CSS

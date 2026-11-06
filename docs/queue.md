@@ -58,3 +58,45 @@ module, so preferences can feed it without `queue.py` knowing they exist. With
   plugins; a plugin's group is never curation, so the lookup is `.get` and its absence reads
   as an ordinary board.
 - **An unreadable `first_seen` sorts last** within its lane and location, never as today.
+
+## The `/review` page
+
+`server.render_review`, `dashboard.review_page_parts`, `queue.review`. The short list of
+possible misses you skim weekly: on the live corpus about 134 rows in the last 14 days,
+against 3,176 uncertain in total.
+
+```
+split     queue.review(rows, criteria, companies_by_name, coverage_by_origin, today)
+            .recent     review lanes (feed, read, signal), first seen in the window
+            .older      the same lanes, outside it
+            .no_signal  the no-signal fold, any age
+            .noise      the board-noise fold, any age
+window    queue.REVIEW_WINDOW_DAYS = 14     inclusive; an unreadable first_seen is older
+read      dashboard.review_split(conn, …)   the one call both the page and Today make
+```
+
+One flat table — Role (posting link, plus the board's `srctag` on a feed row), Employer
+(`.cobadge`), Location (with the NYC pin), the lane's label, First seen — and one search
+box. The default view is open; below it three folds, each a `tbody.grp` rendered with
+`data-closed="1"`: "N older", "N with no field signal", and inside that "N from boards
+that list many non-field roles: <companies>". A table cannot nest a `tbody`, so the inner
+fold is the next sibling (`tbody.sub`) and the stylesheet hides it while its parent is
+collapsed; with no plain no-signal rows it renders as a top-level fold instead, because a
+child under an absent parent is a fold nobody can open.
+
+- **Serve-only.** The static dashboard has no `/review` and does not get one. Today shows
+  "N to review" under the picks in both — a link to `/review` under `serve`, a bare count
+  in the file, which has nowhere to link to.
+- **A read across the partition, not a third home.** Every row on it is also on exactly one
+  of the Company pages and the Job boards page (`test_review_rows_are_each_on_exactly_one_surface`).
+  The page decides nothing about where a posting lives.
+- **Never `data-filterable` beside another panel.** The page is one `[data-filter-scope]`
+  holding a search box and this table and nothing else, so the shared filter script drives
+  only these rows. No tier chips and no ATS select: a feed row has neither, and a control
+  filtering on a field many rows leave empty only ever hides.
+- **Today's count is `len(review_split(...).recent)`**, the same split the page renders, so
+  the number and the list it links to cannot disagree. With no criteria there are no lanes
+  and the line is absent, never a guessed zero.
+- **No buttons yet.** The actions column is a later change.
+- **At phone width each row wraps** into a line of its cells; every display rule there is
+  `:not([hidden])`, or it would outrank `tr[hidden]` and a filtered row would stay.

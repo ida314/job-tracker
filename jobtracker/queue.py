@@ -28,9 +28,10 @@ from config here, so preferences can feed it without this module knowing they ex
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from .criteria import Criteria
 from .match import location_rank
@@ -49,6 +50,13 @@ class Lane(str, Enum):
 
 # Lanes a page folds by default. BOARD_NOISE is a fold inside this one.
 FOLDED = frozenset({Lane.NO_SIGNAL, Lane.BOARD_NOISE})
+
+# The lanes the review list is made of: everything with a field signal.
+REVIEW_LANES = (Lane.FEED, Lane.READ_UNCLEAR, Lane.SIGNAL)
+
+# How far back the review list's default view reaches, in days of `first_seen`. A module
+# constant for now; preferences will own it.
+REVIEW_WINDOW_DAYS = 14
 
 _ORDER = {ln: i for i, ln in enumerate(Lane)}
 
@@ -180,3 +188,81 @@ def sort_key(row: Any, lane: Lane, criteria: Criteria) -> tuple:
         location_rank(_field(row, "location"), criteria),
         newest,
     )
+
+
+@dataclass(frozen=True)
+class Placed:
+    """One uncertain row with its lane, and the feed band its label names (or None)."""
+
+    row: Any
+    lane: Lane
+    band: Optional[str] = None
+
+    @property
+    def label(self) -> str:
+        return label(self.lane, self.band)
+
+
+@dataclass
+class Review:
+    """The uncertain list split the way `/review` shows it, each part in `sort_key` order.
+
+    `recent` is the default view: the review lanes first seen inside the window. `older`
+    is the same lanes outside it. `no_signal` and `noise` are the two folds, whatever
+    their age. Every row is in exactly one part.
+    """
+
+    recent: list = field(default_factory=list)
+    older: list = field(default_factory=list)
+    no_signal: list = field(default_factory=list)
+    noise: list = field(default_factory=list)
+
+    def __len__(self) -> int:
+        return len(self.recent) + len(self.older) + len(self.no_signal) + len(self.noise)
+
+
+def in_window(first_seen: Any, today: Any, days: int = REVIEW_WINDOW_DAYS) -> bool:
+    """Whether `first_seen` is no more than `days` before `today`.
+
+    `today` is a parameter, never a clock read. An unreadable `first_seen` is outside
+    the window — the same rule `sort_key` follows: a date we cannot read is never "new".
+    """
+    seen = _day_ordinal(first_seen)
+    now = _day_ordinal(today)
+    if seen is None or now is None:
+        return False
+    return seen >= now - days
+
+
+def review(
+    rows: Iterable,
+    criteria: Criteria,
+    companies_by_name: Mapping,
+    coverage_by_origin: Mapping,
+    today: Any,
+    targets: tuple = ("entry",),
+    window_days: int = REVIEW_WINDOW_DAYS,
+) -> Review:
+    """Place every uncertain row in one part of the review list.
+
+    The one split `/review` renders and the Today count reads (`len(review(...).recent)`):
+    two derivations of "how many to review" are how the count and the page come to
+    disagree. Each row is its own reading — a `store.uncertain_with_context` row carries
+    `reading_band`.
+    """
+    out = Review()
+    for row in rows:
+        ln = lane(row, criteria, companies_by_name, coverage_by_origin, row, targets)
+        placed = Placed(row, ln, feed_band(row, coverage_by_origin, targets)
+                        if ln is Lane.FEED else None)
+        if ln is Lane.BOARD_NOISE:
+            out.noise.append(placed)
+        elif ln is Lane.NO_SIGNAL:
+            out.no_signal.append(placed)
+        elif in_window(_field(row, "first_seen"), today, window_days):
+            out.recent.append(placed)
+        else:
+            out.older.append(placed)
+    for part in (out.recent, out.older, out.no_signal, out.noise):
+        part.sort(key=lambda p: sort_key(p.row, p.lane, criteria))
+    return out
