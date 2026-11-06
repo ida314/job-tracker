@@ -2377,6 +2377,31 @@ def level_reading(
     ).fetchone()
 
 
+def uncertain_with_context(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Open UNCERTAIN postings, each with what `queue.lane` needs to place it.
+
+    One query: the posting's `origin`, `employer` and `first_seen`, and its
+    `level_readings` row where it has one (`reading_band`, `reading_evidence`,
+    `reading_hash`, `reading_at` — all NULL when the model never read it). A row is a
+    valid `reading` argument to `queue.lane` as it stands. The lane itself is derived by
+    the caller and never stored.
+    """
+    return list(conn.execute(
+        """
+        SELECT p.company, p.ats_job_id, p.title, p.location, p.url, p.origin,
+               p.employer, p.first_seen, p.description_source,
+               r.band AS reading_band, r.evidence AS reading_evidence,
+               r.source_hash AS reading_hash, r.read_at AS reading_at
+        FROM postings p JOIN verdicts v
+          ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        LEFT JOIN level_readings r
+          ON r.company=p.company AND r.ats_job_id=p.ats_job_id
+        WHERE v.verdict='uncertain' AND p.closed_at IS NULL
+        ORDER BY p.first_seen DESC, p.company, p.ats_job_id
+        """
+    ))
+
+
 # -- the task ledger ---------------------------------------------------------------
 TASK_STATUSES = ("ok", "no_answer", "error")
 
