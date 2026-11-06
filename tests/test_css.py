@@ -161,3 +161,10 @@ def test_the_file_input_text_uses_the_page_font():
     """Theming the button left "No file chosen" beside it in Arial. Zero specificity, so
     `.pfile` and `.pick .resume input` still choose the size."""
     assert ":where(input[type=file]) { font: inherit; }" in dashboard._CSS
+
+
+def test_no_sheet_carries_a_control_character():
+    """The sheets are ordinary Python strings, so a CSS escape written with one backslash is a
+    Python escape first: `content: "\\25BE"` needs two, or it renders as a box and the letters BE."""
+    for name, css in SHEETS.items():
+        assert not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", css), name
