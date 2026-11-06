@@ -32,8 +32,13 @@ from jobtracker.tasks.level import (
     LevelVerdict,
     looks_engineering,
     parse_verdict,
+    shown_text,
     verdict_from_level,
 )
+
+# What the model is shown in the parse tests below. Every usable reading has to quote it.
+_SHOWN = shown_text("Software Engineer",
+                    "We welcome recent graduates. Requires 8+ years in some teams.")
 
 
 @pytest.fixture
@@ -138,7 +143,7 @@ def test_per_model_endpoints_alone_count_as_configured(monkeypatch, sdk_installe
 
 # -- verdict parsing ---------------------------------------------------------------
 def test_parse_verdict_accepts_a_well_formed_answer():
-    v = parse_verdict(json.dumps({"level": "entry", "evidence": "recent graduates"}))
+    v = parse_verdict(json.dumps({"level": "entry", "evidence": "recent graduates"}), _SHOWN)
     assert v == LevelVerdict(level="entry", evidence="recent graduates")
     assert v.usable
 
@@ -155,13 +160,56 @@ def test_parse_verdict_rejects_anything_unexpected(text):
     Routing through `sir` does not change it — the router forwards the body untouched,
     so a backend that ignores the key still answers in prose.
     """
-    assert parse_verdict(text) is None
+    assert parse_verdict(text, _SHOWN) is None
 
 
 def test_unclear_is_parsed_but_not_usable():
-    v = parse_verdict('{"level":"unclear","evidence":""}')
+    v = parse_verdict('{"level":"unclear","evidence":""}', _SHOWN)
     assert v.level == "unclear"
     assert not v.usable          # -> posting stays UNCERTAIN
+
+
+# -- grounding: the quote must be in what the model was shown ----------------------
+@pytest.mark.parametrize("level", ["entry", "not_entry"])
+def test_ungrounded_level_reading_parses_to_none(level):
+    """An invented phrase must not pin a MATCH or REJECT.
+
+    The quote is the only part of the reply that can be checked against the page; a
+    reading whose quote is not there is treated exactly like malformed JSON.
+    """
+    invented = json.dumps({"level": level, "evidence": "0-2 years of experience"})
+    assert parse_verdict(invented, _SHOWN) is None
+
+
+@pytest.mark.parametrize("level", ["entry", "not_entry"])
+def test_a_usable_reading_with_no_evidence_is_no_answer(level):
+    assert parse_verdict(json.dumps({"level": level, "evidence": ""}), _SHOWN) is None
+    assert parse_verdict(json.dumps({"level": level, "evidence": "   "}), _SHOWN) is None
+
+
+def test_grounding_ignores_whitespace_and_case():
+    shown = shown_text("Software Engineer", "Open to\n   Recent   Graduates\tand interns.")
+    v = parse_verdict(json.dumps({"level": "entry", "evidence": "recent graduates"}), shown)
+    assert v is not None and v.usable
+    v = parse_verdict(json.dumps({"level": "entry", "evidence": "OPEN TO recent\ngraduates"}),
+                      shown)
+    assert v is not None and v.evidence == "OPEN TO recent graduates"   # stored flat
+
+
+def test_evidence_may_come_from_the_title():
+    """The model is shown the title too, so a quote off it is grounded."""
+    shown = shown_text("Software Engineer, Graduate", "We build payments infrastructure.")
+    v = parse_verdict(json.dumps({"level": "entry", "evidence": "Graduate"}), shown)
+    assert v is not None and v.level == "entry"
+
+
+def test_evidence_past_the_truncation_point_is_not_grounded():
+    """Grounding reads what the model saw, not the whole cached description."""
+    from jobtracker.llm import MAX_DESCRIPTION_CHARS
+    description = "x " * MAX_DESCRIPTION_CHARS + "new grads welcome"
+    shown = shown_text("Software Engineer", description)
+    assert parse_verdict(json.dumps({"level": "entry", "evidence": "new grads welcome"}),
+                         shown) is None
 
 
 # -- degradation: the whole safety story -------------------------------------------

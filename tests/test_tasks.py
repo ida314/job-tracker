@@ -67,7 +67,12 @@ def _seed(conn, specs):
     conn.commit()
 
 
-def _uncertain(conn, *jids, title="Backend Software Engineer", description="d"):
+# Carries every phrase the canned `level` answers below quote: a reading is only usable
+# when its evidence occurs in the text the model was shown.
+_DESCRIPTION = "Open to recent graduates; some teams want senior, 8+ years or 10+ years."
+
+
+def _uncertain(conn, *jids, title="Backend Software Engineer", description=_DESCRIPTION):
     _seed(conn, [(jid, title, description, Decision.UNCERTAIN) for jid in jids])
 
 
@@ -263,6 +268,27 @@ def test_a_budget_stops_the_run_and_reports_what_is_left(criteria):
 
 
 # -- failure is absence ------------------------------------------------------------
+@pytest.mark.parametrize("level", ["entry", "not_entry"])
+def test_ungrounded_level_reading_is_no_answer(criteria, level):
+    """A quote the description does not contain pins nothing.
+
+    Well-formed JSON, a usable level, and evidence that appears nowhere in what the model
+    was shown: the runner must see no answer, and the posting stays UNCERTAIN with no
+    override written.
+    """
+    conn = store.connect(":memory:")
+    _uncertain(conn, "1", description="We build payments infrastructure in Go.")
+    client = _Answering({"level": level, "evidence": "new grads welcome"})
+    report = asyncio.run(run_task(conn, get_task("level"), client, _ctx(criteria)))
+    assert client.calls == 1
+    assert report.applied == 0 and report.no_answer == 1
+    assert conn.execute(
+        "SELECT verdict FROM verdicts WHERE ats_job_id='1'"
+    ).fetchone()[0] == "uncertain"
+    assert conn.execute("SELECT count(*) FROM overrides").fetchone()[0] == 0
+    conn.close()
+
+
 def test_a_silent_model_writes_nothing(criteria):
     conn = store.connect(":memory:")
     _uncertain(conn, "1")

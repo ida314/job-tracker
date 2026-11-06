@@ -40,6 +40,26 @@ Asana    Backend Software Engineer     reject   llm:not_entry:3+ years
 Discord  Software Engineer, Notifications  reject   llm:not_entry:Senior
 ```
 
+## The quote must be in what the model saw
+
+**A usable reading (`entry` or `not_entry`) whose evidence does not occur in the text
+the model was shown is no answer**, exactly like malformed JSON, and the posting stays
+`uncertain`. The quote is the only part of the reply that can be checked; without the
+check an invented phrase would pin a match or a reject that nothing on the page
+supports.
+
+- **"Shown" means one string.** `shown_text(title, description)` builds the prompt's
+  user turn, and `run()` passes that same string to `parse_verdict(text, shown)`, so the
+  prompt and the check cannot drift apart. The title is part of it — `Graduate` quoted
+  off *"Software Engineer, Graduate"* is grounded — and the description is truncated at
+  `MAX_DESCRIPTION_CHARS` there too, so a phrase past the cut the model never read does
+  not ground.
+- **Whitespace-normalized and case-insensitive**, with `letter.flat`, the normalizer
+  `tailor`, `inbox` and `coverletter` already use. The stored evidence is the flattened
+  quote.
+- **Empty evidence on a usable level is ungrounded.** `unclear` with empty evidence is
+  still a valid reading; it changes nothing either way.
+
 ## Failure is absence, never a wrong answer
 
 No router configured, connection refused, timeout, malformed response, an unroutable
