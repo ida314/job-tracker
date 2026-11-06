@@ -2290,6 +2290,28 @@ def set_description(
     )
 
 
+def feed_descriptions_to_upgrade(conn: sqlite3.Connection) -> list:
+    """Open postings whose stored text is a feed's metadata stub, in the two buckets
+    anything reads: `match` and `uncertain`.
+
+    The work list for `check`'s description upgrade, and the only reader of
+    `description_source='feed'` that leads to a write. Scoped to `feed` and nothing
+    else, so a row the upgrade already filled (`ats`) or a job board's own prose
+    (`prose`) is never asked about again. Matches first, then newest first: when the
+    budget runs out, the oldest uncertain rows are the ones that wait.
+    """
+    return list(conn.execute(
+        """
+        SELECT p.company, p.ats_job_id, p.url
+        FROM postings p JOIN verdicts v
+          ON p.company=v.company AND p.ats_job_id=v.ats_job_id
+        WHERE p.description_source='feed' AND p.closed_at IS NULL
+          AND v.verdict IN ('match', 'uncertain')
+        ORDER BY (v.verdict='match') DESC, p.first_seen DESC, p.company, p.ats_job_id
+        """
+    ))
+
+
 def set_posted_on(
     conn: sqlite3.Connection, company: str, ats_job_id: str, day: str
 ) -> None:

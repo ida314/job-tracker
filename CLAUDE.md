@@ -750,6 +750,16 @@ is what makes the model passes offline with respect to the ATSes.
 - **Scoped, deliberately.** Open rejects are excluded. Self-healing: retune criteria so a former
   reject becomes a match, and the next `check` fills it in.
 - **Write-once.** `NULL` = never fetched, `''` = fetched and genuinely empty. Only NULL is retried.
+- **The one exception to write-once is `feed` → `ats`** (`_upgrade_descriptions`). An open
+  `match`/`uncertain` row whose text is a feed's stub and whose link points straight at a
+  Greenhouse, Lever or Ashby posting is fetched once through the same adapters and limiter, and
+  only non-empty prose overwrites the stub. A failure, a 404 or empty prose leaves the row as it
+  was, counted in a summary line, and is invisible to health like any description failure.
+  - **Resolved from the URL, never the key** (`dedupe.upgrade_target`): `dedupe_key` lowercases
+    the slug, and Lever slugs are case-sensitive. `.eu.` hosts do not resolve — the adapters read
+    the US API host. The link is *provenance*, never verified identity, and the log says so.
+  - **Its own list and its own budget**, `--max-upgrades` (default 100), counted in requests —
+    one per Greenhouse posting, one per Ashby or Lever board. Never rows added to `wanted`.
 - **`description_source` says what kind of text it is**: `ats` (this board path), `prose` (a job
   board's own words) or `feed` (a stub a job board assembled from fields — Simplify). A job
   board's value comes from `Plugin.coverage()["prose"]`, which task plugins do not have.

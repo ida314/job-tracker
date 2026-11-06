@@ -188,6 +188,77 @@ def key_from_identity(ats: str, slug: str, ats_job_id: str) -> Optional[str]:
     return f"{family}:{slug.strip().lower()}:{ats_job_id.strip().lower()}"
 
 
+# What `upgrade_target` will build an API URL out of. Stricter than the key patterns on
+# purpose: a key that is merely loose costs a missed duplicate, but these strings go into
+# a request path, so a slug may not begin with a dot (no `..` segment) and an id must
+# have the shape the vendor actually issues. A link that fails the shape is not fetched.
+_UPGRADE_SLUG = re.compile(r"[A-Za-z0-9_][\w.-]*")
+_UUID = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+_UPGRADE_IDS = {
+    "greenhouse": re.compile(r"\d+"),
+    "lever": re.compile(_UUID),
+    "ashby": re.compile(_UUID),
+}
+# Only the hosts whose public JSON the adapters read. The `.eu.` variants match the key
+# patterns above but live behind a different API host (`boards-api.eu.greenhouse.io`,
+# `api.eu.lever.co`) — asked of the US one, the same slug either 404s or, worse, names
+# a different employer's board.
+_UPGRADE_HOSTS = {
+    "greenhouse": ("boards.greenhouse.io", "job-boards.greenhouse.io"),
+    "lever": ("jobs.lever.co",),
+    "ashby": ("jobs.ashbyhq.com",),
+}
+
+
+def upgrade_target(url: str) -> Optional[tuple[str, str, str]]:
+    """`(ats, slug, job_id)` for a link straight at a Greenhouse, Lever or Ashby posting.
+
+    What `check` uses to swap a feed's metadata stub for the posting's real prose. It
+    reads **the URL, never `dedupe_key`**: the key lowercases the slug, and Lever slugs
+    are case-sensitive (`lever/Onehouse` serves a board, `lever/onehouse` 404s). The
+    host is matched case-insensitively and the path is kept exactly as the feed wrote it.
+
+    The result is *provenance* — a link the feed served — and never verified identity.
+    Anything that is not one of the supported shapes returns None, and None means
+    nothing is fetched for that row.
+    """
+    parts = _host_and_path(url or "")
+    if parts is None:
+        return None
+    host, path, query = parts
+    target = f"{host}{path}"
+
+    found: Optional[tuple[str, str, str]] = None
+    m = _LEVER.match(target)
+    if m:
+        found = ("lever", m.group(1), m.group(2))
+    if found is None:
+        m = _GREENHOUSE.match(target)
+        if m:
+            found = ("greenhouse", m.group(1), m.group(2))
+    if found is None and _GREENHOUSE_EMBED.match(target):
+        params = parse_qs(query)
+        slug = (params.get("for") or [""])[0]
+        job_id = (params.get("token") or [""])[0]
+        if slug and job_id:
+            found = ("greenhouse", slug, job_id)
+    if found is None:
+        m = _ASHBY.match(target)
+        if m:
+            found = ("ashby", m.group(1), m.group(2))
+    if found is None:
+        return None
+
+    ats, slug, job_id = found
+    if host not in _UPGRADE_HOSTS[ats]:
+        return None
+    if slug.lower() == "embed" or not _UPGRADE_SLUG.fullmatch(slug):
+        return None
+    if not _UPGRADE_IDS[ats].fullmatch(job_id):
+        return None
+    return ats, slug, job_id
+
+
 def rank_for(check_method: str) -> int:
     """Lower wins. An unknown method ranks last rather than raising."""
     return SOURCE_RANK.get((check_method or "").strip().lower(), _UNRANKED)
