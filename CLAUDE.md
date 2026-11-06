@@ -273,6 +273,10 @@ disagree about what is on it.
   disposition buttons.
 - **Disposition buttons only exist under `serve`** (`interactive=True`). A dead button in a
   mailed file is worse than no button. Counts render in both modes.
+- **A pick's controls sit behind one `details.pick-menu`, `serve` only,** in the card's top-right
+  corner beside the title (`.pick-head`). The static card keeps its bare `Apply` at the foot.
+  `.applymsg` is inside the panel, which floats over whatever is below it. The resume line
+  renders only for a posting with its own resume.
 - **A button's handler lives in the file that renders the button.** `server._JS` and
   `dashboard._JS` are two scripts on several pages; tests assert the button exists *and* that the
   page's script listens for it.

@@ -258,6 +258,10 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
    vertically instead of running left to right. */
 .pick > :not(.rank) { grid-column: 2; }
 .pick h3 { margin: 0 0 3px; font-size: 17px; line-height: 1.3; }
+/* Title and menu share the first line. The menu takes the corner rather than following the
+   title, so it sits in the same place on every card however long the title runs. */
+.pick-head { display: flex; align-items: flex-start; gap: 12px; }
+.pick-head h3 { flex: 1; min-width: 0; }
 .pick h3 a { color: var(--ink); text-decoration: none; }
 @media (hover: hover) { .pick h3 a:hover { text-decoration: underline; } }
 .pick .meta { color: var(--muted); font-size: 12.5px; margin-bottom: 8px;
@@ -298,13 +302,35 @@ footer { margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--grid);
 .pick .resume { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
                 margin-top: 6px; font-size: 12px; color: var(--muted); }
 .pick .resume .rname.own { color: var(--ink-2); }
-.pick .resume input[type=file] { font: inherit; font-size: 11.5px; max-width: 210px; }
-.pick .resume button { appearance: none; background: var(--page); color: var(--ink-2);
+.pick .resume-set { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--grid);
+                    font-size: 12px; color: var(--muted); }
+.pick .resume-set input[type=file] { font: inherit; font-size: 11.5px; max-width: 210px; }
+.pick .resume-set button { appearance: none; background: var(--page); color: var(--ink-2);
                        border: 1px solid var(--rule); border-radius: var(--radius-control);
                        padding: 3px 9px; font: inherit; font-size: 11.5px;
                        cursor: pointer; }
-@media (hover: hover) { .pick .resume button:not([disabled]):hover { color: var(--ink); border-color: var(--ink-2); } }
-.pick .resume button[disabled] { opacity: .5; cursor: default; }
+@media (hover: hover) { .pick .resume-set button:not([disabled]):hover { color: var(--ink); border-color: var(--ink-2); } }
+.pick .resume-set button[disabled] { opacity: .5; cursor: default; }
+
+/* A pick's controls, behind one button so the card reads as a card. A <details>, so it
+   opens with no script at all; the script only adds closing from outside. */
+/* The negative margin centres the 29px button on the title's 22px first line. */
+.pick-menu { position: relative; flex: none; margin: -4px 0 0; }
+.pick-menu > summary { display: inline-flex; align-items: center; gap: 6px; list-style: none;
+    background: var(--page); color: var(--ink-2); border: 1px solid var(--rule);
+    border-radius: var(--radius-control); padding: 5px 10px; font-size: 12.5px; line-height: 1.4;
+    user-select: none; }
+.pick-menu > summary::-webkit-details-marker { display: none; }
+.pick-menu > summary::after { content: "\\25BE"; }
+.pick-menu[open] > summary { color: var(--ink); border-color: var(--ink-2); }
+.pick-menu[open] > summary::after { transform: rotate(180deg); }
+@media (hover: hover) { .pick-menu > summary:hover { color: var(--ink); border-color: var(--ink-2); } }
+.pick-menu .menu-panel { position: absolute; z-index: 10; top: 100%; right: 0; margin-top: 4px;
+    width: max-content; max-width: min(380px, calc(100vw - 72px)); box-sizing: border-box;
+    padding: 12px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 16%, transparent); }
 
 /* A pick's two documents: the same `↓` and `✉` the actions cell carries, each beside a
    word saying which document it is — a card has the room a table row does not. */
@@ -536,6 +562,27 @@ _JS = """
       c.setAttribute('aria-pressed', c === chip ? 'true' : 'false');
     });
     views.forEach(function (v) { v.hidden = v.dataset.appview !== chip.dataset.sort; });
+  });
+})();
+
+// The pick menus. <details> opens and closes itself; what it cannot do is close when you
+// click elsewhere, or keep a second one from opening over the first.
+(function () {
+  var menus = Array.prototype.slice.call(document.querySelectorAll('.pick-menu'));
+  if (!menus.length) return;
+  function closeExcept(keep) {
+    menus.forEach(function (m) { if (m !== keep) m.open = false; });
+  }
+  document.addEventListener('click', function (e) {
+    closeExcept(e.target.closest ? e.target.closest('.pick-menu') : null);
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    menus.forEach(function (m) {
+      if (!m.open) return;
+      m.open = false;
+      m.querySelector('summary').focus();
+    });
   });
 })();
 
@@ -1317,10 +1364,26 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
 
     parts.append('<article class="pick">')
     parts.append(f'<div class="rank">{i}</div>')
+    parts.append('<div class="pick-head">')
     parts.append(
         f'<h3><a {_posting_attrs(row, interactive)}>'
         f'{html.escape(row["title"])}</a></h3>'
     )
+    # Under `serve` the card's controls sit behind one menu, beside the title. The static
+    # file has only the Apply link, and a menu holding one link would be a click for
+    # nothing, so there it stays at the foot of the card.
+    if interactive:
+        parts.append('<details class="pick-menu"><summary>Actions</summary>'
+                     '<div class="menu-panel">')
+        _pick_actions(parts, row, interactive)
+        _resume_controls(parts, row, overrides)
+        # Where the handlers write what came back. Empty and invisible until something
+        # has to be said; rendered here rather than created in JS so the script only ever
+        # sets text, never markup. Inside the panel, because the panel floats over whatever
+        # is below it, and "choose a file first" has to land beside the button you pressed.
+        parts.append('<div class="applymsg"></div>')
+        parts.append("</div></details>")
+    parts.append("</div>")
     # A job board row has no tier — it is not a curated company — so it wears the board
     # it came from instead of the "T—" that would say nothing.
     parts.append(
@@ -1339,9 +1402,15 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
 
     _prefill_line(parts, row, plans)
     _tailor_line(parts, row, suggestions, held)
-    _resume_line(parts, row, interactive, overrides)
+    _resume_line(parts, row, overrides)
     _docs_line(parts, row, interactive, suggestions, held, built, letters, letters_built)
+    if not interactive:
+        _pick_actions(parts, row, interactive)
+    parts.append("</article>")
 
+
+def _pick_actions(parts, row, interactive) -> None:
+    """The card's action row: Apply in the file; Prepare and the dispositions under `serve`."""
     parts.append('<div class="act">')
     # Under `serve` this leads to the posting page, which is where the documents and the
     # questions are — so it says Prepare, not Apply. In the static file there is no such
@@ -1383,12 +1452,6 @@ def _pick(parts, i, row, by_name, today, interactive, criteria=None, plans=None,
                 f"{label}</button>"
             )
     parts.append("</div>")
-    if interactive:
-        # Where the apply-to handler writes what came back. Empty and invisible until
-        # something has to be said; rendered here rather than created in JS so the
-        # script only ever sets text, never markup.
-        parts.append('<div class="applymsg"></div>')
-    parts.append("</article>")
 
 
 def _prefill_line(parts, row, plans) -> None:
@@ -1917,36 +1980,39 @@ def _tailor_line(parts, row, suggestions=None, held=None) -> None:
     )
 
 
-def _resume_line(parts, row, interactive, overrides=None) -> None:
-    """Which resume this posting will attach, and — under `serve` — how to change it.
+def _resume_line(parts, row, overrides=None) -> None:
+    """The resume this posting attaches, when it is not the one in Settings.
 
-    The name renders in both modes for the same reason the prefill counts do: knowing
-    which PDF is about to go out under your name is useful offline. Only the controls are
-    gated on `interactive`, because only a live server has anywhere to POST them.
+    Renders in both modes for the same reason the prefill counts do: knowing which PDF is
+    about to go out under your name is useful offline. Absent for the default, which is
+    every card until you choose otherwise, so a line saying so on each of them said
+    nothing. The controls that change it are `_resume_controls`, in the card's menu.
     """
     row_override = (overrides or {}).get((row["company"], row["ats_job_id"]))
-    parts.append('<div class="resume">')
-    if row_override is not None:
+    if row_override is None:
+        return
+    parts.append(
+        '<div class="resume"><span class="rname own">resume for this posting: '
+        f'{html.escape(row_override["filename"])}</span></div>'
+    )
+
+
+def _resume_controls(parts, row, overrides=None) -> None:
+    """How to change this posting's resume. `serve` only: nowhere to POST them otherwise."""
+    c = html.escape(row["company"], quote=True)
+    j = html.escape(row["ats_job_id"], quote=True)
+    parts.append(
+        '<div class="resume-set">'
+        "<input type=\"file\" class=\"pickfile\" accept=\".pdf,.docx\" "
+        'aria-label="Resume for this posting">'
+        f'<button class="pick-attach" data-company="{c}" data-job="{j}">'
+        "Use for this posting</button>"
+    )
+    if (overrides or {}).get((row["company"], row["ats_job_id"])) is not None:
         parts.append(
-            '<span class="rname own">resume for this posting: '
-            f'{html.escape(row_override["filename"])}</span>'
+            f'<button class="pick-detach" data-company="{c}" data-job="{j}">'
+            "Use the default</button>"
         )
-    else:
-        parts.append('<span class="rname">resume: the one in Settings</span>')
-    if interactive:
-        c = html.escape(row["company"], quote=True)
-        j = html.escape(row["ats_job_id"], quote=True)
-        parts.append(
-            "<input type=\"file\" class=\"pickfile\" accept=\".pdf,.docx\" "
-            'aria-label="Resume for this posting">'
-            f'<button class="pick-attach" data-company="{c}" data-job="{j}">'
-            "Use for this posting</button>"
-        )
-        if row_override is not None:
-            parts.append(
-                f'<button class="pick-detach" data-company="{c}" data-job="{j}">'
-                "Use the default</button>"
-            )
     parts.append("</div>")
 
 
