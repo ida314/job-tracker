@@ -288,7 +288,12 @@ class CoverLetterTask(Task):
                 task=self.name,
                 company=row["company"],
                 ats_job_id=row["ats_job_id"],
-                unit_key=_unit_key(ctx),
+                # The configuration key, plus the one per-posting part of the question:
+                # a changed description makes this posting alone a new unit. The stored
+                # `cover_letters.unit_key` stays the configuration key — the description
+                # is compared through its own column, so stamping old rows on upgrade
+                # never has to rewrite a key.
+                unit_key=f"{_unit_key(ctx)}:{row['description_hash']}",
                 title=row["title"],
                 payload={"description": row["description"]},
             )
@@ -332,6 +337,7 @@ class CoverLetterTask(Task):
         store.record_letter(
             conn, unit.company, unit.ats_job_id, result.as_json(),
             _unit_key(ctx), ctx.today,
+            description_hash=store.description_hash(unit.payload["description"]),
         )
         log.info(
             "cover letter written for %s — %s (%d paragraphs)",

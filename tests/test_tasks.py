@@ -387,13 +387,15 @@ def test_the_unit_key_is_the_question_not_the_posting(criteria, profile):
     """Judging carries the prose hash, so editing the profile makes every unit new.
 
     A failure answering the old question says nothing about the new one, so the retry
-    count resets with it. That is why the hash is in the key rather than beside it.
+    count resets with it. That is why the hash is in the key rather than beside it. The
+    posting's description hash is the other half — per posting, so a changed
+    description re-keys that posting alone.
     """
     conn = store.connect(":memory:")
     _seed(conn, [("1", "SWE", "d", Decision.MATCH)])
 
     units = get_task("judge").pending(conn, _ctx(criteria, profile))
-    assert units[0].unit_key == profile.prose_hash
+    assert units[0].unit_key == f"{profile.prose_hash}:{store.description_hash('d')}"
     assert profile.prose_hash in units[0].idempotency_key()
     conn.close()
 
