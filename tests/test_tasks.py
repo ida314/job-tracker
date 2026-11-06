@@ -62,7 +62,7 @@ def _seed(conn, specs):
     store.sync_postings(conn, "Acme", postings, TODAY)
     for jid, _title, description, verdict in specs:
         if description is not None:
-            store.set_description(conn, "Acme", jid, description)
+            store.set_description(conn, "Acme", jid, description, source="ats")
         store.record_verdict(conn, Verdict("Acme", jid, verdict, "r", "rules"), TODAY)
     conn.commit()
 
@@ -212,7 +212,7 @@ def test_a_posting_with_no_description_is_not_queued_work(criteria):
     conn = store.connect(":memory:")
     _uncertain(conn, "1", description=None)
     assert get_task("level").pending_count(conn, _ctx(criteria)) == 0
-    store.set_description(conn, "Acme", "1", "now it has one")
+    store.set_description(conn, "Acme", "1", "now it has one", source="ats")
     conn.commit()
     assert get_task("level").pending_count(conn, _ctx(criteria)) == 1
     conn.close()

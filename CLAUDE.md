@@ -718,6 +718,12 @@ is what makes the model passes offline with respect to the ATSes.
 - **Scoped, deliberately.** Open rejects are excluded. Self-healing: retune criteria so a former
   reject becomes a match, and the next `check` fills it in.
 - **Write-once.** `NULL` = never fetched, `''` = fetched and genuinely empty. Only NULL is retried.
+- **`description_source` says what kind of text it is**: `ats` (this board path), `prose` (a job
+  board's own words) or `feed` (a stub a job board assembled from fields — Simplify). A job
+  board's value comes from `Plugin.coverage()["prose"]`, which task plugins do not have.
+  `set_description` takes `source` with no default, so no writer can store unlabelled text.
+  `store` must not import `plugins`; the backfill on connect gets `{origin: source}` from
+  `cli._connect` / `server._connect`, and NULL text keeps a NULL source.
 - **`--max-descriptions` (default 400)** caps requests per run so a bad night cannot turn a
   30-second job into a 40-minute one.
 - **A description failure is invisible to board health** and must never produce `EXIT_DEGRADED`.

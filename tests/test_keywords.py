@@ -364,7 +364,7 @@ def test_ruling_on_a_term_re_asks_every_posting(tmp_path):
             company="Ramp", ats_job_id="7", title="Backend Engineer", location="NYC",
             url="https://example.com/7", posted_at=None, description=DESCRIPTION,
         )], "2026-09-01")
-        store.set_description(conn, "Ramp", "7", DESCRIPTION)
+        store.set_description(conn, "Ramp", "7", DESCRIPTION, source="ats")
         store.record_verdict(conn, Verdict(company="Ramp", ats_job_id="7",
                                            decision=Decision.MATCH, reason=""),
                              "2026-09-01")
