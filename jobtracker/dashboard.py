@@ -35,7 +35,7 @@ from collections import Counter
 from datetime import date
 from typing import Optional
 
-from . import applications as apps_mod, config, rank as rank_mod, store
+from . import applications as apps_mod, config, queue as queue_mod, rank as rank_mod, store
 from . import build_version
 from .criteria import Criteria
 from .match import location_label, location_rank
@@ -850,8 +850,10 @@ Array.prototype.forEach.call(document.querySelectorAll('[data-filter-scope]'), f
         b.classList.toggle('closed', b.dataset.closed === '1' && !filtering);
         var open = !b.classList.contains('closed');
         var n = b.querySelector('.cohead .n');
+        // A company's group counts roles; the no-field-signal fold says rows.
+        var noun = b.dataset.noun || 'role';
         if (n) n.textContent = (vis === mine.length)
-          ? mine.length + (mine.length === 1 ? ' role' : ' roles')
+          ? mine.length + ' ' + noun + (mine.length === 1 ? '' : 's')
           : vis + ' of ' + mine.length;
         var btn = b.querySelector('.cotoggle');
         if (btn) {
@@ -1099,6 +1101,7 @@ def build_dashboard(
         store.open_postings_by_verdict(conn, "match"), criteria)
     uncertain, board_uncertain = _split_by_origin(
         store.open_postings_by_verdict(conn, "uncertain"), criteria)
+    lanes = _uncertain_lanes(conn, criteria, by_name)
     counts = store.counts_by_verdict(conn)
     run = store.last_run(conn)
     unhealthy = store.unhealthy_boards(conn)
@@ -1168,14 +1171,14 @@ def build_dashboard(
     parts.append("</section>")
 
     parts.append('<section data-panel-body="all" data-filter-scope hidden>')
-    _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria)
+    _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria, lanes)
     _tier_chart(parts, matches, by_name)
     _filters(parts, matches + uncertain, by_name, criteria)
     _table(parts, "Open matches", matches, by_name, "matches", False, criteria,
            interactive, tracked, suggestions, built, held, letters, letters_built)
     _table(parts, "Uncertain — needs a human", uncertain, by_name, "uncertain", True,
            criteria, interactive, tracked, suggestions, built, held, letters,
-           letters_built)
+           letters_built, lanes)
     parts.append("</section>")
 
     if include_job_boards:
@@ -1183,7 +1186,7 @@ def build_dashboard(
         _job_board_panel(parts, board_matches, board_uncertain, companies, criteria,
                          interactive, tracked, suggestions, built, held, letters,
                          letters_built, _company_keys(matches + uncertain), unhealthy,
-                         by_name)
+                         by_name, lanes)
         parts.append("</section>")
 
     parts.append('<section data-panel-body="boards" hidden>')
@@ -2107,7 +2110,8 @@ def _by_location(rows, criteria):
     return sorted(rows, key=lambda r: location_rank(r["location"], criteria))
 
 
-def _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria=None) -> None:
+def _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteria=None,
+           lanes=None) -> None:
     stale = _days_since(run["started_at"][:10]) if run else None
     # A run older than 2 days is the failure this whole tile exists to catch: every
     # other number on the page keeps looking fine when the pipeline has simply stopped.
@@ -2130,8 +2134,16 @@ def _tiles(parts, matches, uncertain, counts, companies, unhealthy, run, criteri
         nyc = sum(1 for r in matches if location_rank(r["location"], criteria) == 0)
         us = sum(1 for r in matches if location_rank(r["location"], criteria) == 1)
         tiles.append(("In NYC", str(nyc), f"+{us} elsewhere in the US"))
+    # The count stays the whole list — folding is display, never a verdict — and the
+    # sub-line says how much of it is worth opening. Without criteria there are no lanes
+    # to count, and a "0 worth a read" would be a claim nobody made.
+    if lanes:
+        worth = sum(1 for r in uncertain if _lane_of(r, lanes) in _WORTH_A_READ)
+        uncertain_note = f"{worth:,} worth a read"
+    else:
+        uncertain_note = "needs a human read"
     tiles += [
-        ("Uncertain", str(len(uncertain)), "needs a human read"),
+        ("Uncertain", str(len(uncertain)), uncertain_note),
         ("Rejected", f"{counts.get('reject', 0):,}", "by the rules, auditable"),
         ("Boards flagged", str(len(unhealthy)), "not all are problems"),
         ("Last run", run_val, run_note),
@@ -2233,7 +2245,7 @@ def _filters(parts, rows, by_name, criteria=None) -> None:
 
 def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
            interactive: bool = False, tracked=None, suggestions=None, built=None,
-           held=None, letters=None, letters_built=None) -> None:
+           held=None, letters=None, letters_built=None, lanes=None) -> None:
     parts.append(
         f'<h2>{html.escape(heading)} '
         f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
@@ -2249,23 +2261,64 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
     # header come out of the same two flags, in one place, so they cannot disagree.
     cols = (4 if reason else 3) + (1 if interactive else 0)
     parts.append("<thead><tr><th>Role</th>"
-                 "<th>Location</th>" + ("<th>Why uncertain</th>" if reason else "")
+                 "<th>Location</th>" + ("<th>Status</th>" if reason else "")
                  + "<th>First seen</th>"
                  + ('<th class="act">Actions</th>' if interactive else "")
                  + "</tr></thead>")
+
+    def render_row(r, badge: bool) -> None:
+        tier = _tier_of(r["company"], by_name)
+        company = by_name.get(r["company"])
+        ats = company.ats if company else ""
+        loc = r["location"] or ""
+        rank = location_rank(loc, criteria) if criteria is not None else None
+        loc_key = location_label(rank) if rank is not None else ""
+        # Company, tier and ats stay in the search blob even though their cells moved
+        # into the head above — otherwise typing a company name would stop matching
+        # its own rows, which is the first thing anyone tries.
+        search = " ".join(
+            x.lower() for x in (r["company"], r["title"], loc, str(tier), ats) if x
+        )
+        parts.append(
+            f'<tr data-tier="{html.escape(str(tier))}" data-ats="{html.escape(ats)}" '
+            f'data-loc="{html.escape(loc_key)}" '
+            f'data-search="{html.escape(search)}">'
+        )
+        # Inside the fold there is no company head above the row, so the company rides
+        # beside the role the way the Today drawer carries an employer.
+        co = (f' <span class="cobadge">{html.escape(r["company"])}</span>'
+              if badge else "")
+        parts.append(f'<td><a {_posting_attrs(r, interactive)}>'
+                     f'{html.escape(r["title"])}</a>{co}</td>')
+        # The NYC pin is a marker on the single most-preferred band, not a per-row
+        # colored scale — four location colors beside seven tier chips would be noise.
+        pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
+        parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
+        if reason:
+            parts.append(_status_cell(r, lanes))
+        parts.append(
+            f'<td class="seen">{html.escape((r["first_seen"] or "")[:10])}</td>'
+        )
+        if interactive:
+            parts.append(
+                f'<td class="act">'
+                f'{_track_cell(r, tracked, suggestions, built, held, letters, letters_built)}'
+                f'</td>'
+            )
+        parts.append("</tr>")
+
+    kept, folded = _split_folded(rows, lanes) if reason else (list(rows), [])
 
     # Grouped by iterating the already location-sorted rows, so dict insertion order puts
     # each company where its best-placed role already was. NYC-first survives grouping
     # with no second comparator to keep in step with `_by_location`.
     groups: dict[str, list] = {}
-    for r in rows:
+    for r in kept:
         groups.setdefault(r["company"], []).append(r)
 
     for company_name, group in groups.items():
-        company = by_name.get(company_name)
         tier = _tier_of(company_name, by_name)
         var = _band_var(tier)
-        ats = company.ats if company else ""
         parts.append('<tbody class="grp">')
         parts.append(
             f'<tr class="cohead"><th colspan="{cols}" scope="colgroup">'
@@ -2278,41 +2331,109 @@ def _table(parts, heading, rows, by_name, ident, reason: bool, criteria=None,
             "</th></tr>"
         )
         for r in group:
-            loc = r["location"] or ""
-            rank = location_rank(loc, criteria) if criteria is not None else None
-            loc_key = location_label(rank) if rank is not None else ""
-            # Company, tier and ats stay in the search blob even though their cells moved
-            # into the head above — otherwise typing a company name would stop matching
-            # its own rows, which is the first thing anyone tries.
-            search = " ".join(
-                x.lower() for x in (r["company"], r["title"], loc, str(tier), ats) if x
-            )
-            parts.append(
-                f'<tr data-tier="{html.escape(str(tier))}" data-ats="{html.escape(ats)}" '
-                f'data-loc="{html.escape(loc_key)}" '
-                f'data-search="{html.escape(search)}">'
-            )
-            parts.append(f'<td><a {_posting_attrs(r, interactive)}>'
-                         f'{html.escape(r["title"])}</a></td>')
-            # The NYC pin is a marker on the single most-preferred band, not a per-row
-            # colored scale — four location colors beside seven tier chips would be noise.
-            pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
-            parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
-            if reason:
-                parts.append(f'<td class="why">{html.escape(r["reason"] or "")}</td>')
-            parts.append(
-                f'<td class="seen">{html.escape((r["first_seen"] or "")[:10])}</td>'
-            )
-            if interactive:
-                parts.append(
-                    f'<td class="act">'
-                    f'{_track_cell(r, tracked, suggestions, built, held, letters, letters_built)}'
-                    f'</td>'
-                )
-            parts.append("</tr>")
+            render_row(r, badge=False)
+        parts.append("</tbody>")
+    if folded:
+        _fold_head(parts, cols, len(folded))
+        for r in folded:
+            render_row(r, badge=True)
         parts.append("</tbody>")
     parts.append("</table>")
     parts.append(f'<div class="empty" id="{ident}-empty" hidden>No rows match the filters.</div>')
+
+
+# -- lanes on the Uncertain tables --------------------------------------------------
+# The lanes worth opening; the rest is the fold. Both halves come from `queue.FOLDED`,
+# so a lane added there moves on every surface at once.
+_WORTH_A_READ = frozenset(queue_mod.Lane) - queue_mod.FOLDED
+
+
+def _coverage_by_origin() -> dict:
+    """`origin` -> the import plugin's `coverage()`, for `queue.lane`'s feed band.
+
+    Imported here for `_origin_labels`' reason: a page that cannot import the registry
+    should still render, and an origin with no coverage simply has no feed band.
+    """
+    try:
+        from . import plugins as plugins_mod
+
+        return {
+            plugin.name: plugin.coverage()
+            for plugin in plugins_mod.plugins_of_kind(plugins_mod.KIND_IMPORT)
+        }
+    except Exception:  # pragma: no cover - a page must not 500 over a fold
+        return {}
+
+
+def _uncertain_lanes(conn, criteria, by_name) -> dict:
+    """`(company, ats_job_id)` -> `(lane, label)` for every open uncertain posting.
+
+    `queue.lane` is the single derivation; this only feeds it, from
+    `store.uncertain_with_context`, whose row is its own `reading`. Derived as the page
+    renders and never stored. Without criteria there is no field signal to read, so the
+    answer is empty and the tables show the rules' reason, unfolded, rather than guess.
+    """
+    if criteria is None:
+        return {}
+    coverage = _coverage_by_origin()
+    out = {}
+    for row in store.uncertain_with_context(conn):
+        lane = queue_mod.lane(row, criteria, by_name, coverage, row)
+        out[(row["company"], row["ats_job_id"])] = (
+            lane, queue_mod.label(lane, queue_mod.feed_band(row, coverage)))
+    return out
+
+
+def _lane_of(row, lanes):
+    entry = (lanes or {}).get((row["company"], row["ats_job_id"]))
+    return entry[0] if entry else None
+
+
+def _split_folded(rows, lanes):
+    """`(rows worth a read, folded rows)`, each keeping the order it arrived in.
+
+    Folded rows are not removed — they render in the trailing group — so the table's
+    count and its "N of M shown" stay the whole list. Inside the fold `no_signal` comes
+    before `noise`, the fold inside the fold; the sort is stable, so location order
+    survives within each.
+    """
+    kept = [r for r in rows if _lane_of(r, lanes) not in queue_mod.FOLDED]
+    folded = [r for r in rows if _lane_of(r, lanes) in queue_mod.FOLDED]
+    folded.sort(key=lambda r: _lane_of(r, lanes) is queue_mod.Lane.BOARD_NOISE)
+    return kept, folded
+
+
+def _status_cell(row, lanes) -> str:
+    """The lane's words, with the rules' raw reason kept in `title`.
+
+    The reason reads `no_level_token_in_title` on nearly every uncertain row, so as the
+    cell's text it carried no information; it is still the audit trail, so it stays one
+    hover away. With no lane (no criteria) the reason is all there is, and it shows.
+    """
+    raw = row["reason"] or ""
+    entry = (lanes or {}).get((row["company"], row["ats_job_id"]))
+    if entry is None:
+        return f'<td class="why">{html.escape(raw)}</td>'
+    return (f'<td class="why" title="{html.escape(raw, quote=True)}">'
+            f'{html.escape(entry[1])}</td>')
+
+
+def _fold_head(parts, cols, n) -> None:
+    """Open the trailing "No field signal" group: a group head like a company's.
+
+    Rendered open, like every group, and collapsed by the script on load; an active
+    filter force-expands it like any other. `data-noun` is what keeps the script's count
+    reading "rows" here rather than a company's "roles". The head carries no
+    `data-search`, so it is never counted as a posting. The caller closes the tbody.
+    """
+    parts.append('<tbody class="grp fold" data-noun="row">')
+    parts.append(
+        f'<tr class="cohead"><th colspan="{cols}" scope="colgroup">'
+        '<span class="coname">No field signal —</span>'
+        f'<span class="n">{n} {"row" if n == 1 else "rows"}</span>'
+        '<button type="button" class="cotoggle" aria-expanded="true">Hide</button>'
+        "</th></tr>"
+    )
 
 
 _STATUS_STYLE = {
@@ -2353,7 +2474,7 @@ def _company_keys(rows) -> dict:
 
 def _job_board_panel(parts, matches, uncertain, companies, criteria, interactive,
                      tracked, suggestions, built, held, letters, letters_built,
-                     company_keys, unhealthy=(), by_name=None) -> None:
+                     company_keys, unhealthy=(), by_name=None, lanes=None) -> None:
     """Every job board's postings, in one list, each row saying which board carried it.
 
     Deliberately **not** grouped by company the way the company pages are. There the
@@ -2386,7 +2507,7 @@ def _job_board_panel(parts, matches, uncertain, companies, criteria, interactive
                      held, letters, letters_built)
         _board_table(parts, "Uncertain — needs a human", uncertain, "buncertain", True,
                      criteria, interactive, labels, company_keys, tracked, suggestions,
-                     built, held, letters, letters_built)
+                     built, held, letters, letters_built, lanes)
 
     _manual_job_boards(parts, companies)
     _board_feed_health(parts, unhealthy, by_name or {})
@@ -2428,7 +2549,7 @@ def _board_filters(parts, rows, labels, criteria=None) -> None:
 
 def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactive,
                  labels, company_keys, tracked=None, suggestions=None, built=None,
-                 held=None, letters=None, letters_built=None) -> None:
+                 held=None, letters=None, letters_built=None, lanes=None) -> None:
     parts.append(
         f'<h2>{html.escape(heading)} '
         f'<span class="count" id="{ident}-count">{len(rows)}</span></h2>'
@@ -2441,12 +2562,16 @@ def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactiv
         f'data-empty-target="{ident}-empty">'
     )
     cols = ("<th>Role</th><th>Employer</th><th>Location</th>"
-            + ("<th>Why uncertain</th>" if reason else "")
+            + ("<th>Status</th>" if reason else "")
             + "<th>Posted</th>"
             + ('<th class="act">Actions</th>' if interactive else ""))
     parts.append(f"<thead><tr>{cols}</tr></thead><tbody>")
+    # Flat, with one exception that is a lane and not an employer: the uncertain table's
+    # trailing fold. Its colspan comes out of the same two flags as the header above.
+    span = 4 + (1 if reason else 0) + (1 if interactive else 0)
+    kept, folded = _split_folded(rows, lanes) if reason else (list(rows), [])
 
-    for row in rows:
+    def render_row(row) -> None:
         origin = _origin_of(row)
         tag = labels.get(origin, origin)
         loc = row["location"] or ""
@@ -2488,7 +2613,7 @@ def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactiv
         pin = '<span class="pin">NYC</span> ' if rank == 0 else ""
         parts.append(f'<td class="loc">{pin}{html.escape(loc) or "—"}</td>')
         if reason:
-            parts.append(f'<td class="why">{html.escape(row["reason"] or "")}</td>')
+            parts.append(_status_cell(row, lanes))
         posted = (row["posted_on"] if "posted_on" in row.keys() else None) or ""
         parts.append(
             f'<td class="seen">{html.escape(posted or (row["first_seen"] or "")[:10])}</td>'
@@ -2500,7 +2625,16 @@ def _board_table(parts, heading, rows, ident, reason: bool, criteria, interactiv
                 f"</td>"
             )
         parts.append("</tr>")
-    parts.append("</tbody></table>")
+
+    for row in kept:
+        render_row(row)
+    parts.append("</tbody>")
+    if folded:
+        _fold_head(parts, span, len(folded))
+        for row in folded:
+            render_row(row)
+        parts.append("</tbody>")
+    parts.append("</table>")
     parts.append(f'<div class="empty" id="{ident}-empty" hidden>No rows match the filters.</div>')
 
 
@@ -2572,6 +2706,7 @@ def job_board_page_parts(conn, companies, today, criteria=None, interactive=True
     apps = store.all_applications(conn)
     tracked = {(a["company"], a["ats_job_id"]) for a in apps}
     suggestions = store.suggestions_by_posting(conn)
+    lanes = _uncertain_lanes(conn, criteria, by_name)
 
     parts: list = []
     _job_board_panel(
@@ -2579,6 +2714,7 @@ def job_board_page_parts(conn, companies, today, criteria=None, interactive=True
         tracked, suggestions, _built_resumes(), _held_by_posting(suggestions),
         store.letters_by_posting(conn), _built_letters(),
         _company_keys(matches + uncertain), store.unhealthy_boards(conn), by_name,
+        lanes,
     )
     return parts
 

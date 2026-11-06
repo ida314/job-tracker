@@ -58,3 +58,25 @@ module, so preferences can feed it without `queue.py` knowing they exist. With
   plugins; a plugin's group is never curation, so the lookup is `.get` and its absence reads
   as an ordinary board.
 - **An unreadable `first_seen` sorts last** within its lane and location, never as today.
+
+## The dashboard's Uncertain tables
+
+The company pages and job boards each keep their Uncertain table as the full record of the
+list. Two things changed on both, identically in the static file and under `serve`:
+
+- **Status, not "Why uncertain".** The rules' reason is `no_level_token_in_title` on nearly
+  every row, so as text it said nothing. The cell shows `queue.label(lane)` — the feed band's
+  wording through `queue.feed_band` — and keeps the raw reason in its `title`, one hover away.
+- **A trailing fold.** `no_signal` and `noise` rows render in one last group, "No field
+  signal — N rows", `noise` after `no_signal`. It is a `tbody.grp` like a company's: rendered
+  open, collapsed by the script on load, force-expanded by any active filter. On the company
+  pages a folded row carries its company as a `.cobadge`, because no company head sits above
+  it.
+
+Nothing is removed and the partition does not move. The heading count, "N of M shown" and the
+**Uncertain** tile are the whole list; the tile's sub-line reads "M worth a read" — lanes
+`feed`, `read` and `signal`, which is `dashboard._WORTH_A_READ`, the complement of
+`queue.FOLDED`. The lanes come from `dashboard._uncertain_lanes`, which feeds
+`store.uncertain_with_context` rows to `queue.lane` (each row is its own reading) and takes
+coverage from the import plugins. Without criteria there is no field signal to read, so the
+raw reason shows and nothing folds.
