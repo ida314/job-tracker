@@ -3414,6 +3414,34 @@ def test_a_manual_company_is_never_fetched(tmp_path, monkeypatch):
     assert "- name: Acme\n" in path.read_text()
 
 
+def test_the_board_scope_checkbox_writes_mixed_and_its_absence_writes_nothing(
+    tmp_path, monkeypatch
+):
+    """The one UI for `board_scope`. Ticked, the script sends the box's value; unticked,
+    "" — which must leave the key off the entry rather than write `board_scope: ''`."""
+    page = _page(tmp_path)
+    box = re.search(r'<input class=newco data-key="board_scope" type=checkbox [^>]*>', page)
+    assert box and 'value="mixed"' in box.group(0)
+    script = page[page.rindex("<script>"):]
+    assert "el.checked" in script
+
+    path, h = _companies_handler(tmp_path)
+    _no_sockets(monkeypatch)
+    res = h._api_company({"name": "Mixed Co", "ats": "bespoke", "check_method": "manual",
+                          "tier": "4", "category": "retail", "board_scope": "mixed"})
+    assert res["ok"] and res["saved"]
+    res = h._api_company({"name": "Plain Co", "ats": "bespoke", "check_method": "manual",
+                          "tier": "4", "board_scope": ""})
+    assert res["ok"] and res["saved"]
+    entries = {e["name"]: e for e in yaml.safe_load(path.read_text())}
+    assert entries["Mixed Co"]["board_scope"] == "mixed"
+    assert "board_scope" not in entries["Plain Co"]
+    res = h._api_company({"name": "Typo Co", "ats": "bespoke", "check_method": "manual",
+                          "board_scope": "mixd"})
+    assert not res["ok"] and "board_scope" in res["error"]
+    assert "Typo Co" not in path.read_text()
+
+
 def test_saving_anyway_opens_no_socket_and_writes_a_null_board_name(tmp_path, monkeypatch):
     path, h = _companies_handler(tmp_path)
     _no_sockets(monkeypatch)

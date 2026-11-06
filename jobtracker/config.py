@@ -10,12 +10,15 @@ criteria.yaml from /tuning and appends to companies.yaml from /companies, both t
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 import yaml
 
-from .models import Company
+from .models import BOARD_SCOPES, Company
+
+log = logging.getLogger("jobtracker.config")
 
 # Repo root = parent of the jobtracker/ package directory.
 ROOT = Path(__file__).resolve().parent.parent
@@ -237,6 +240,16 @@ def load_companies(path: str | Path | None = None) -> list[Company]:
         if name in seen:
             raise ValueError(f"{path}: duplicate company name {name!r}")
         seen.add(name)
+        # Loaded whatever it says, and named if it is not a value anything reads: the
+        # loader keeps loading what is on disk, and `curation.validate_new` is where an
+        # unknown value is refused.
+        raw_scope = entry.get("board_scope")
+        board_scope = str(raw_scope) if raw_scope not in (None, "") else None
+        if board_scope is not None and board_scope not in BOARD_SCOPES:
+            log.warning(
+                "%s has board_scope: %s, which nothing reads — the only value is mixed",
+                name, board_scope,
+            )
         companies.append(
             Company(
                 name=str(name),
@@ -253,6 +266,7 @@ def load_companies(path: str | Path | None = None) -> list[Company]:
                 careers_page=str(entry.get("careers_page") or ""),
                 board_url=str(entry.get("board_url") or ""),
                 notes=str(entry.get("notes") or ""),
+                board_scope=board_scope,
             )
         )
     return companies

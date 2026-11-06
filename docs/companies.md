@@ -44,6 +44,7 @@ otherwise silent.
 | `(ats, slug)` is not already tracked | Two names on one board store every req twice and close it twice. |
 | `careers_page` / `board_url` are `http(s)` | A `javascript:` value would land in an href on the dashboard. |
 | `tier` is 1–7 | The bands are three; the numbers are seven. |
+| `board_scope` is absent or `mixed` | A typo (`mixd`) would load, mean nothing, and fold nothing. The loader still loads an unknown value and names it at WARNING; only a *new* entry is refused. |
 | `notes` is under 4000 characters | The server's JSON body cap is 64 KB, and an over-cap body reads as `{}` — which would surface as "name is required", a correct-looking error for the wrong reason. |
 
 A validation failure has **no escape hatch**. It is about whether the entry is coherent;
@@ -52,6 +53,20 @@ only *verification* — whether the world agrees — gets one.
 `test_every_entry_in_the_real_companies_yaml_passes_validation` keeps these rules honest.
 A rule stricter than the file it validates is a rule that gets deleted the first time it
 fires; two were already wrong when they were written.
+
+### `board_scope: mixed`
+
+The form's checkbox, *"Board serves many non-field roles (folds them in Review)"*, writes
+`board_scope: mixed`, placed directly after `category`. It is the only UI for the field.
+It says one thing: this board is a whole employer's careers site, not its engineering
+org — Target Tech's Workday triple carries baristas, stocking and store security, and was
+511 of 1,773 live company-page uncertain rows on 2026-11-05.
+
+**Only the review queue reads it**, to fold that board's uncertain rows. It never reaches
+`match()`, board health or `SUSPECT_EMPTY`, and it is not a fetch filter —
+`appliedFacets` stays empty. A test reads `match.py` and `health.py` and asserts neither
+names it. Leave it off a board that is merely large: the flag is a statement about what
+the board *holds*, not about how many rows it has.
 
 ---
 
