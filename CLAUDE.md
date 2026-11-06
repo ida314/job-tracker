@@ -38,6 +38,7 @@ order; the parser and every `awk`/`grep` sweep depends on it.
 | `board_url` | Full JSON API URL for `api`. On a `manual` entry it is documentation — nothing fetches it. A listings feed that *is* fetched is a job board plugin and carries its own URL in `plugins.yaml`. |
 | `careers_page` | Human-facing careers URL. The fallback when the API breaks. |
 | `category` | Free-text bucket, e.g. `data-infra`, `fintech-backend`. |
+| `board_scope` | Absent, or `mixed`: the board serves many roles outside the field (Target Tech's triple is all of Target's careers). **Affects review folding only** — never `match()`, health or `SUSPECT_EMPTY`, and never a fetch filter. `validate_new` refuses any other value; `load_companies` loads it and names it at WARNING. |
 | `check_method` | `api` or `manual`. Governs what the agent may do. **`aggregator` was retired 2026-09-15**: community listings are job boards now. `curation.validate_new` refuses the value and `/companies` no longer offers it, while `load_companies` still loads a leftover entry and names it at WARNING — the loader must keep loading whatever is on disk. |
 | `status` | `not-open` / `open`. |
 | `last_checked` | Date of the last check. Set on every run, including no-match runs. |

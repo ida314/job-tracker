@@ -34,6 +34,13 @@ class HealthStatus(str, Enum):
     FETCH_FAILED = "fetch_failed"
 
 
+# The values `Company.board_scope` may take; absent is the ordinary board. One set, read
+# by both halves: `config.load_companies` names anything else at WARNING and keeps
+# loading, `curation.validate_new` refuses it. Closed, because a typo ("mixd") would load,
+# mean nothing, and fold nothing — silently.
+BOARD_SCOPES = frozenset({"mixed"})
+
+
 @dataclass(frozen=True)
 class Company:
     """A curated target. Mirrors one entry in companies.yaml.
@@ -56,6 +63,14 @@ class Company:
     #                      entry: nothing fetches it. A listings feed that IS fetched is
     #                      a job board plugin, and carries its own URL in plugins.yaml.
     notes: str = ""
+    # `mixed` (the only value) says this board serves many roles outside the field —
+    # Target Tech's Workday triple is all of Target's careers, baristas included. Read by
+    # the review queue's folding and nothing else: never `match()`, never health, never
+    # SUSPECT_EMPTY. None is the ordinary board.
+    #
+    # Last in the dataclass, not beside `category` as it is on disk, so no positional
+    # construction shifts.
+    board_scope: Optional[str] = None
 
     @property
     def key(self) -> str:

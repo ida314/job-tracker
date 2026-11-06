@@ -296,3 +296,76 @@ def test_a_workday_slug_must_be_a_triple_and_others_still_may_not_hold_a_slash()
         Company(name="X", ats="greenhouse", slug="greenhouse/stripe", check_method="api"),
         existing)
     assert any("not a URL" in e for e in errs)
+
+
+# -- board_scope ---------------------------------------------------------------------
+# One curated value, `mixed`: "this board serves many roles outside the field". Only the
+# review queue reads it. The loader stays permissive, the validator is strict, and the
+# field sits beside `category` on disk.
+def test_board_scope_loads_unknown_value_with_warning(tmp_path, caplog):
+    """The loader must keep loading whatever is on disk. An unknown value is named, not
+    refused — refusing would stop every nightly run over a one-word typo."""
+    path = tmp_path / "companies.yaml"
+    path.write_text(
+        "- name: Typo Co\n  ats: greenhouse\n  slug: typo\n  board_scope: mixd\n"
+        "  check_method: api\n  expected_board_name: null\n"
+        "- name: Target Tech\n  ats: workday\n  slug: target/wd5/targetcareers\n"
+        "  board_scope: mixed\n  check_method: api\n  expected_board_name: null\n"
+        "- name: Plain\n  ats: greenhouse\n  slug: plain\n  check_method: api\n"
+        "  expected_board_name: null\n"
+    )
+    with caplog.at_level("WARNING", logger="jobtracker.config"):
+        loaded = {c.name: c for c in config.load_companies(path)}
+    assert loaded["Typo Co"].board_scope == "mixd"
+    assert loaded["Target Tech"].board_scope == "mixed"
+    assert loaded["Plain"].board_scope is None
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warned) == 1 and "Typo Co" in warned[0] and "mixd" in warned[0]
+
+
+def test_validate_new_refuses_unknown_board_scope():
+    base = dict(name="X", ats="greenhouse", slug="x", check_method="api")
+    assert curation.validate_new(Company(**base), []) == []
+    assert curation.validate_new(Company(**base, board_scope="mixed"), []) == []
+    errs = curation.validate_new(Company(**base, board_scope="mixd"), [])
+    assert any("board_scope" in e for e in errs)
+
+
+def test_insert_entry_places_board_scope_after_category(text):
+    after = curation.insert_entry(
+        text, _company(name="New Co", ats="workday", slug="new/wd5/jobs", tier=2,
+                       category="enterprise-backend", check_method="api",
+                       board_scope="mixed")
+    )
+    before_lines = text.splitlines()
+    after_lines = after.splitlines()
+    # Every pre-existing line survives byte for byte.
+    assert not (collections.Counter(before_lines) - collections.Counter(after_lines))
+    block = after_lines[after_lines.index("- name: New Co"):]
+    keys = [ln[2:].split(":", 1)[0] for ln in block[1:] if ln.startswith("  ")][:6]
+    assert keys == ["ats", "slug", "tier", "category", "board_scope", "check_method"]
+    assert "  board_scope: mixed" in block
+    # And an entry without it carries no key at all, not `board_scope: null`.
+    plain = curation.insert_entry(text, _company(name="P", ats="bespoke", tier=3))
+    assert "board_scope" not in plain
+
+
+def test_board_scope_added_to_an_existing_entry_lands_after_category(text):
+    """The by-hand edit to Target Tech, done by the line-oriented writer: same place."""
+    out = curation.edit_entry(text, "Stripe", {"board_scope": "mixed"})
+    keys = [ln[2:].split(":", 1)[0] for ln in out.split("- name: Elastic")[0].splitlines()
+            if ln.startswith("  ") and not ln.startswith("    ")]
+    assert keys[keys.index("category") + 1] == "board_scope"
+
+
+def test_board_scope_never_reaches_match():
+    """It folds rows in Review and does nothing else. A board that serves baristas still
+    has its engineering reqs judged by the same rules, and its health is still a
+    statement about the board."""
+    from pathlib import Path
+
+    import jobtracker
+
+    root = Path(jobtracker.__file__).parent
+    for name in ("match.py", "health.py"):
+        assert "board_scope" not in (root / name).read_text(), name
